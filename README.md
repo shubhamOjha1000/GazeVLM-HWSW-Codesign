@@ -34,6 +34,7 @@ src/
 ├── dataprep/        build the feature CSV that training consumes
 ├── temporal/        the original similarity-CSV builder
 ├── loss1/           self-supervised gaze-rate feature learning (InfoNCE)
+├── loss2/           similarity regression: predict [S_frame, S_gaze] from gaze
 ├── spatial/         placeholder
 └── hwsw_codesign/   placeholder
 configs/             pipeline configuration
@@ -59,7 +60,16 @@ python -m src.dataprep.build_feature_csv \
 
 # Loss 1: self-supervised gaze-rate feature learning
 python -m src.loss1.train --csv data/feature_dataset.csv --out_dir runs/loss1
+
+# Loss 2: predict [S_frame, S_gaze] from gaze alone  (same CSV, no new data)
+python -m src.loss2.train --csv data/feature_dataset.csv --out_dir runs/loss2
+python -m src.loss2.train --csv data/feature_dataset.csv --shuffle_control   # control
 ```
+
+Loss 2 is the more interpretable of the two: it is a regression whose baseline is
+"predict the training mean", so a model that fails to beat that on held-out videos has
+demonstrably found no signal. Both trainers support `--shuffle_control`, which destroys
+the frame↔gaze correspondence and must fail.
 
 Every video is used in full by default. AEA sequences average ~193 s (67–456 s), so at
 1 FPS that is ~190 rows each. `--max_seconds N` trims a debug run.
