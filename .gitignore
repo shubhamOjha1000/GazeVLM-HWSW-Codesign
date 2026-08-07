@@ -1,0 +1,32 @@
+# --- personal / secret -------------------------------------------------------
+# AEA download-links JSON holds signed URLs tied to a personal account
+*download_urls*.json
+
+# --- macOS -------------------------------------------------------------------
+.DS_Store
+
+# --- datasets and run artifacts ----------------------------------------------
+data/
+runs/
+raw/
+frames_1fps/
+features/
+*.mp4
+*.vrs
+*.jpg
+*.png
+*.npz
+*.csv
+/content/
+
+# --- reference papers (kept locally, too large to track) ---------------------
+*.pdf
+
+# --- python ------------------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.venv/
+venv/
+*.egg-info/

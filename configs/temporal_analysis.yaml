@@ -1,0 +1,14 @@
+target_fps: 1.0
+patch_px: 64
+dino_input: 224
+fov_x_deg: 80.0
+fov_y_deg: 80.0
+yaw_sign: 1
+pitch_sign: -1
+projection: calibration      # switched from pinhole to the accurate projection
+rotate_cw90: true            # projected pixels land in the NATIVE (rotated) sensor frame;
+                             # the preview MP4 is upright, so rotate to match.
+                             # Set false only when projecting onto raw VRS images.
+gaze_depth_m: 1.0            # depth along the gaze ray used for reprojection
+calibration_path: null       # auto-found from the downloaded mps_slam_calibration if null
+dino_input_patch: 98
