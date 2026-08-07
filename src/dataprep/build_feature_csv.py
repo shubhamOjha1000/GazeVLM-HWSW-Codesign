@@ -6,23 +6,29 @@ directly:
 
     idx, sequence, feat_frame_1, feat_frame_2,
     gaze_patch_token_sim, frame_similarity, n_velocities, gaze_rates_window,
-    n_gaze_in_gap, n_oof_in_gap, gaze_xy_window, gaze_vec3d_window,
+    n_gaze_in_gap, n_oof_in_gap, gaze_xy_window, gaze_vec3d_rates_window,
     n_imu_in_gap, imu_window, imu_accel_mag_mean, imu_gyro_mag_mean
 
-The last four are the RAW per-sample gaze in the window, one entry per gaze sample
-(~10 at 10 Hz), as opposed to `gaze_rates_window`, which holds the n-1 = ~9 velocities
-BETWEEN those samples:
+The gaze window is described two ways -- WHERE the eye pointed and HOW FAST it moved:
 
-    gaze_xy_window     "x,y;x,y;..."        projected image coords, normalised [0, 1]
-    gaze_vec3d_window  "x,y,z;x,y,z;..."    unit gaze direction on the sphere
-    n_gaze_in_gap      how many samples the window actually holds
-    n_oof_in_gap       how many of them fell OUTSIDE the lens (see below)
+    gaze_xy_window           "x,y;..."      ~10 x 2, projected image coords in [0, 1]
+    gaze_vec3d_rates_window  "x,y,z;..."     ~9 x 3, d/dt of the 3D unit gaze vector, 1/s
+    n_gaze_in_gap            how many samples the window actually holds
+    n_oof_in_gap             how many of them fell OUTSIDE the lens (see below)
+
+`gaze_vec3d_rates_window` is the 3D counterpart of `gaze_rates_window` and has the same
+n-1 length, so the two line up step for step. It is the better of the two for speed:
+because the gaze vector lies on the unit sphere, the NORM of its three channels is the
+exact angular speed, whereas `gaze_rates_window`'s omega_mag treats yaw and pitch as
+orthogonal and overstates the yaw term by 1/cos(pitch) -- ~33% at the -41 deg pitch this
+dataset reaches. Its three channels are not independent: dv/dt is perpendicular to v, so
+they carry two degrees of freedom, not three.
 
 `n_oof_in_gap` matters: out-of-FOV samples are written as (0.5, 0.5), which is
 indistinguishable from a genuine centre gaze. Rows with a non-zero count have invented
-coordinates in `gaze_xy_window` and should be filtered or masked, not trusted. The
-`gaze_vec3d_window` entry is unaffected -- it is pure trigonometry on yaw/pitch and needs
-no camera model, so it is always real.
+coordinates in `gaze_xy_window` and should be filtered or masked, not trusted. Both rate
+columns are unaffected -- they are pure trigonometry on yaw/pitch and need no camera
+model, so they are always real.
 
 The IMU columns come from the VRS, which is already downloaded for the calibration, so
 they cost extraction time but no extra bandwidth:
@@ -262,6 +268,7 @@ def main():
             # one projection implementation.
             win = gg.window_gaze_samples(g_ts, g_yaw, g_pit, f_ts[i-1], f_ts[i],
                                          project=project)
+            vrat = gg.window_gaze_vec_rates(g_ts, g_yaw, g_pit, f_ts[i-1], f_ts[i])
 
             # ---- IMU for the same window ------------------------------------
             n_bins = int(round(a.imu_hz * (f_ts[i] - f_ts[i-1]) / 1e6))
@@ -296,8 +303,8 @@ def main():
                 n_oof_in_gap=win["n_oof"],           # (0.5,0.5) fillers -> do not trust
                 gaze_xy_window=";".join(
                     f"{x:.4f},{y:.4f}" for x, y in zip(win["x"], win["y"])),
-                gaze_vec3d_window=";".join(
-                    f"{v[0]:.5f},{v[1]:.5f},{v[2]:.5f}" for v in win["vec3d"]),
+                gaze_vec3d_rates_window=";".join(
+                    f"{r[0]:.5f},{r[1]:.5f},{r[2]:.5f}" for r in vrat["rates"]),
                 # --- IMU: accel xyz (m/s^2) then gyro xyz (rad/s) --------------------
                 n_imu_in_gap=n_imu,                  # RAW count, not the number of bins
                 imu_window=";".join(

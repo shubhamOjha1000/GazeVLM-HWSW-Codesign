@@ -37,13 +37,22 @@ class Loss1Dataset(Dataset):
     """
 
     def __init__(self, csv_path, sequences=None, seq_len=9, stats=None,
-                 feat_key="cls", root=None, shuffle_rates=False, shuffle_seed=0):
+                 feat_key="cls", root=None, shuffle_rates=False, shuffle_seed=0,
+                 rates_col="gaze_rates_window"):
         df = pd.read_csv(csv_path)
         if sequences is not None:
             df = df[df["sequence"].isin(sequences)]
         self.df = df.reset_index(drop=True)
         self.seq_len = int(seq_len)
         self.feat_key = feat_key
+        # which 9x3 signal feeds f_M. "gaze_vec3d_rates_window" is the alternative:
+        # same shape, but its norm is the sphere-exact angular speed, whereas
+        # gaze_rates_window's omega_mag over-reads by 1/cos(pitch). Pass the SAME value
+        # to compute_channel_stats -- the two columns have different scales.
+        self.rates_col = rates_col
+        if rates_col not in self.df.columns:
+            raise KeyError(f"CSV has no column {rates_col!r}; "
+                           f"available: {list(self.df.columns)}")
         self.root = root                     # re-root paths if the CSV moved machines
         self.stats = stats                   # (mean(3,), std(3,)) or None
 
@@ -88,7 +97,7 @@ class Loss1Dataset(Dataset):
         # normally the rates come from this same row; under the shuffle control they
         # come from another, so frames and gaze no longer describe the same moment
         rr = r if self.perm is None else self.df.iloc[int(self.perm[i])]
-        rates = parse_rates(rr["gaze_rates_window"])         # (L, 3)
+        rates = parse_rates(rr[self.rates_col])              # (L, 3)
         if self.stats is not None:
             mean, std = self.stats
             rates = (rates - mean) / std
@@ -113,17 +122,22 @@ class Loss1Dataset(Dataset):
         )
 
 
-def compute_channel_stats(csv_path, sequences=None, eps=1e-6):
+def compute_channel_stats(csv_path, sequences=None, eps=1e-6,
+                          rates_col="gaze_rates_window"):
     """Per-channel mean/std over every step in the (training) split.
 
     Worth doing: omega_mag is strictly positive while the other two are zero-centred,
     and the three have different spreads. Standardising stops the magnitude channel
     dominating the first conv.
+
+    `rates_col` must match whatever the dataset is told to read -- gaze_rates_window and
+    gaze_vec3d_rates_window are on different scales, so statistics from one would
+    mis-standardise the other.
     """
     df = pd.read_csv(csv_path)
     if sequences is not None:
         df = df[df["sequence"].isin(sequences)]
-    allr = [parse_rates(s) for s in df["gaze_rates_window"]]
+    allr = [parse_rates(s) for s in df[rates_col]]
     allr = np.concatenate([a for a in allr if len(a)], axis=0)   # (total_steps, 3)
     mean = allr.mean(axis=0).astype(np.float32)
     std = allr.std(axis=0).astype(np.float32)

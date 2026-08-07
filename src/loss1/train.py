@@ -46,6 +46,11 @@ def parse_args():
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--seq_len", type=int, default=9,
                     help="steps per window; 9 for a 1 s window at 10 Hz")
+    ap.add_argument("--rates_col", default="gaze_rates_window",
+                    choices=["gaze_rates_window", "gaze_vec3d_rates_window"],
+                    help="which 9x3 signal feeds f_M. gaze_vec3d_rates_window is the "
+                         "same shape but sphere-exact: its norm is the true angular "
+                         "speed, while omega_mag over-reads by 1/cos(pitch)")
 
     ap.add_argument("--val_frac", type=float, default=0.2, help="fraction of VIDEOS held out")
     ap.add_argument("--max_per_video", type=int, default=8,
@@ -111,16 +116,19 @@ def main():
         print("  !! only one video available -- no held-out split, val metrics disabled")
 
     # statistics from the TRAIN split only, so the val split stays untouched
-    stats = compute_channel_stats(a.csv, train_seqs)
+    stats = compute_channel_stats(a.csv, train_seqs, rates_col=a.rates_col)
+    print(f"input signal: {a.rates_col}")
     print(f"rate channel mean {np.round(stats[0], 4)}  std {np.round(stats[1], 4)}")
 
     if a.shuffle_control:
         print("\n*** SHUFFLE CONTROL: frames paired with the WRONG gaze rates ***")
         print("    expect loss to stay near ln(batch) and top-1 near chance\n")
     ds_tr = Loss1Dataset(a.csv, train_seqs, a.seq_len, stats, root=a.feat_root,
-                         shuffle_rates=a.shuffle_control, shuffle_seed=a.seed)
+                         shuffle_rates=a.shuffle_control, shuffle_seed=a.seed,
+                         rates_col=a.rates_col)
     ds_va = Loss1Dataset(a.csv, val_seqs, a.seq_len, stats, root=a.feat_root,
-                         shuffle_rates=a.shuffle_control, shuffle_seed=a.seed + 1) \
+                         shuffle_rates=a.shuffle_control, shuffle_seed=a.seed + 1,
+                         rates_col=a.rates_col) \
         if val_seqs else None
     print(f"rows  : {len(ds_tr)} train" + (f" / {len(ds_va)} val" if ds_va else ""))
 

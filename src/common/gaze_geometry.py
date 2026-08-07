@@ -64,6 +64,44 @@ def window_gaze_rates(g_ts_us, g_yaw, g_pit, t0_us, t1_us):
         n_samples=int(len(ts)), n_velocities=int(len(dts)),
     )
 
+def window_gaze_vec_rates(g_ts_us, g_yaw, g_pit, t0_us, t1_us):
+    """Per-step derivative of the 3D unit gaze vector in [t0, t1): (n-1, 3), units 1/s.
+
+        dvx/dt, dvy/dt, dvz/dt = [v(t) - v(t - dt)] / dt
+
+    The 3D counterpart of `window_gaze_rates`, and the same shape -- n samples give n-1
+    steps -- so the two columns line up step for step.
+
+    Worth knowing: because v lies on the UNIT SPHERE, ||dv/dt|| is the true angular speed,
+    exactly. That makes it strictly better than `window_gaze_rates`' omega_mag, which
+    treats yaw and pitch as orthogonal and so overstates the yaw term by 1/cos(pitch)
+    -- about 33% at the -41 deg pitch this dataset reaches. If a sphere-exact speed is
+    wanted, take the norm of these three channels rather than omega_mag.
+
+    Unlike yaw/pitch rates these channels are free of the pole singularity, but they are
+    not independent: v is a unit vector, so dv/dt is perpendicular to v and the three
+    channels carry only two degrees of freedom.
+    """
+    m = (g_ts_us >= t0_us) & (g_ts_us < t1_us)
+    ts, ya, pi = g_ts_us[m], g_yaw[m], g_pit[m]
+    good = np.isfinite(ya) & np.isfinite(pi)
+    ts, ya, pi = ts[good], ya[good], pi[good]
+    if len(ts) < 2:
+        return dict(rates=np.zeros((0, 3), dtype=np.float64),
+                    n_samples=int(len(ts)), n_velocities=0)
+
+    # same construction as yawpitch_to_unit_vec, vectorised over the window
+    v = np.stack([np.cos(pi) * np.sin(ya),
+                  np.sin(pi),
+                  np.cos(pi) * np.cos(ya)], axis=1)
+    v = v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-8)
+
+    dts = np.diff(ts) / 1e6
+    dts = np.where(dts <= 0, 1e-6, dts)
+    return dict(rates=np.diff(v, axis=0) / dts[:, None],      # (n-1, 3)
+                n_samples=int(len(ts)), n_velocities=int(len(dts)))
+
+
 def window_gaze_samples(g_ts_us, g_yaw, g_pit, t0_us, t1_us, project=None):
     """All valid raw gaze samples in [t0, t1): per-sample yaw, pitch, 3D unit vector,
     projected (x, y) and the out-of-FOV flag. Populates the granular per-window columns

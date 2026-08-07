@@ -50,6 +50,9 @@ def parse_args():
     ap.add_argument("--width", type=int, default=128, help="gaze-encoder conv width")
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--seq_len", type=int, default=9)
+    ap.add_argument("--rates_col", default="gaze_rates_window",
+                    choices=["gaze_rates_window", "gaze_vec3d_rates_window"],
+                    help="which 9x3 signal feeds f_M; the vec3d form is sphere-exact")
 
     ap.add_argument("--joint", action="store_true",
                     help="also train Loss 1: L = L_sim + nce_weight * L_NCE")
@@ -132,14 +135,15 @@ def main():
         print("\n*** SHUFFLE CONTROL: frames paired with the WRONG gaze rates ***")
         print("    expect the model to do no better than predicting the mean\n")
 
-    rstats = compute_channel_stats(a.csv, train_seqs)          # inputs
-    tmean, tstd = compute_target_stats(a.csv, train_seqs)      # targets
+    rstats = compute_channel_stats(a.csv, train_seqs, rates_col=a.rates_col)   # inputs
+    tmean, tstd = compute_target_stats(a.csv, train_seqs)                      # targets
+    print(f"input signal: {a.rates_col}")
     print(f"rate  channels mean {np.round(rstats[0], 4)}  std {np.round(rstats[1], 4)}")
     print(f"target mean {np.round(tmean, 4)}  std {np.round(tstd, 4)}   {list(TARGETS)}")
 
     mk = lambda seqs, sd: Loss2Dataset(
         a.csv, seqs, a.seq_len, rstats, root=a.feat_root, target_stats=(tmean, tstd),
-        shuffle_rates=a.shuffle_control, shuffle_seed=sd)
+        shuffle_rates=a.shuffle_control, shuffle_seed=sd, rates_col=a.rates_col)
     ds_tr = mk(train_seqs, a.seed)
     ds_va = mk(val_seqs, a.seed + 1) if val_seqs else None
     print(f"rows  : {len(ds_tr)} train" + (f" / {len(ds_va)} val" if ds_va else ""))
