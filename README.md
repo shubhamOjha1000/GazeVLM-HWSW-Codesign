@@ -22,9 +22,15 @@ Aria Everyday Activities sequence → one row per consecutive frame pair:
 | 2 | project gaze onto each frame, encode with frozen DINOv2 (CLS + patch grid) |
 | 3 | per pair: whole-frame cosine and gaze-patch cosine — the teacher labels |
 | 4 | per pair: a 3-channel gaze-rate signal (ω_yaw, ω_pitch, ω_mag) — the model input |
+| 5 | per pair: the raw per-sample gaze (image xy, unit vectors) and the IMU window |
 
 The two cosines are labels used at training time only. The gaze rates are the only thing
 the deployed gate would see.
+
+**The IMU is diagnostic, not deployed.** The premise is that the gate runs on gaze alone.
+The IMU columns exist to test the chain `eye velocity →(VOR)→ head motion → pixels change`
+one link at a time, and to train an IMU-input upper bound — if IMU predicts the labels and
+gaze does not, the ceiling is the VOR assumption rather than the architecture.
 
 ## Layout
 
@@ -80,6 +86,12 @@ the frame↔gaze correspondence and must fail.
 
 Every video is used in full by default. AEA sequences average ~193 s (67–456 s), so at
 1 FPS that is ~190 rows each. `--max_seconds N` trims a debug run.
+
+`imu_window` is **binned** to `--imu_hz` (default 10, matching the ~10 gaze samples per
+window). Raw IMU is ~1 kHz: `--imu_hz 0` keeps every sample and costs 51 KB per row
+against 1.4 KB — measured, and 1.4 GB across a full 143-video build. `--no_imu` skips
+extraction (~30–60 s per video); it needs no extra download, since the VRS is already
+fetched for the calibration.
 
 Features are encoded once and cached as `.npz`, so training never touches the video, the
 VRS, or DINOv2 again.

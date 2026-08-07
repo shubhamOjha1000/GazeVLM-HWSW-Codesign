@@ -6,7 +6,8 @@ directly:
 
     idx, sequence, feat_frame_1, feat_frame_2,
     gaze_patch_token_sim, frame_similarity, n_velocities, gaze_rates_window,
-    n_gaze_in_gap, n_oof_in_gap, gaze_xy_window, gaze_vec3d_window
+    n_gaze_in_gap, n_oof_in_gap, gaze_xy_window, gaze_vec3d_window,
+    n_imu_in_gap, imu_window, imu_accel_mag_mean, imu_gyro_mag_mean
 
 The last four are the RAW per-sample gaze in the window, one entry per gaze sample
 (~10 at 10 Hz), as opposed to `gaze_rates_window`, which holds the n-1 = ~9 velocities
@@ -23,8 +24,25 @@ coordinates in `gaze_xy_window` and should be filtered or masked, not trusted. T
 `gaze_vec3d_window` entry is unaffected -- it is pure trigonometry on yaw/pitch and needs
 no camera model, so it is always real.
 
-Unpack either column with `src.loss1.dataset.parse_rates`, which splits on ';' then ','
-and so handles both the 2-wide and 3-wide forms.
+The IMU columns come from the VRS, which is already downloaded for the calibration, so
+they cost extraction time but no extra bandwidth:
+
+    n_imu_in_gap        RAW IMU samples in the window (~800-1000 at Aria's rate)
+    imu_window          "ax,ay,az,gx,gy,gz;..."  --imu_hz bins x 6, m/s^2 and rad/s
+    imu_accel_mag_mean  mean ||accel|| over the RAW samples
+    imu_gyro_mag_mean   mean ||gyro||  over the RAW samples
+
+`imu_window` is BINNED, not raw: at ~1 kHz a 1 s window holds ~1000x6 values, which is
+~50 KB per CSV row and over a GB across all 143 sequences. `--imu_hz 10` (the default)
+averages into 10 bins so the column lines up one-to-one with `gaze_xy_window`. Pass
+`--imu_hz 0` for every raw sample, and check the resulting file size before scaling up.
+
+The two magnitude columns are computed on the UNBINNED samples on purpose: averaging
+vectors within a bin cancels equal-and-opposite motion, so a mean of the binned rows
+would understate how much the head actually moved.
+
+Unpack any of the packed columns with `src.loss1.dataset.parse_rates`, which splits on
+';' then ',' and so handles the 2-, 3- and 6-wide forms alike.
 
 Unlike `build_similarity_csv.py`, which stores paths to JPEG frames, this stores paths to
 **encoded features** -- one .npz per frame holding the CLS token, the patch grid, the
@@ -87,6 +105,12 @@ def parse_args():
                     help="cap how many seconds of each video to use; 0 (the default) "
                          "means the whole video. Capping discards footage already paid "
                          "for in the download, so only set it to trim run time.")
+    ap.add_argument("--imu_hz", type=float, default=10.0,
+                    help="bins per second for imu_window; 10 (the default) matches the "
+                         "~10 gaze samples per window. 0 keeps every raw sample, which "
+                         "is ~50 KB per CSV row -- check the file size before scaling.")
+    ap.add_argument("--no_imu", action="store_true",
+                    help="skip IMU extraction entirely (saves ~30-60 s per video)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--cleanup_raw", action="store_true",
                     help="delete each video's raw files once its features are written, "
@@ -196,6 +220,24 @@ def main():
         print(f"   frames {len(paths)}   gaze {len(g_ts):,} @ "
               f"{1/np.median(np.diff(g_ts)/1e6):.1f} Hz over {g_ts[-1]/1e6:.0f} s")
 
+        # ---- IMU, from the VRS already on disk for the calibration ---------------
+        imu_ts, imu_arr = (None, None)
+        if not a.no_imu:
+            t_imu = time.time()
+            imu_ts, imu_arr = io.load_imu_from_vrs(vrs_path)
+            if imu_ts is None:
+                print("   IMU MISSING -- imu columns will be empty for this sequence")
+            else:
+                r = io.measure_imu_rate(imu_ts)
+                print(f"   imu    {r['n_samples']:,} @ {r['implied_hz']:.0f} Hz over "
+                      f"{r['span_s']:.0f} s   ({time.time()-t_imu:.0f}s to extract)")
+                # the three streams are each rebased to their own first sample, so a
+                # span mismatch means the frame<->IMU join is off, not just noisy
+                drift = abs(r["span_s"] - g_ts[-1] / 1e6)
+                if drift > 2.0:
+                    print(f"   !! imu span differs from gaze by {drift:.1f}s -- the "
+                          f"windows may not line up")
+
         # ---- the projector is per sequence: calibration is device-specific -------
         project = gg.make_gaze_projector("calibration", vrs_path,
                                          depth_m=depth_m, rotate_cw90=rotate_cw90)
@@ -221,6 +263,24 @@ def main():
             win = gg.window_gaze_samples(g_ts, g_yaw, g_pit, f_ts[i-1], f_ts[i],
                                          project=project)
 
+            # ---- IMU for the same window ------------------------------------
+            n_bins = int(round(a.imu_hz * (f_ts[i] - f_ts[i-1]) / 1e6))
+            if a.imu_hz > 0 and n_bins > 0:
+                iw = io.window_imu_binned(imu_ts, imu_arr, f_ts[i-1], f_ts[i], n_bins)
+                imu_rows, n_imu = iw["rows"], iw["n_raw"]
+            else:                                   # --imu_hz 0 -> every raw sample
+                iw = io.window_imu_samples(imu_ts, imu_arr, f_ts[i-1], f_ts[i])
+                imu_rows, n_imu = iw["rows"], iw["n"]
+
+            # magnitudes on the UNBINNED samples: averaging vectors within a bin
+            # cancels opposing motion and would understate the true head movement
+            a_mag = g_mag = float("nan")
+            if imu_ts is not None and n_imu:
+                m = (imu_ts >= f_ts[i-1]) & (imu_ts < f_ts[i])
+                raw = imu_arr[m]
+                a_mag = float(np.linalg.norm(raw[:, :3], axis=1).mean())
+                g_mag = float(np.linalg.norm(raw[:, 3:], axis=1).mean())
+
             rows.append(dict(
                 idx=len(rows),                       # GLOBAL, across all videos
                 sequence=seq,
@@ -238,6 +298,12 @@ def main():
                     f"{x:.4f},{y:.4f}" for x, y in zip(win["x"], win["y"])),
                 gaze_vec3d_window=";".join(
                     f"{v[0]:.5f},{v[1]:.5f},{v[2]:.5f}" for v in win["vec3d"]),
+                # --- IMU: accel xyz (m/s^2) then gyro xyz (rad/s) --------------------
+                n_imu_in_gap=n_imu,                  # RAW count, not the number of bins
+                imu_window=";".join(
+                    ",".join(f"{v:.5f}" for v in r) for r in imu_rows),
+                imu_accel_mag_mean=round(a_mag, 5),
+                imu_gyro_mag_mean=round(g_mag, 5),
             ))
 
         n_rows = len(rows) - n_before
@@ -251,6 +317,8 @@ def main():
                             # (0.5, 0.5) fillers sit in gaze_xy_window
                             oof_samples=sum(r["n_oof_in_gap"] for r in new),
                             samples_per_row=round(n_samp / max(1, n_rows), 1),
+                            imu_per_row=round(
+                                sum(r["n_imu_in_gap"] for r in new) / max(1, n_rows), 1),
                             feat_MB=round(feat_mb, 1),
                             secs=round(time.time() - t_seq, 1)))
         print(f"   -> {n_rows} rows   (running total {len(rows)})   "
