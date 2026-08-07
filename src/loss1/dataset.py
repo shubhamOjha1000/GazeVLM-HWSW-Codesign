@@ -63,7 +63,17 @@ class Loss1Dataset(Dataset):
         return len(self.df)
 
     def _path(self, p):
-        return os.path.join(self.root, os.path.basename(p)) if self.root else p
+        """Re-root a feature path, keeping the <sequence>/<file> tail.
+
+        The basename alone is NOT unique: every sequence folder contains a
+        feat_00000.npz, so re-rooting on the basename would silently load another
+        video's features. The last two components are what identify a file.
+        """
+        if not self.root:
+            return p
+        parts = p.replace("\\", "/").rstrip("/").split("/")
+        tail = os.path.join(*parts[-2:]) if len(parts) >= 2 else parts[-1]
+        return os.path.join(self.root, tail)
 
     def _feat(self, p):
         with np.load(self._path(p)) as z:
