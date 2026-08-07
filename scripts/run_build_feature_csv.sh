@@ -15,7 +15,7 @@ python -m src.dataprep.build_feature_csv \
   --feat_dir    "data/features" \
   --n_videos    5 \
   --seed        0 \
-  --max_seconds 90 \
+  --max_seconds 0 \
   --cleanup_raw
 
 # then:
@@ -25,5 +25,5 @@ python -m src.dataprep.build_feature_csv \
 # pin specific sequences instead of sampling:
 #   --seqs loc1_script1_seq6_rec1 loc2_script4_seq7_rec1
 #
-# whole videos rather than the first 90 s (~212 rows each instead of 89):
-#   --max_seconds 0
+# trim to the first N seconds of each video, to shorten a debug run:
+#   --max_seconds 90

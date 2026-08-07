@@ -24,7 +24,11 @@ Example
         --raw_dir    data/raw \
         --frames_dir data/frames_1fps \
         --feat_dir   data/features \
-        --n_videos 5 --max_seconds 90 --cleanup_raw
+        --n_videos 5 --cleanup_raw
+
+By default every video is used in full. AEA sequences average ~193 s (range 67-456 s), so
+at 1 FPS that is ~190 rows each. Pass --max_seconds only to trim a debug run: capping
+discards footage the download has already paid for.
 """
 
 import argparse
@@ -60,8 +64,10 @@ def parse_args():
     ap.add_argument("--seed", type=int, default=0)
 
     ap.add_argument("--target_fps", type=float, default=1.0)
-    ap.add_argument("--max_seconds", type=float, default=90.0,
-                    help="cap per video; 0 or negative means the whole video")
+    ap.add_argument("--max_seconds", type=float, default=0.0,
+                    help="cap how many seconds of each video to use; 0 (the default) "
+                         "means the whole video. Capping discards footage already paid "
+                         "for in the download, so only set it to trim run time.")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--cleanup_raw", action="store_true",
                     help="delete each video's raw files once its features are written, "

@@ -55,11 +55,14 @@ python -m src.dataprep.build_feature_csv \
   --urls_json aea_download_urls.json \
   --out_csv data/feature_dataset.csv \
   --raw_dir data/raw --frames_dir data/frames_1fps --feat_dir data/features \
-  --n_videos 5 --max_seconds 90 --cleanup_raw
+  --n_videos 5 --cleanup_raw
 
 # Loss 1: self-supervised gaze-rate feature learning
 python -m src.loss1.train --csv data/feature_dataset.csv --out_dir runs/loss1
 ```
+
+Every video is used in full by default. AEA sequences average ~193 s (67–456 s), so at
+1 FPS that is ~190 rows each. `--max_seconds N` trims a debug run.
 
 Features are encoded once and cached as `.npz`, so training never touches the video, the
 VRS, or DINOv2 again.
