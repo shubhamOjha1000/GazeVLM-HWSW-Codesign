@@ -5,7 +5,26 @@ frame, and writes a single CSV whose rows `src.loss1.dataset.Loss1Dataset` consu
 directly:
 
     idx, sequence, feat_frame_1, feat_frame_2,
-    gaze_patch_token_sim, frame_similarity, n_velocities, gaze_rates_window
+    gaze_patch_token_sim, frame_similarity, n_velocities, gaze_rates_window,
+    n_gaze_in_gap, n_oof_in_gap, gaze_xy_window, gaze_vec3d_window
+
+The last four are the RAW per-sample gaze in the window, one entry per gaze sample
+(~10 at 10 Hz), as opposed to `gaze_rates_window`, which holds the n-1 = ~9 velocities
+BETWEEN those samples:
+
+    gaze_xy_window     "x,y;x,y;..."        projected image coords, normalised [0, 1]
+    gaze_vec3d_window  "x,y,z;x,y,z;..."    unit gaze direction on the sphere
+    n_gaze_in_gap      how many samples the window actually holds
+    n_oof_in_gap       how many of them fell OUTSIDE the lens (see below)
+
+`n_oof_in_gap` matters: out-of-FOV samples are written as (0.5, 0.5), which is
+indistinguishable from a genuine centre gaze. Rows with a non-zero count have invented
+coordinates in `gaze_xy_window` and should be filtered or masked, not trusted. The
+`gaze_vec3d_window` entry is unaffected -- it is pure trigonometry on yaw/pitch and needs
+no camera model, so it is always real.
+
+Unpack either column with `src.loss1.dataset.parse_rates`, which splits on ';' then ','
+and so handles both the 2-wide and 3-wide forms.
 
 Unlike `build_similarity_csv.py`, which stores paths to JPEG frames, this stores paths to
 **encoded features** -- one .npz per frame holding the CLS token, the patch grid, the
@@ -195,6 +214,12 @@ def main():
             patch_sim = enc.cosine(pt0, pt1)
 
             rat = gg.window_gaze_rates(g_ts, g_yaw, g_pit, f_ts[i-1], f_ts[i])
+            # the raw samples the rates were differenced FROM: ~10 per 1 s window.
+            # Reuses the same `project` object as the per-frame gaze, so the CPF->camera
+            # transform and the native->upright rotation apply here too -- there is only
+            # one projection implementation.
+            win = gg.window_gaze_samples(g_ts, g_yaw, g_pit, f_ts[i-1], f_ts[i],
+                                         project=project)
 
             rows.append(dict(
                 idx=len(rows),                       # GLOBAL, across all videos
@@ -206,12 +231,27 @@ def main():
                 n_velocities=rat["n_velocities"],
                 gaze_rates_window=";".join(
                     f"{r[0]:.5f},{r[1]:.5f},{r[2]:.5f}" for r in rat["rates"]),
+                # --- raw per-sample gaze: n entries, vs n-1 above --------------------
+                n_gaze_in_gap=win["n"],
+                n_oof_in_gap=win["n_oof"],           # (0.5,0.5) fillers -> do not trust
+                gaze_xy_window=";".join(
+                    f"{x:.4f},{y:.4f}" for x, y in zip(win["x"], win["y"])),
+                gaze_vec3d_window=";".join(
+                    f"{v[0]:.5f},{v[1]:.5f},{v[2]:.5f}" for v in win["vec3d"]),
             ))
 
         n_rows = len(rows) - n_before
         feat_mb = sum(os.path.getsize(f) for f in feat_paths) / 1e6
+        new = rows[n_before:]
+        n_samp = sum(r["n_gaze_in_gap"] for r in new)
         per_seq.append(dict(sequence=seq, frames=len(paths), rows=n_rows,
-                            oof_frames=oof, feat_MB=round(feat_mb, 1),
+                            oof_frames=oof,
+                            gaze_samples=n_samp,
+                            # per-sample out-of-FOV rate; a high value means many
+                            # (0.5, 0.5) fillers sit in gaze_xy_window
+                            oof_samples=sum(r["n_oof_in_gap"] for r in new),
+                            samples_per_row=round(n_samp / max(1, n_rows), 1),
+                            feat_MB=round(feat_mb, 1),
                             secs=round(time.time() - t_seq, 1)))
         print(f"   -> {n_rows} rows   (running total {len(rows)})   "
               f"features {feat_mb:.1f} MB   {time.time()-t_seq:.0f}s")
