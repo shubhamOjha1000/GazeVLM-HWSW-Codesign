@@ -37,7 +37,7 @@ class Loss1Dataset(Dataset):
     """
 
     def __init__(self, csv_path, sequences=None, seq_len=9, stats=None,
-                 feat_key="cls", root=None):
+                 feat_key="cls", root=None, shuffle_rates=False, shuffle_seed=0):
         df = pd.read_csv(csv_path)
         if sequences is not None:
             df = df[df["sequence"].isin(sequences)]
@@ -46,6 +46,14 @@ class Loss1Dataset(Dataset):
         self.feat_key = feat_key
         self.root = root                     # re-root paths if the CSV moved machines
         self.stats = stats                   # (mean(3,), std(3,)) or None
+
+        # CONTROL: take the gaze rates from a DIFFERENT row than the frames, destroying
+        # the correspondence the loss is supposed to learn. A run with this on must fail
+        # to beat chance -- otherwise a real run's success is an artefact of the setup
+        # (batch memorisation, a leaky split) rather than evidence of the premise.
+        self.perm = None
+        if shuffle_rates:
+            self.perm = np.random.default_rng(shuffle_seed).permutation(len(self.df))
 
         seqs = sorted(self.df["sequence"].unique())
         self.seq_to_id = {s: i for i, s in enumerate(seqs)}
@@ -67,7 +75,10 @@ class Loss1Dataset(Dataset):
         z0 = self._feat(r["feat_frame_1"])
         zt = self._feat(r["feat_frame_2"])
 
-        rates = parse_rates(r["gaze_rates_window"])          # (L, 3)
+        # normally the rates come from this same row; under the shuffle control they
+        # come from another, so frames and gaze no longer describe the same moment
+        rr = r if self.perm is None else self.df.iloc[int(self.perm[i])]
+        rates = parse_rates(rr["gaze_rates_window"])         # (L, 3)
         if self.stats is not None:
             mean, std = self.stats
             rates = (rates - mean) / std

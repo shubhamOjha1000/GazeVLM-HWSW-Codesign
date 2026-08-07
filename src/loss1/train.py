@@ -54,6 +54,10 @@ def parse_args():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--dry_run", action="store_true", help="two batches, then stop")
+    ap.add_argument("--shuffle_control", action="store_true",
+                    help="CONTROL: pair each frame pair with ANOTHER row's gaze rates. "
+                         "Must fail to beat chance; if it succeeds, a real run's result "
+                         "is an artefact rather than evidence.")
     return ap.parse_args()
 
 
@@ -110,8 +114,13 @@ def main():
     stats = compute_channel_stats(a.csv, train_seqs)
     print(f"rate channel mean {np.round(stats[0], 4)}  std {np.round(stats[1], 4)}")
 
-    ds_tr = Loss1Dataset(a.csv, train_seqs, a.seq_len, stats, root=a.feat_root)
-    ds_va = Loss1Dataset(a.csv, val_seqs, a.seq_len, stats, root=a.feat_root) \
+    if a.shuffle_control:
+        print("\n*** SHUFFLE CONTROL: frames paired with the WRONG gaze rates ***")
+        print("    expect loss to stay near ln(batch) and top-1 near chance\n")
+    ds_tr = Loss1Dataset(a.csv, train_seqs, a.seq_len, stats, root=a.feat_root,
+                         shuffle_rates=a.shuffle_control, shuffle_seed=a.seed)
+    ds_va = Loss1Dataset(a.csv, val_seqs, a.seq_len, stats, root=a.feat_root,
+                         shuffle_rates=a.shuffle_control, shuffle_seed=a.seed + 1) \
         if val_seqs else None
     print(f"rows  : {len(ds_tr)} train" + (f" / {len(ds_va)} val" if ds_va else ""))
 
