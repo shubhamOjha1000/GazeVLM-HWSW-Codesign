@@ -18,6 +18,8 @@ the cache is built once and shared across all folds.
 
 import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -46,7 +48,8 @@ def reroot(p, root):
 class FeatureCache:
     """Unique frame path -> row of a (n_frames, feat_dim) matrix."""
 
-    def __init__(self, paths, feat_root=None, key="cls", cache_file=None, verbose=True):
+    def __init__(self, paths, feat_root=None, key="cls", cache_file=None,
+                 workers=32, verbose=True):
         uniq = sorted(set(paths))
         self.index = {p: i for i, p in enumerate(uniq)}
 
@@ -63,15 +66,33 @@ class FeatureCache:
         first = np.load(reroot(uniq[0], feat_root))[key]
         self.F = np.zeros((len(uniq), first.shape[-1]), dtype=np.float32)
         miss = []
-        for i, p in enumerate(uniq):
+
+        # Threaded, because on a Drive mount each file is ~100 ms of WAITING on network
+        # latency rather than work. Serial, 13k files is 20+ minutes; the GIL is released
+        # during the read, so threads overlap the waiting and it drops to a few minutes.
+        # 32 is empirical headroom -- far more just queues behind Drive's own limits.
+        def _one(i_p):
+            i, p = i_p
             fp = reroot(p, feat_root)
             try:
                 with np.load(fp) as z:
-                    self.F[i] = z[key].astype(np.float32)
+                    return i, z[key].astype(np.float32), None
             except Exception:
-                miss.append(fp)
-            if verbose and (i + 1) % 2000 == 0:
-                print(f"   loaded {i+1:,}/{len(uniq):,} frame features")
+                return i, None, fp
+
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for done, (i, vec, bad) in enumerate(
+                    ex.map(_one, enumerate(uniq), chunksize=16), 1):
+                if bad is not None:
+                    miss.append(bad)
+                else:
+                    self.F[i] = vec
+                if verbose and done % 2000 == 0:
+                    rate = done / max(1e-9, time.time() - t0)
+                    print(f"   loaded {done:,}/{len(uniq):,}  ({rate:.0f}/s, "
+                          f"~{(len(uniq)-done)/max(rate,1e-9)/60:.1f} min left)",
+                          flush=True)
         if miss:
             raise FileNotFoundError(
                 f"{len(miss)} feature files could not be read, e.g. {miss[:3]}. "

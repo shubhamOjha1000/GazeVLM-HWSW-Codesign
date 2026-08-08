@@ -42,7 +42,12 @@ def parse_args():
     ap.add_argument("--feat_root", default=None,
                     help="re-root the .npz paths if the features moved")
     ap.add_argument("--feat_cache", default="/content/feat_cache.npz",
-                    help="local copy of the frame-feature matrix, so Drive is read once")
+                    help="where to persist the frame-feature matrix. Point this at Drive "
+                         "to survive a Colab restart -- otherwise every new session pays "
+                         "the full rebuild again")
+    ap.add_argument("--feat_workers", type=int, default=32,
+                    help="parallel readers for the feature cache. Drive latency is "
+                         "per-file waiting, so threads help a lot; local disk needs few")
     ap.add_argument("--sim_only", action="store_true",
                     help="train L_sim alone (PDF p3). Skips the .npz entirely -- useful "
                          "when the features are unavailable, and a clean ablation of "
@@ -247,7 +252,8 @@ def main():
             t = pd.read_csv(te, usecols=["feat_frame_1", "feat_frame_2"])
             allp += list(t.feat_frame_1) + list(t.feat_frame_2)
         print(f"\nbuilding the frame-feature cache (read once, reused by every fold)")
-        cache = FeatureCache(allp, a.feat_root, cache_file=a.feat_cache)
+        cache = FeatureCache(allp, a.feat_root, cache_file=a.feat_cache,
+                             workers=a.feat_workers)
 
     results, all_hist = [], {}
     for k in range(1, a.k + 1):
