@@ -180,24 +180,40 @@ class VideoBalancedBatchSampler(Sampler):
         self.n = len(seq_ids)
 
     def __iter__(self):
+        """Yield batches, counting the per-video cap PER BATCH.
+
+        The count resets when a batch closes. An earlier version tracked nothing and took
+        up to max_per_video from each video on every pass over the pool; late in an epoch,
+        when only a few videos still had rows, the loop re-entered and topped up the same
+        partly-filled batch from the same video repeatedly -- yielding batches with 24 rows
+        of one video under a cap of 8, which is the exact situation the cap exists to
+        prevent.
+
+        When the cap makes a full batch impossible, a SHORT batch is yielded rather than
+        the cap being broken (unless drop_last). Fewer in-batch negatives is a smaller
+        problem for InfoNCE than false ones.
+        """
         rng = np.random.default_rng(self.seed)
         self.seed += 1                                   # reshuffle every epoch
         pools = {v: list(rng.permutation(idx)) for v, idx in self.by_video.items()}
-        batch = []
         while any(pools.values()):
-            vids = [v for v, p in pools.items() if p]
-            rng.shuffle(vids)
-            for v in vids:
-                take = min(self.max_per_video, self.batch_size - len(batch), len(pools[v]))
-                for _ in range(take):
+            batch, used = [], {}
+            added = True
+            while len(batch) < self.batch_size and added:
+                added = False
+                vids = [v for v, p in pools.items()
+                        if p and used.get(v, 0) < self.max_per_video]
+                rng.shuffle(vids)
+                for v in vids:
+                    if len(batch) >= self.batch_size:
+                        break
                     batch.append(int(pools[v].pop()))
-                if len(batch) == self.batch_size:
-                    yield batch
-                    batch = []
-            if not any(pools.values()):
+                    used[v] = used.get(v, 0) + 1
+                    added = True
+            if not batch:
                 break
-        if batch and not self.drop_last:
-            yield batch
+            if len(batch) == self.batch_size or not self.drop_last:
+                yield batch
 
     def __len__(self):
         return self.n // self.batch_size if self.drop_last else \

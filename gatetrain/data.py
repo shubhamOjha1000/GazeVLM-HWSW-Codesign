@@ -211,11 +211,14 @@ class FoldSet:
         """
         n = len(self)
         if shuffle and max_per_video and seq_ids is not None:
-            order = _balanced_order(seq_ids, batch_size, max_per_video, generator)
-            idx = torch.from_numpy(order).to(self.device)
-        else:
-            idx = (torch.randperm(n, device=self.device, generator=generator)
-                   if shuffle else torch.arange(n, device=self.device))
+            # yields the batches AS BUILT. Returning a flat order and re-slicing at fixed
+            # strides would break the cap: short batches shift every later boundary, so
+            # the batches the trainer sees would not be the ones the sampler balanced.
+            for b in _balanced_batches(seq_ids, batch_size, max_per_video, generator):
+                yield torch.from_numpy(b).to(self.device)
+            return
+        idx = (torch.randperm(n, device=self.device, generator=generator)
+               if shuffle else torch.arange(n, device=self.device))
         for s in range(0, n, batch_size):
             yield idx[s:s + batch_size]
 
@@ -230,8 +233,23 @@ class FoldSet:
         return np.array([u[s] for s in self.sequence], dtype=np.int64)
 
 
-def _balanced_order(seq_ids, batch_size, max_per_video, generator=None):
-    """Row order such that no batch holds more than `max_per_video` rows of one video."""
+def _balanced_batches(seq_ids, batch_size, max_per_video, generator=None):
+    """Build batches in which no batch holds more than `max_per_video` rows of one video.
+
+    Why the cap: InfoNCE draws its negatives from the batch, and two windows a few seconds
+    apart in the same video have near-identical gaze. As negatives they are false ones,
+    and the loss actively pushes them apart.
+
+    The count is tracked PER BATCH and reset when a batch closes. An earlier version
+    tracked nothing and simply took up to `max_per_video` from each video on every pass
+    over the pool; late in an epoch, when only a few videos still had rows, the outer loop
+    re-entered and topped up the same partly-filled batch from the same video again and
+    again -- producing batches with 24 rows of one video under a cap of 8.
+
+    When the cap makes a full batch impossible -- one video left, say -- a SHORT batch is
+    emitted rather than the cap being broken. Fewer negatives is a smaller problem than
+    false ones, and `joint_loss` already skips the NCE term below two rows.
+    """
     rng = np.random.default_rng(
         int(torch.randint(0, 2**31 - 1, (1,), generator=generator).item())
         if generator is not None else 0)
@@ -240,18 +258,26 @@ def _balanced_order(seq_ids, batch_size, max_per_video, generator=None):
         pools.setdefault(int(v), []).append(i)
     for v in pools:
         pools[v] = list(rng.permutation(pools[v]))
-    order, batch = [], []
+
+    batches = []
     while any(pools.values()):
-        vids = [v for v, p in pools.items() if p]
-        rng.shuffle(vids)
-        for v in vids:
-            take = min(max_per_video, batch_size - len(batch), len(pools[v]))
-            for _ in range(take):
-                batch.append(pools[v].pop())
-            if len(batch) == batch_size:
-                order.extend(batch); batch = []
-    order.extend(batch)
-    return np.array(order, dtype=np.int64)
+        batch, used = [], {}
+        added = True
+        while len(batch) < batch_size and added:
+            added = False
+            vids = [v for v, p in pools.items()
+                    if p and used.get(v, 0) < max_per_video]
+            rng.shuffle(vids)
+            for v in vids:
+                if len(batch) >= batch_size:
+                    break
+                batch.append(int(pools[v].pop()))
+                used[v] = used.get(v, 0) + 1
+                added = True
+        if not batch:
+            break
+        batches.append(np.array(batch, dtype=np.int64))
+    return batches
 
 
 def train_stats(csv_path, rates_col="gaze_rates_window", seq_len=9):
