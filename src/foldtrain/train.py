@@ -91,6 +91,19 @@ def parse_args():
     return ap.parse_args()
 
 
+def make_scaler(enabled):
+    """GradScaler across torch versions.
+
+    torch.amp.GradScaler("cuda", ...) is the 2.x spelling; torch.cuda.amp.GradScaler is
+    the older one and is deprecated in 2.x. Colab has 2.11, this repo also runs on 1.x,
+    so try the new form and fall back rather than pinning either.
+    """
+    try:
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    except (AttributeError, TypeError):
+        return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
 @torch.no_grad()
 def predict(model, data, batch_size, amp=False):
     """Class probabilities for every row, in order."""
@@ -154,7 +167,7 @@ def train_one_fold(csv_path, a, fold_id):
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=a.lr, total_steps=a.epochs,
         pct_start=min(0.3, a.warmup / max(1, a.epochs)))
-    scaler = torch.amp.GradScaler("cuda", enabled=a.amp and a.device == "cuda")
+    scaler = make_scaler(a.amp and a.device == "cuda")
     gen = torch.Generator(device=tr.X.device).manual_seed(a.seed + fold_id)
 
     best = dict(auc=-np.inf, epoch=-1)
