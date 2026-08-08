@@ -121,7 +121,7 @@ def run_epoch(model, data, crit, batch_size, opt=None, scaler=None, amp=False, g
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                 opt.step()
-        tot += float(loss) * len(y); n += len(y)
+        tot += float(loss.detach()) * len(y); n += len(y)
     return tot / max(1, n)
 
 
@@ -154,7 +154,7 @@ def train_one_fold(csv_path, a, fold_id):
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=a.lr, total_steps=a.epochs,
         pct_start=min(0.3, a.warmup / max(1, a.epochs)))
-    scaler = torch.cuda.amp.GradScaler(enabled=a.amp and a.device == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=a.amp and a.device == "cuda")
     gen = torch.Generator(device=tr.X.device).manual_seed(a.seed + fold_id)
 
     best = dict(auc=-np.inf, epoch=-1)
