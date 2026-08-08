@@ -16,6 +16,7 @@ The five fold files contain the same rows in the same order and differ only in `
 the cache is built once and shared across all folds.
 """
 
+import io
 import json
 import os
 import time
@@ -45,50 +46,71 @@ def reroot(p, root):
     return os.path.join(root, tail)
 
 
+def read_npz_key(path, key):
+    """Load one array from an .npz with a SINGLE sequential read of the whole file.
+
+    `np.load(path)` treats an .npz as a zip archive it can seek around in: it seeks to the
+    end for the central directory, reads it, seeks back to the member, then reads. On local
+    disk those seeks are free. On a Google Drive FUSE mount each one is a network round
+    trip, so a 5 KB file costs 3-5 hops instead of 1 -- which is why 32 threads were still
+    only managing ~75 files/s, roughly 425 ms apiece.
+
+    Slurping the bytes first turns that into one sequential read and hands the zip logic a
+    BytesIO, where seeking is free. These files are a few KB, so the memory cost is nil.
+    """
+    with open(path, "rb") as fh:
+        blob = fh.read()
+    with np.load(io.BytesIO(blob)) as z:
+        return z[key].astype(np.float32)
+
+
 class FeatureCache:
     """Unique frame path -> row of a (n_frames, feat_dim) matrix."""
 
     def __init__(self, paths, feat_root=None, key="cls", cache_file=None,
-                 workers=32, verbose=True):
+                 workers=64, verbose=True):
         uniq = sorted(set(paths))
         self.index = {p: i for i, p in enumerate(uniq)}
 
         if cache_file and os.path.exists(cache_file):
+            t0 = time.time()
             z = np.load(cache_file, allow_pickle=True)
             if list(z["paths"]) == uniq:
                 self.F = z["F"].astype(np.float32)
                 if verbose:
-                    print(f"   feature cache hit: {self.F.shape} from {cache_file}")
+                    print(f"   feature cache HIT: {self.F.shape} from {cache_file} "
+                          f"({time.time()-t0:.1f}s) -- no per-file reads")
                 return
             if verbose:
                 print("   feature cache exists but does not match these rows; rebuilding")
 
-        first = np.load(reroot(uniq[0], feat_root))[key]
-        self.F = np.zeros((len(uniq), first.shape[-1]), dtype=np.float32)
+        self.F = np.zeros((len(uniq), read_npz_key(reroot(uniq[0], feat_root), key).shape[-1]),
+                          dtype=np.float32)
         miss = []
 
-        # Threaded, because on a Drive mount each file is ~100 ms of WAITING on network
-        # latency rather than work. Serial, 13k files is 20+ minutes; the GIL is released
-        # during the read, so threads overlap the waiting and it drops to a few minutes.
-        # 32 is empirical headroom -- far more just queues behind Drive's own limits.
+        # Threaded, because each file is almost entirely WAITING on Drive rather than work,
+        # and the GIL is released for the duration of the read. Serial this is 20+ minutes.
+        # 64 rather than 32: the bottleneck is round-trip latency, not bandwidth or CPU, so
+        # the useful thread count is roughly (latency / service time) and sits well above
+        # the core count. Past ~128 the gain flattens as drivefs starts queueing internally.
         def _one(i_p):
             i, p = i_p
             fp = reroot(p, feat_root)
             try:
-                with np.load(fp) as z:
-                    return i, z[key].astype(np.float32), None
+                return i, read_npz_key(fp, key), None
             except Exception:
                 return i, None, fp
 
         t0 = time.time()
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            for done, (i, vec, bad) in enumerate(
-                    ex.map(_one, enumerate(uniq), chunksize=16), 1):
+            # chunksize is silently ignored by ThreadPoolExecutor (it only affects
+            # ProcessPoolExecutor), so it is not passed here.
+            for done, (i, vec, bad) in enumerate(ex.map(_one, enumerate(uniq)), 1):
                 if bad is not None:
                     miss.append(bad)
                 else:
                     self.F[i] = vec
-                if verbose and done % 2000 == 0:
+                if verbose and done % 1000 == 0:
                     rate = done / max(1e-9, time.time() - t0)
                     print(f"   loaded {done:,}/{len(uniq):,}  ({rate:.0f}/s, "
                           f"~{(len(uniq)-done)/max(rate,1e-9)/60:.1f} min left)",
@@ -99,12 +121,17 @@ class FeatureCache:
                 f"Pass --feat_root pointing at the folder that holds <sequence>/feat_*.npz, "
                 f"or run with --sim_only to train Loss 2 alone.")
         if verbose:
-            print(f"   loaded {len(uniq):,} unique frame features -> {self.F.shape}")
+            print(f"   loaded {len(uniq):,} unique frame features -> {self.F.shape} "
+                  f"in {time.time()-t0:.0f}s")
         if cache_file:
             os.makedirs(os.path.dirname(os.path.abspath(cache_file)) or ".", exist_ok=True)
-            np.savez_compressed(cache_file, F=self.F, paths=np.array(uniq))
+            # savez, NOT savez_compressed: this is a dense float32 matrix, which deflate
+            # barely shrinks, and the compression costs seconds on write and again on every
+            # later read. The whole point of the cache is that reloading it is instant.
+            np.savez(cache_file, F=self.F, paths=np.array(uniq))
             if verbose:
-                print(f"   cached -> {cache_file}")
+                print(f"   cached -> {cache_file}   (later runs reload this in seconds; "
+                      f"pass --feat_cache to every run so they all hit it)")
 
     @property
     def dim(self):

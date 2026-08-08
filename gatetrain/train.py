@@ -45,9 +45,10 @@ def parse_args():
                     help="where to persist the frame-feature matrix. Point this at Drive "
                          "to survive a Colab restart -- otherwise every new session pays "
                          "the full rebuild again")
-    ap.add_argument("--feat_workers", type=int, default=32,
-                    help="parallel readers for the feature cache. Drive latency is "
-                         "per-file waiting, so threads help a lot; local disk needs few")
+    ap.add_argument("--feat_workers", type=int, default=64,
+                    help="parallel readers for the feature cache. Drive cost is per-file "
+                         "round-trip latency, not bandwidth, so the useful thread count is "
+                         "far above the core count; local disk needs few")
     ap.add_argument("--sim_only", action="store_true",
                     help="train L_sim alone (PDF p3). Skips the .npz entirely -- useful "
                          "when the features are unavailable, and a clean ablation of "
