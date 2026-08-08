@@ -69,6 +69,21 @@ Example
         --feat_dir   data/features \
         --n_videos 5 --cleanup_raw
 
+Growing an existing dataset
+---------------------------
+Point --exclude_csv at what you already have and the new sample cannot overlap it:
+
+    python -m src.dataprep.build_feature_csv \
+        --urls_json aea_download_urls.json \
+        --out_csv    data/batch2.csv \
+        --exclude_csv data/batch1.csv \
+        --n_videos 40 --resume --cleanup_raw
+
+Exclusion happens BEFORE sampling, so --n_videos 40 yields 40 new videos rather than 40
+minus however many collided. The CSV is checkpointed after every video and --resume skips
+sequences already in it, so an interrupted multi-hour build restarts where it stopped
+instead of starting over.
+
 By default every video is used in full. AEA sequences average ~193 s (range 67-456 s), so
 at 1 FPS that is ~190 rows each. Pass --max_seconds only to trim a debug run: capping
 discards footage the download has already paid for.
@@ -106,6 +121,17 @@ def parse_args():
                     help="pin explicit sequence names instead of sampling")
     ap.add_argument("--seed", type=int, default=0)
 
+    ap.add_argument("--exclude", nargs="+", default=None,
+                    help="sequence names to keep OUT of the sample")
+    ap.add_argument("--exclude_csv", nargs="+", default=None,
+                    help="CSVs whose `sequence` values to exclude. Point this at the "
+                         "dataset you already built and the new sample cannot overlap "
+                         "it -- safer than re-listing names by hand.")
+    ap.add_argument("--resume", action="store_true",
+                    help="if --out_csv already exists, keep its rows and skip the "
+                         "sequences in it. The CSV is checkpointed after every video, "
+                         "so an interrupted multi-hour build restarts where it stopped.")
+
     ap.add_argument("--target_fps", type=float, default=1.0)
     ap.add_argument("--max_seconds", type=float, default=0.0,
                     help="cap how many seconds of each video to use; 0 (the default) "
@@ -124,17 +150,53 @@ def parse_args():
     return ap.parse_args()
 
 
-def pick_sequences(meta, n_videos, seed, explicit=None):
-    """Sample without replacement, then assert every required entry is present."""
+def write_csv(rows, path):
+    """Write the table, renumbering `idx` to 0..N-1.
+
+    idx is assigned at write time rather than trusted from the row dicts because a
+    --resume run inherits rows from an earlier file: if that file was ever filtered or
+    concatenated, its idx values need not be contiguous, and continuing from len(rows)
+    would then duplicate or skip indices. Renumbering makes idx exactly the row number,
+    which is all anything downstream uses it for.
+    """
+    df = pd.DataFrame(rows)
+    if len(df):
+        df["idx"] = range(len(df))
+    df.to_csv(path, index=False)
+    return df
+
+
+def pick_sequences(meta, n_videos, seed, explicit=None, exclude=None):
+    """Sample without replacement from the videos NOT already excluded.
+
+    Excluding before sampling (rather than sampling then filtering) is what makes the
+    result deterministic in the size of the request: ask for 40 and you get 40 new ones,
+    not 40 minus however many collided.
+    """
     seqs = list(meta["sequences"])
+    exclude = set(exclude or ())
     if explicit:
         chosen = explicit
         missing = [s for s in chosen if s not in meta["sequences"]]
         if missing:
             raise KeyError(f"sequences not in the JSON: {missing}")
+        clash = [s for s in chosen if s in exclude]
+        if clash:
+            print(f"!! {len(clash)} pinned sequences are also excluded, dropping: {clash}")
+            chosen = [s for s in chosen if s not in exclude]
     else:
+        pool = [s for s in seqs if s not in exclude]
+        if exclude:
+            print(f"excluding {len(exclude)} already-built videos -> "
+                  f"{len(pool)} of {len(seqs)} available")
+        if n_videos > len(pool):
+            raise ValueError(
+                f"asked for {n_videos} videos but only {len(pool)} remain after "
+                f"excluding {len(exclude)}. Lower --n_videos.")
         random.seed(seed)
-        chosen = random.sample(seqs, min(n_videos, len(seqs)))
+        chosen = random.sample(pool, n_videos)
+        overlap = set(chosen) & exclude          # cannot happen; assert it anyway
+        assert not overlap, f"sampler returned excluded sequences: {overlap}"
 
     total = 0
     print(f"selected {len(chosen)} of {len(seqs)} videos"
@@ -198,13 +260,33 @@ def main():
     max_seconds = a.max_seconds if a.max_seconds and a.max_seconds > 0 else None
 
     meta = json.load(open(a.urls_json))
-    chosen = pick_sequences(meta, a.n_videos, a.seed, a.seqs)
+
+    # ---- what must NOT be sampled -------------------------------------------------
+    exclude = set(a.exclude or ())
+    for p in (a.exclude_csv or ()):
+        if not os.path.exists(p):
+            raise FileNotFoundError(f"--exclude_csv: no such file {p}")
+        got = set(pd.read_csv(p, usecols=["sequence"])["sequence"].unique())
+        print(f"excluding {len(got)} sequences already in {p}")
+        exclude |= got
+
+    # ---- resume an interrupted run ------------------------------------------------
+    rows = []
+    if a.resume and os.path.exists(a.out_csv):
+        prev = pd.read_csv(a.out_csv)
+        done = set(prev["sequence"].unique())
+        rows = prev.to_dict("records")
+        exclude |= done
+        print(f"RESUMING {a.out_csv}: {len(prev)} rows from {len(done)} videos kept, "
+              f"those videos will be skipped")
+
+    chosen = pick_sequences(meta, a.n_videos, a.seed, a.seqs, exclude)
 
     for d in (a.raw_dir, a.frames_dir, a.feat_dir):
         os.makedirs(d, exist_ok=True)
     os.makedirs(os.path.dirname(os.path.abspath(a.out_csv)), exist_ok=True)
 
-    rows, per_seq = [], []
+    per_seq = []
     t_all = time.time()
 
     for si, seq in enumerate(chosen, 1):
@@ -328,8 +410,16 @@ def main():
                                 sum(r["n_imu_in_gap"] for r in new) / max(1, n_rows), 1),
                             feat_MB=round(feat_mb, 1),
                             secs=round(time.time() - t_seq, 1)))
+        # CHECKPOINT after every video. A 40-video build runs for hours and Colab
+        # disconnects; without this a crash at video 38 would discard all 38.
+        write_csv(rows, a.out_csv)
+
+        done_n, left_n = si, len(chosen) - si
+        eta = (time.time() - t_all) / max(1, done_n) * left_n / 60
         print(f"   -> {n_rows} rows   (running total {len(rows)})   "
               f"features {feat_mb:.1f} MB   {time.time()-t_seq:.0f}s")
+        print(f"   checkpointed {len(rows)} rows -> {a.out_csv}"
+              f"   [{done_n}/{len(chosen)} done, ~{eta:.0f} min left]")
 
         if a.cleanup_raw:
             shutil.rmtree(seq_dir, ignore_errors=True)
@@ -340,8 +430,7 @@ def main():
         if a.device == "cuda":
             torch.cuda.empty_cache()
 
-    df = pd.DataFrame(rows)
-    df.to_csv(a.out_csv, index=False)
+    df = write_csv(rows, a.out_csv)
 
     print(f"\n{'='*78}\nDONE in {time.time()-t_all:.0f}s\n{'='*78}\n")
     print(pd.DataFrame(per_seq).to_string(index=False))
