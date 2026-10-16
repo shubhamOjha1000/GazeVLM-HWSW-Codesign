@@ -29,11 +29,12 @@ embedding and merger are used unchanged. What has to change is WHERE each patch 
                28 px token grid; text after the image continues as after a full-size
                1344 px image.
 
-This is done by overriding the vision model's `rot_pos_emb` and `get_window_index` for one
-call, and by building the LLM input as `inputs_embeds` + explicit 3D `position_ids`. With a
-layout of only 28 px cells every override reduces to Qwen's own computation, which the
-parity checks verify (`tests/test_qwen_fovea.py` on a tiny random model, and
-`parity_report` on the real one).
+The encoder is run part by part (patch embedding, blocks, merger: `encode_cells`) with the
+layout's RoPE coordinates and window groups, so nothing depends on how a given transformers
+version writes the encoder's forward(); the LLM input is `inputs_embeds` + explicit 3D
+`position_ids`. With a layout of only 28 px cells both reduce to Qwen's own computation, which
+the parity checks verify against the stock forward (`tests/test_qwen_fovea.py` on a tiny
+random model, and `parity_report` on the real one).
 
 Training-free assumption to keep in mind: Qwen never saw fractional patch positions or
 shrunk content next to full-resolution content. The parity checks only prove the plumbing;
@@ -44,7 +45,6 @@ import inspect
 import json
 import os
 import time
-from contextlib import contextmanager
 
 import numpy as np
 import torch
@@ -156,15 +156,26 @@ def visual_of(model):
 
 
 def check_encoder(vis):
-    """The overrides rely on the encoder's forward calling these two methods."""
-    try:
-        src = inspect.getsource(type(vis).forward)
-    except (OSError, TypeError):            # source unavailable: the parity checks still catch it
-        return
-    missing = [m for m in ("rot_pos_emb", "get_window_index") if m not in src]
-    if missing:
-        raise RuntimeError(f"{type(vis).__name__}.forward no longer calls {missing}: this "
-                           f"transformers version needs a different hook")
+    """The parts encode_cells runs itself, so it does not depend on how this transformers
+    version writes the encoder's forward(): patch_embed, blocks, merger, and blocks that take
+    cu_seqlens plus RoPE as position_embeddings (cos, sin) or rotary_pos_emb."""
+    for name in ("patch_embed", "blocks", "merger"):
+        if not hasattr(vis, name):
+            raise RuntimeError(f"{type(vis).__name__} has no {name!r}: this transformers version "
+                               f"needs a different encoder loop")
+    _rope_kw(vis)
+
+
+def _rope_kw(vis):
+    """Which keyword the blocks take RoPE by: position_embeddings (cos, sin), as Qwen2.5-VL's
+    encoder passes it, or the older rotary_pos_emb."""
+    params = inspect.signature(type(vis.blocks[0]).forward).parameters
+    for name in ("position_embeddings", "rotary_pos_emb"):
+        if name in params:
+            return name
+    if any(p.kind == p.VAR_KEYWORD for p in params.values()):    # wrapped forward(*args, **kwargs)
+        return "position_embeddings"
+    raise RuntimeError(f"{type(vis.blocks[0]).__name__}.forward{tuple(params)}: no way to pass RoPE")
 
 
 def _as_tensor(out):
@@ -178,36 +189,66 @@ def _as_tensor(out):
     return out.last_hidden_state
 
 
-@contextmanager
-def _layout_hooks(vis, rot, order, cu):
-    vis.rot_pos_emb = lambda grid_thw: rot
-    vis.get_window_index = lambda grid_thw: (order, cu)
-    try:
-        yield
-    finally:
-        del vis.rot_pos_emb, vis.get_window_index
+def _inv_freq(vis):
+    """Qwen's vision RoPE frequencies: the buffer if present, else the same formula
+    (dim = head_dim / 2, theta = 10000)."""
+    inv = getattr(getattr(vis, "rotary_pos_emb", None), "inv_freq", None)
+    if inv is not None:
+        return inv.float()
+    cfg = vis.config
+    dim = cfg.hidden_size // cfg.num_heads // 2
+    return 1.0 / (10000 ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+
+
+def _full_attention_blocks(vis):
+    idx = getattr(vis, "fullatt_block_indexes", None)
+    return set(idx if idx is not None else vis.config.fullatt_block_indexes)
+
+
+def _run_blocks(vis, x, rot, cu_window, cu_full):
+    """Qwen's ViT blocks: window attention in most, full attention in fullatt_block_indexes."""
+    emb = torch.cat([rot, rot], dim=-1)
+    pos = (emb.cos(), emb.sin())
+    full = _full_attention_blocks(vis)
+    rope = _rope_kw(vis)
+    for i, blk in enumerate(vis.blocks):
+        kw = dict(cu_seqlens=cu_full if i in full else cu_window)
+        kw[rope] = pos if rope == "position_embeddings" else rot
+        out = blk(x, **kw)
+        x = out[0] if isinstance(out, (tuple, list)) else out
+    return x
 
 
 @torch.no_grad()
 def encode_cells(vis, img01, cells, img, mean, std):
-    """Qwen vision features (one row per cell, in `cells` order) for any cell layout."""
+    """Qwen vision features (one row per cell, in `cells` order) for any cell layout.
+
+    Runs the encoder's own parts in Qwen2.5-VL's order: patch embedding -> regroup the cells
+    by attention window -> blocks (window / full attention, 2D RoPE) -> merger (2 x 2 patches
+    -> one token) -> back to the input order. Only the RoPE coordinates and the window groups
+    come from the layout; with all 28 px cells both equal Qwen's own (checked against the
+    stock forward in tests/test_qwen_fovea.py and parity_report)."""
+    check_encoder(vis)
     dev = next(vis.parameters()).device
     dtype = next(vis.parameters()).dtype
     N = len(cells)
-    patches = cells_to_patches(img01, cells, mean, std).to(dev, dtype)
+    x = vis.patch_embed(cells_to_patches(img01, cells, mean, std).to(dev, dtype))     # (4N, D)
     h, w = patch_positions(cells)
-    inv = vis.rotary_pos_emb.inv_freq.float().to(dev)
+    inv = _inv_freq(vis).to(dev)
     rot = torch.cat([torch.outer(h.to(dev), inv), torch.outer(w.to(dev), inv)], dim=-1)
     order, cu = window_groups(cells, img)
-    grid = torch.tensor([[1, 2, 2 * N]], device=dev)      # only its product (4N patches) is used
-    with _layout_hooks(vis, rot, order.to(dev), cu):
-        out = vis(patches, grid_thw=grid)
-    return _as_tensor(out)
+    order = order.to(dev)
+    x = x.view(N, 4, -1)[order].reshape(4 * N, -1)
+    rot = rot.view(N, 4, -1)[order].reshape(4 * N, -1)
+    cu_window = torch.unique_consecutive(torch.tensor(cu, dtype=torch.int32, device=dev))
+    cu_full = torch.tensor([0, 4 * N], dtype=torch.int32, device=dev)
+    x = vis.merger(_run_blocks(vis, x, rot, cu_window, cu_full))                       # (N, out)
+    return x[torch.argsort(order)]
 
 
 @torch.no_grad()
 def encode_stock(vis, img01, mean, std):
-    """Qwen's own path for a frame whose side is a multiple of 28 (no overrides)."""
+    """Qwen's own forward (the reference) for a frame whose side is a multiple of 28."""
     img = img01.shape[-1]
     dev = next(vis.parameters()).device
     dtype = next(vis.parameters()).dtype

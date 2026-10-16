@@ -12,8 +12,8 @@ own classes (so the reference is Qwen's real code, not a re-implementation)
      get their quadrant centres
   6. patches equal Qwen's image processor output for the same image
   7. window groups equal Qwen's get_window_index (including partial edge windows)
-  8. PARITY: a layout of only 28 px cells, run through the overrides, reproduces the stock
-     encoder's features
+  8. PARITY: a layout of only 28 px cells, run through our part-by-part encoder loop
+     (encode_cells), reproduces the stock forward's features
   9. a foveated layout runs, gives one token per cell, and each token follows its cell when
      the cells are reordered (no bookkeeping mix-ups)
  10. LLM M-RoPE positions follow Qwen2.5-VL's rule for text / image / text
@@ -118,6 +118,8 @@ def test_patches_match_qwen_image_processor():
 
 @pytest.mark.parametrize("size", [448, 392, 1344])
 def test_window_groups_match_qwen(vis, size):
+    if not hasattr(vis, "get_window_index"):
+        pytest.skip("this transformers version has no get_window_index (the parity test still covers windows)")
     order, cu = qf.window_groups(qf.uniform_cells(size), size)
     so, scu = vis.get_window_index(torch.tensor([[1, size // 14, size // 14]]))
     scu = torch.unique_consecutive(torch.as_tensor(scu)).tolist()
@@ -132,8 +134,6 @@ def test_uniform_layout_reproduces_qwen_encoder(vis, size):
     stock = qf.encode_stock(vis, img, MEAN, STD)
     assert ours.shape == stock.shape == (len(cells), 32)
     assert torch.allclose(ours, stock, atol=1e-5, rtol=1e-4), (ours - stock).abs().max()
-    # the hooks are removed afterwards: the class methods are back
-    assert "rot_pos_emb" not in vars(vis) and "get_window_index" not in vars(vis)
 
 
 def test_foveated_tokens_follow_their_cells(vis):
