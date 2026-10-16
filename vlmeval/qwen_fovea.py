@@ -58,15 +58,17 @@ IMAGE_PAD = "<|image_pad|>"
 
 
 # ---------------------------------------------------------------------------- layouts
-def foveated_cells(gu, gv, a=40.0, img=IMG, num_scales=3, fov=sp.FOV):
+def foveated_cells(gu, gv, a=40.0, img=IMG, num_scales=3, fov=sp.FOV, R_deg=None):
     """Cells (y, x, size) in pixels, top-left corners, raster order, for gaze (gu, gv) in
-    [0, 1]. Sizes 28 * 2^i, i < num_scales; the largest must fit a 112 px window."""
+    [0, 1]. Sizes 28 * 2^i, i < num_scales; the largest must fit a 112 px window.
+    Rings: FOVI recipe with fall-off a and maximum eccentricity R_deg (default fov / 2, as in
+    the spatial module); a larger R_deg pushes every ring out (more tokens)."""
     sizes = [BASE * 2 ** i for i in range(num_scales)]
     if sizes[-1] > WINDOW:
         raise ValueError(f"largest cell {sizes[-1]} px exceeds Qwen's {WINDOW} px attention window")
     if img % sizes[-1]:
         raise ValueError(f"image size {img} is not a multiple of the largest cell {sizes[-1]}")
-    rings = sp.ring_radii_deg(fov / 2, a, num_scales)
+    rings = sp.ring_radii_deg(R_deg or fov / 2, a, num_scales)
     n = img // BASE
     covered = np.zeros((n, n), bool)
     cells = []
@@ -427,7 +429,9 @@ def frame_layout(conditions, cond, fr):
         'uniform'        arg = side in px (multiple of 28): Qwen's normal tokenization
         'uniform_match'  arg = name of a 'fovea' condition: a uniform frame with the same
                          token count as that condition gives THIS frame
-        'fovea'          arg = dict(a=..., num_scales=3, gaze='gaze' | 'centre' | 'other')
+        'fovea'          arg = dict(a=..., gaze='gaze' | 'centre' | 'other', and optionally
+                         img=frame side (default 1344), R=max eccentricity (default fov / 2),
+                         num_scales=3)
     A missing gaze falls back to the image centre (counted in the results)."""
     kind, arg = conditions[cond]
     if kind == "uniform":
@@ -441,7 +445,10 @@ def frame_layout(conditions, cond, fr):
     used = g
     if g is None:
         g = (0.5, 0.5)
-    return foveated_cells(*g, a=arg["a"], num_scales=arg.get("num_scales", 3)), IMG, used
+    img = arg.get("img", IMG)
+    cells = foveated_cells(*g, a=arg["a"], img=img, num_scales=arg.get("num_scales", 3),
+                           R_deg=arg.get("R"))
+    return cells, img, used
 
 
 @torch.no_grad()

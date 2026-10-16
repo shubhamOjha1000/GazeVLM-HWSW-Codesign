@@ -183,3 +183,26 @@ def test_frame_layout_conditions():
     # missing gaze -> centre layout, reported as not used
     cells_missing, _, used = qf.frame_layout(conds, "fov", dict(gaze=None, gaze_other=None))
     assert used is None and np.array_equal(cells_missing, qf.frame_layout(conds, "ctr", fr)[0])
+
+
+@pytest.mark.parametrize("g", GAZES)
+@pytest.mark.parametrize("R", [None, 90, 150])
+def test_layout_on_the_448_frame(g, R):
+    """Foveating the frame Qwen normally sees (448 px = 4 x 112): full coverage, fewer tokens
+    than its 256, and a larger R_deg never gives fewer tokens."""
+    cells = qf.foveated_cells(*g, a=40, img=448, R_deg=R)
+    cnt = np.zeros((16, 16), int)
+    for y, x, s in cells:
+        assert s in (28, 56, 112) and y % s == 0 and x % s == 0
+        cnt[y // 28:(y + s) // 28, x // 28:(x + s) // 28] += 1
+    assert (cnt == 1).all() and 16 <= len(cells) < 256
+    if R:
+        assert len(cells) >= len(qf.foveated_cells(*g, a=40, img=448))
+
+
+def test_frame_layout_on_448():
+    conds = {"f": ("fovea", dict(a=40, gaze="gaze", img=448, R=120)), "m": ("uniform_match", "f")}
+    fr = dict(gaze=(0.4, 0.6), gaze_other=None)
+    cells, size, _ = qf.frame_layout(conds, "f", fr)
+    assert size == 448 and len(cells) == len(qf.foveated_cells(0.4, 0.6, a=40, img=448, R_deg=120))
+    assert qf.frame_layout(conds, "m", fr)[1] == qf.same_tokens_size(len(cells))
