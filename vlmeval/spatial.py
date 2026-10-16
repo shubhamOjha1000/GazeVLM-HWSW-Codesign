@@ -171,14 +171,15 @@ def gaze_at(track, t, max_dt=0.15):
     return tuple(xy[i]) if abs(ts[i] - t) <= max_dt else None
 
 
-def gaze_fixation(track, t, window=1.0, lead=0.05, radius_deg=3.0, tau=0.5):
+def gaze_fixation(track, t, window=1.0, lead=0.0, radius_deg=3.0, tau=0.5):
     """One gaze point for the frame at time t, from the ~10 samples of the second before it.
 
     A plain (weighted) mean can land between two fixations when the eyes jumped during the
     window, on a spot nobody looked at. Instead: weight each sample by recency,
     exp(-(t - t_i) / tau), find the sample whose radius_deg neighbourhood holds the most
     weight (the densest fixation cluster), and return the weighted centroid of that
-    neighbourhood. None if the window has no samples."""
+    neighbourhood. None if the window has no samples. lead > 0 would also admit samples after
+    the frame; the default 0 keeps it causal, like the gate."""
     ts, xy = track
     m = (ts > t - window) & (ts <= t + lead)
     if not m.any():
