@@ -153,14 +153,9 @@ def _fovea_layout(arg, fr):
 
 
 # ---------------------------------------------------------------------------- LLM input
-def prompt_text(proc, messages):
-    """Chat template text, without a leading <bos> when the tokenizer adds one itself."""
-    text = proc.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    tok = proc.tokenizer
-    bos = tok.bos_token
-    if bos and text.startswith(bos) and tok("x").input_ids[:1] == [tok.bos_token_id]:
-        text = text[len(bos):]
-    return text
+# How the prompt is tokenized. parity_report sets it to whatever reproduces Gemma's own
+# processor exactly (the processor's handling of <bos> differs across transformers versions).
+TOKENIZE = dict(strip_bos=False, add_special_tokens=None, type_ids_key=None)
 
 
 def image_affixes(proc):
@@ -182,11 +177,38 @@ def expand_images(proc, text, n_tokens):
     return parts_[0] + "".join(pre + soft * n + suf + p for n, p in zip(n_tokens, parts_[1:]))
 
 
+def prompt_ids(proc, messages, n_tokens, strip_bos=False, add_special_tokens=None):
+    """Token ids of the chat prompt with n_tokens[i] soft tokens for image i.
+    add_special_tokens=None: add them only if the template did not already start with <bos>
+    (what transformers' processor apply_chat_template does)."""
+    tok = proc.tokenizer
+    text = proc.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    bos = tok.bos_token or ""
+    if strip_bos and bos and text.startswith(bos):
+        text = text[len(bos):]
+    text = expand_images(proc, text, n_tokens)
+    add = (not (bos and text.startswith(bos))) if add_special_tokens is None else add_special_tokens
+    return tok(text, return_tensors="pt", add_special_tokens=add).input_ids
+
+
+def _type_ids_key(model):
+    """Keyword the model takes the image-token mask by (it makes attention inside an image
+    bidirectional): token_type_ids in Gemma 3, renamed in some versions."""
+    if TOKENIZE["type_ids_key"]:
+        return TOKENIZE["type_ids_key"]
+    import inspect
+    params = inspect.signature(type(model).forward).parameters
+    for k in ("token_type_ids", "mm_token_type_ids"):
+        if k in params:
+            return k
+    return "token_type_ids"
+
+
 @torch.no_grad()
 def build_inputs(model, proc, messages, feats_list):
-    """inputs_embeds (image tokens replaced by our features), attention mask, token_type_ids."""
-    text = expand_images(proc, prompt_text(proc, messages), [len(f) for f in feats_list])
-    ids = proc.tokenizer(text, return_tensors="pt").input_ids
+    """inputs_embeds (image tokens replaced by our features), attention mask, image-token mask."""
+    ids = prompt_ids(proc, messages, [len(f) for f in feats_list],
+                     TOKENIZE["strip_bos"], TOKENIZE["add_special_tokens"])
     soft_id = getattr(model.config, "image_token_id", None) or proc.tokenizer.convert_tokens_to_ids(SOFT)
     emb_layer = model.get_input_embeddings()
     ids = ids.to(emb_layer.weight.device)
@@ -197,8 +219,8 @@ def build_inputs(model, proc, messages, feats_list):
     if int(mask.sum()) != len(feats):
         raise ValueError(f"{int(mask.sum())} image tokens in the prompt, {len(feats)} features")
     emb[mask] = feats
-    return dict(inputs_embeds=emb, attention_mask=torch.ones_like(ids),
-                token_type_ids=mask.long()), ids
+    return {"inputs_embeds": emb, "attention_mask": torch.ones_like(ids),
+            _type_ids_key(model): mask.long()}, ids
 
 
 @torch.no_grad()
@@ -229,10 +251,21 @@ def load_model(model_id=MODEL_ID):
 
 
 # ---------------------------------------------------------------------------- checks on the real model
+def _first_mismatch(tok, a, b, ctx=4):
+    a, b = a.tolist(), b.tolist()
+    n = next((k for k in range(min(len(a), len(b))) if a[k] != b[k]), min(len(a), len(b)))
+    show = lambda x: repr(tok.decode(x[max(0, n - ctx):n + ctx]))
+    return f"at token {n} (lengths {len(a)} vs {len(b)}): ours {show(a)} | stock {show(b)}"
+
+
 @torch.no_grad()
 def parity_report(model, proc, letter_ids, img01, question, options, build_messages):
-    """Our path with Gemma's own 4 x 4 layout vs Gemma's processor + model on one real frame:
-    pixels, vision features, token ids, answer probabilities."""
+    """Our path with Gemma's own 4 x 4 layout vs Gemma's own pipeline on one real frame.
+
+    The reference is the processor's one-call API (apply_chat_template with tokenize=True on a
+    message holding the image), i.e. exactly what a Gemma user runs. Our tokenization is set
+    (TOKENIZE) to the variant that reproduces its token ids; then pixels, vision features and
+    answer probabilities are compared."""
     vt, pj = parts(model)
     ip = proc.image_processor
     x = qf.to_uint8_pil(qf.resize01(img01, G_IMG))
@@ -241,11 +274,38 @@ def parity_report(model, proc, letter_ids, img01, question, options, build_messa
     f_ours = project(pj, pool_cells(grid, stock_cells())).float()
 
     msgs = build_messages(question, options, [("frame.jpg", 0.0)], G_IMG * G_IMG)
+    msgs_pil = [dict(m, content=[{"type": "image", "image": x} if c.get("type") == "image" else c
+                                 for c in m["content"]]) for m in msgs]
+    try:
+        stock = proc.apply_chat_template(msgs_pil, add_generation_prompt=True, tokenize=True,
+                                         return_dict=True, return_tensors="pt")
+        ref = "apply_chat_template(tokenize=True)"
+    except Exception as ex:                                  # older processors: format, then call
+        text = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+        bos = proc.tokenizer.bos_token or ""
+        stock = proc(text=[text], images=[x], return_tensors="pt",
+                     add_special_tokens=not (bos and text.startswith(bos)))
+        ref = f"processor(text, images) ({type(ex).__name__} in apply_chat_template)"
+    stock = stock.to(model.device)
+    sid = stock["input_ids"][0].cpu()
+
+    variants = [dict(strip_bos=False, add_special_tokens=None), dict(strip_bos=True, add_special_tokens=True),
+                dict(strip_bos=False, add_special_tokens=False), dict(strip_bos=True, add_special_tokens=False),
+                dict(strip_bos=False, add_special_tokens=True)]
+    match = None
+    for v in variants:
+        if torch.equal(prompt_ids(proc, msgs, [256], **v)[0], sid):
+            match = v
+            break
+    if match is not None:
+        TOKENIZE.update(match)
+    for k in ("token_type_ids", "mm_token_type_ids"):
+        if k in stock:
+            TOKENIZE["type_ids_key"] = k
+            break
+
     inputs, ids = build_inputs(model, proc, msgs, [f_ours])
     p_ours = letter_probs(model, inputs, letter_ids)
-
-    text = prompt_text(proc, msgs)
-    stock = proc(text=[text], images=[x], return_tensors="pt").to(model.device)
     pv = stock["pixel_values"]
     m = torch.as_tensor(ip.image_mean).view(3, 1, 1)
     s = torch.as_tensor(ip.image_std).view(3, 1, 1)
@@ -254,11 +314,16 @@ def parity_report(model, proc, letter_ids, img01, question, options, build_messa
     f_stock = f_stock.reshape(-1, f_stock.shape[-1]).float()
     cos = F.cosine_similarity(f_ours, f_stock, dim=-1)
     p_stock = torch.softmax(model(**stock, use_cache=False).logits[0, -1, letter_ids].float(), -1).cpu().numpy()
-    return dict(pixel_max_abs_diff=pix, vision_cos_min=cos.min().item(),
+    same_ids = bool(torch.equal(ids[0].cpu(), sid))
+    return dict(reference=ref, tokenization=match if match else "NO VARIANT MATCHED",
+                type_ids_key=TOKENIZE["type_ids_key"] or _type_ids_key(model),
+                pixel_max_abs_diff=pix, vision_cos_min=cos.min().item(),
                 vision_max_abs_diff=(f_ours - f_stock).abs().max().item(),
-                tokens_ids_equal=bool(torch.equal(ids.cpu(), stock["input_ids"].cpu())),
+                tokens_ids_equal=same_ids,
+                first_token_mismatch="-" if same_ids else _first_mismatch(proc.tokenizer, ids[0].cpu(), sid),
                 probs_max_abs_diff=float(np.abs(p_ours - p_stock).max()),
-                same_answer=bool(p_ours.argmax() == p_stock.argmax()))
+                same_answer=bool(p_ours.argmax() == p_stock.argmax()),
+                probs_ours=np.round(p_ours, 3).tolist(), probs_stock=np.round(p_stock, 3).tolist())
 
 
 # ---------------------------------------------------------------------------- evaluation
