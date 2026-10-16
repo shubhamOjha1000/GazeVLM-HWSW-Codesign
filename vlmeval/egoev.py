@@ -139,12 +139,14 @@ def video_labels(clips, preds):
     return out
 
 
-def select_conditions(clips, model_labels, main="full", timeout=5, hybrid_frac=0.5, seed=0):
+def select_conditions(clips, model_labels, main="full", timeout=5, hybrid_frac=0.5, seed=0,
+                      fixed_every=(3, 4, 5, 6, 8)):
     """-> {condition: {video: sorted frame numbers}} for the full-scale run.
 
     model_labels: {model name: {video: predicted labels, one per frame pair}}.
-    Budgets are per video: '(D budget)' conditions send as many frames as D: <main>,
-    '(E budget)' as many as E: <main> (D plus one frame every `timeout` s of motion).
+    'fixed every N s' is the deployable baseline: one interval chosen in advance and used
+    on every video. The '(D budget)' / '(E budget)' conditions instead copy, per video,
+    how many frames D / E sent there, which a real system could not know beforehand.
     """
     rng = np.random.default_rng(seed)
     out = {}
@@ -164,6 +166,8 @@ def select_conditions(clips, model_labels, main="full", timeout=5, hybrid_frac=0
             _hybrid(fn, out[f"D: {main}"][v], kd, hybrid_frac))
         put("random (D budget)", v, sorted(fn[rng.choice(n, kd, replace=False)]))
         put("uniform (E budget)", v, _uniform(fn, ke))
+        for e in fixed_every:
+            put(f"fixed every {e} s", v, fn[pol.send_every(len(c["labels"]), e)])
         put("blind (no frames)", v, [])
     return out
 
