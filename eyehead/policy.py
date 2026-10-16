@@ -26,6 +26,10 @@ labels for the test videos:
     D  C + send each REFIXATION inside a settled stretch    (new gaze target)
     E  D + a timeout: during a long moving stretch, send every `timeout` frames
     F  E with hysteresis on P(moving) (models with probabilities only)
+    G  E, but a settle only counts once it has lasted `min_settle` frames (ignores
+       one-second settled blips; costs that much extra delay)
+    U  uniform sampling, one frame every N seconds, no sensors at all -- the baseline
+       every gaze/IMU policy has to beat at the same send rate
 
 moving = {TRANSITION, PURSUIT} (the scene changed), settled = {REFIXATION, STABLE}.
 
@@ -43,6 +47,10 @@ Scored against the ground-truth labels:
                          is below tau_frame: the VLM's latest view no longer matches what
                          the wearer sees (same test the labels use, but against the last
                          sent frame instead of the previous frame)
+    stale settled %      the same, counted only on frames where the wearer has settled
+                         (true label REFIXATION or STABLE). The settle policies skip moving
+                         frames on purpose, so THIS is the staleness they should be judged on
+    stale moving %       the same, on moving frames only (what skipping motion costs)
 """
 
 import argparse
@@ -187,26 +195,40 @@ def send_transition_refix(lab):
     return np.r_[True, np.isin(lab, (T, R))]
 
 
-def send_settle(mv, rf, refix=False, timeout=None):
-    """Frame 0 is always sent. Frame k+1 is sent when pair k is the first settled pair
-    after a moving one; with `refix`, also when pair k is a REFIXATION inside a settled
-    stretch; with `timeout`, every `timeout` frames during a long moving stretch."""
+def send_every(n, every):
+    """Uniform sampling: frames 0, every, 2*every, ... of a clip with n pairs."""
+    sent = np.zeros(n + 1, bool)
+    sent[::every] = True
+    return sent
+
+
+def send_settle(mv, rf, refix=False, timeout=None, min_settle=1):
+    """Frame 0 is always sent. After a moving stretch, the frame on which the view has
+    been settled for `min_settle` consecutive pairs is sent (1 = the first settled frame).
+    With `refix`, a REFIXATION inside an already-answered settled stretch is sent too.
+    With `timeout`, a frame is sent every `timeout` frames while a moving stretch is still
+    unanswered. Settled blips shorter than `min_settle` do not end the stretch."""
     n = len(mv)
     sent = np.zeros(n + 1, bool)
     sent[0] = True
-    last, prev_mv, run_start = 0, False, 0
+    last, pending, settled_run, moving_since = 0, False, 0, 0
     for k in range(n):
         t = k + 1
         if mv[k]:
-            if not prev_mv:
-                run_start = t
-            if timeout and t - max(last, run_start - 1) >= timeout:
+            settled_run = 0
+            if not pending:
+                pending, moving_since = True, t
+            if timeout and t - max(last, moving_since - 1) >= timeout:
                 sent[t] = True
-        elif prev_mv or (refix and rf[k]):
-            sent[t] = True
+        else:
+            settled_run += 1
+            if pending:
+                if settled_run >= min_settle:
+                    sent[t], pending = True, False
+            elif refix and rf[k]:
+                sent[t] = True
         if sent[t]:
             last = t
-        prev_mv = bool(mv[k])
     return sent
 
 
@@ -220,7 +242,14 @@ def moving_hysteresis(p_move, hi, lo):
     return mv
 
 
-def policies(lab, probs=None, timeout=5, hyst=(0.6, 0.4)):
+UNIFORM_EVERY = (1, 2, 3, 4, 5, 6, 8, 10, 12, 15)
+
+
+def uniform_policies(n, every=UNIFORM_EVERY):
+    return {f"U: every {e} s": send_every(n, e) for e in every}
+
+
+def policies(lab, probs=None, timeout=5, hyst=(0.6, 0.4), min_settle=2):
     """-> {policy name: sent mask of length n+1} for one clip."""
     mv, rf = np.isin(lab, MOVING), lab == R
     out = {
@@ -229,6 +258,8 @@ def policies(lab, probs=None, timeout=5, hyst=(0.6, 0.4)):
         "C: settle": send_settle(mv, rf),
         "D: settle + refix": send_settle(mv, rf, refix=True),
         f"E: D + {timeout}s timeout": send_settle(mv, rf, refix=True, timeout=timeout),
+        f"G: E, settle >= {min_settle}s": send_settle(mv, rf, refix=True, timeout=timeout,
+                                                      min_settle=min_settle),
     }
     if probs is not None and hyst:
         hi, lo = hyst
@@ -258,8 +289,11 @@ def score_clip(sent, gt, F=None, tau_f=None):
                refix_caught=refix_caught, mid_motion=mid)
     if F is not None and tau_f is not None:
         last = np.maximum.accumulate(np.where(sent, np.arange(n + 1), 0))
-        cos = (F * F[last]).sum(1)[1:]
-        out.update(stale=int((cos < tau_f).sum()), gap=float((1 - cos).sum()), cls_n=n)
+        cos = (F * F[last]).sum(1)[1:]            # frames 1..n; frame t ends pair t-1
+        stale = cos < tau_f
+        out.update(stale=int(stale.sum()), gap=float((1 - cos).sum()), cls_n=n,
+                   stale_settled=int(stale[~gmv].sum()), n_settled=int((~gmv).sum()),
+                   stale_moving=int(stale[gmv].sum()), n_moving=int(gmv.sum()))
     return out
 
 
@@ -274,6 +308,8 @@ def aggregate(rows):
         "mid-motion sends %": 100 * d["mid_motion"] / max(1, d["sends"]),
     }
     if "stale" in d and d.get("cls_n", 0) > 0:
+        res["stale settled %"] = 100 * d["stale_settled"] / max(1, d["n_settled"])
+        res["stale moving %"] = 100 * d["stale_moving"] / max(1, d["n_moving"])
         res["stale frames %"] = 100 * d["stale"] / d["cls_n"]
         res["mean 1 - cos to last sent"] = d["gap"] / d["cls_n"]
     res.update(frames=int(d["frames"]), settles=int(d["settles"]), refix=int(d["refix"]))
@@ -282,7 +318,7 @@ def aggregate(rows):
 
 # ---------------------------------------------------------------------------- everything
 def run_all(folds_dir, thresholds=None, feat_cache=None, preds=None, baseline_preds=None,
-            timeout=5, hyst=(0.6, 0.4), verbose=True):
+            timeout=5, hyst=(0.6, 0.4), min_settle=2, verbose=True):
     """Run-length statistics plus every policy on every source. Returns a dict of tables
     and the sent masks, so a notebook can plot timelines from it."""
     df, test = load_labels(folds_dir)
@@ -307,8 +343,11 @@ def run_all(folds_dir, thresholds=None, feat_cache=None, preds=None, baseline_pr
                                            rt[rt["run"] == "moving"]["next"], margins=True))
 
     test_ids = [i for i, c in enumerate(clips) if c["is_test"]]
-    sources = {"ground truth, all videos": (list(range(len(clips))), None),
-               "ground truth, test": (test_ids, None)}
+    all_ids = list(range(len(clips)))
+    sources = {"ground truth, all videos": (all_ids, None),
+               "ground truth, test": (test_ids, None),
+               "uniform, all videos": (all_ids, "uniform"),
+               "uniform, test": (test_ids, "uniform")}
     for name, path in ([("old gate", baseline_preds)] if baseline_preds else []) + \
                       list((preds or {}).items()):
         if path and os.path.exists(path):
@@ -321,12 +360,14 @@ def run_all(folds_dir, thresholds=None, feat_cache=None, preds=None, baseline_pr
         per_policy = {}
         for i in ids:
             c = clips[i]
-            if pred is None:
+            if pred is None or isinstance(pred, str):
                 lab, probs = c["labels"], None
             else:
                 lab = pred[0][c["test_rows"]]
                 probs = None if pred[1] is None else pred[1][c["test_rows"]]
-            for pol, mask in policies(lab, probs, timeout, hyst).items():
+            masks = (uniform_policies(len(lab)) if pred == "uniform"
+                     else policies(lab, probs, timeout, hyst, min_settle))
+            for pol, mask in masks.items():
                 per_policy.setdefault(pol, []).append(
                     score_clip(mask, c["labels"], cls[i], tau_f))
                 sent[(src, pol, i)] = mask
@@ -334,7 +375,36 @@ def run_all(folds_dir, thresholds=None, feat_cache=None, preds=None, baseline_pr
             results.append(dict(source=src, policy=pol, **aggregate(rows)))
     out["results"] = pd.DataFrame(results)
     out["sent"] = sent
+    out["vs_uniform"] = vs_uniform(out["results"])
     return out
+
+
+VS_UNIFORM = (("stale settled %", True), ("settles caught %", False),
+              ("refix caught %", False), ("stale frames %", True))
+
+
+def vs_uniform(results, metrics=VS_UNIFORM):
+    """Every sensor-driven policy against uniform sampling at the SAME send rate.
+
+    Uniform sampling's metric is linearly interpolated at the policy's sends/min, on the
+    same videos (all-videos ground truth against all-videos uniform, everything else
+    against the test videos). `advantage` is signed so that positive = the policy is
+    better than uniform sampling at equal compute.
+    """
+    rows = []
+    for _, r in results[~results["source"].str.startswith("uniform")].iterrows():
+        usrc = "uniform, all videos" if r["source"].endswith("all videos") else "uniform, test"
+        u = results[results["source"] == usrc].sort_values("sends / min")
+        row = dict(source=r["source"], policy=r["policy"], **{"sends / min": r["sends / min"]})
+        for m, lower_better in metrics:
+            if m not in results.columns:
+                continue
+            base = float(np.interp(r["sends / min"], u["sends / min"], u[m]))
+            row[f"{m} policy"] = r[m]
+            row[f"{m} uniform"] = base
+            row[f"{m} advantage"] = (base - r[m]) if lower_better else (r[m] - base)
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def main():
@@ -350,13 +420,15 @@ def main():
                     help="the old gaze-only gate's test_preds.csv")
     ap.add_argument("--timeout", type=int, default=5)
     ap.add_argument("--hyst", default="0.6,0.4", help="hi,lo for P(moving); '' to disable")
+    ap.add_argument("--min_settle", type=int, default=2,
+                    help="policy G: a settle counts only after this many settled frames")
     ap.add_argument("--out_dir", default=None)
     a = ap.parse_args()
 
     preds = dict(p.split("=", 1) for p in a.pred)
     hyst = tuple(float(v) for v in a.hyst.split(",")) if a.hyst else None
     o = run_all(a.folds_dir, a.thresholds, a.feat_cache, preds, a.baseline_preds,
-                a.timeout, hyst)
+                a.timeout, hyst, a.min_settle)
 
     pd.set_option("display.width", 200)
     print("\nRUN LENGTHS, all videos (frames = seconds at 1 fps)")
@@ -369,9 +441,14 @@ def main():
     print(o["transitions_all"].to_string())
     print("\nPOLICIES (scored against the ground-truth labels)")
     cols = ["sends / min", "send %", "settles caught %", "send offset (s)",
-            "refix caught %", "mid-motion sends %", "stale frames %"]
+            "refix caught %", "mid-motion sends %", "stale settled %", "stale moving %",
+            "stale frames %"]
     r = o["results"]
     print(r[["source", "policy"] + [c for c in cols if c in r.columns]]
+          .round(2).to_string(index=False))
+    v = o["vs_uniform"]
+    print("\nAGAINST UNIFORM SAMPLING AT THE SAME SEND RATE (advantage > 0 = policy better)")
+    print(v[["source", "policy", "sends / min"] + [c for c in v.columns if c.endswith("advantage")]]
           .round(2).to_string(index=False))
 
     if a.out_dir:
@@ -382,6 +459,7 @@ def main():
         o["moving_next_all"].to_csv(os.path.join(a.out_dir, "moving_run_next.csv"))
         o["transitions_all"].to_csv(os.path.join(a.out_dir, "transitions.csv"))
         r.to_csv(os.path.join(a.out_dir, "policy_results.csv"), index=False)
+        v.to_csv(os.path.join(a.out_dir, "vs_uniform.csv"), index=False)
         print(f"\nwrote {a.out_dir}/")
 
 
