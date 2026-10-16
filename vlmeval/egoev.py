@@ -154,8 +154,10 @@ def cap_gaps(sent, max_gap):
 
 
 def fixed_rate(n_frames, every):
-    """One frame every `every` seconds (may be fractional), starting at frame 0."""
-    return np.unique(np.round(np.arange(0, n_frames, every)).astype(int))
+    """Indices of one frame every `every` seconds (may be fractional), starting at frame 0.
+    Rounding can push the last time past the final frame, so indices are clipped."""
+    idx = np.round(np.arange(0, n_frames, every)).astype(int)
+    return np.unique(np.clip(idx, 0, n_frames - 1))
 
 
 def select_conditions(clips, model_labels, main="full", timeout=5, hybrid_frac=0.5, seed=0,
