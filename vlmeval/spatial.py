@@ -171,6 +171,29 @@ def gaze_at(track, t, max_dt=0.15):
     return tuple(xy[i]) if abs(ts[i] - t) <= max_dt else None
 
 
+def gaze_fixation(track, t, window=1.0, lead=0.05, radius_deg=3.0, tau=0.5):
+    """One gaze point for the frame at time t, from the ~10 samples of the second before it.
+
+    A plain (weighted) mean can land between two fixations when the eyes jumped during the
+    window, on a spot nobody looked at. Instead: weight each sample by recency,
+    exp(-(t - t_i) / tau), find the sample whose radius_deg neighbourhood holds the most
+    weight (the densest fixation cluster), and return the weighted centroid of that
+    neighbourhood. None if the window has no samples."""
+    ts, xy = track
+    m = (ts > t - window) & (ts <= t + lead)
+    if not m.any():
+        return None
+    pts, w = xy[m], np.exp(-np.clip(t - ts[m], 0, None) / tau)
+    if len(pts) == 1:
+        return float(pts[0, 0]), float(pts[0, 1])
+    p = pts * IMG
+    i, j = np.meshgrid(np.arange(len(p)), np.arange(len(p)), indexing="ij")
+    near = ecc_deg(p[i, 0], p[i, 1], p[j, 0], p[j, 1]) <= radius_deg
+    c = near[int(np.argmax(near @ w))]
+    g = (w[c, None] * pts[c]).sum(0) / w[c].sum()
+    return float(g[0]), float(g[1])
+
+
 def spread_at(track, t, half=0.2):
     """Largest angle (deg) between any two gaze samples within +-half s of t: small = the
     eyes are fixating at that moment, large = mid-saccade. NaN if under 2 samples."""
@@ -190,7 +213,7 @@ def _box336(q, meta):
 
 
 def keyframe_screen(qs, tracks, metas, a_values=(10, 20, 40, 80, 160), n_other=5,
-                    min_shift=30.0, seed=0):
+                    min_shift=30.0, seed=0, gaze_fn=None):
     """Spatial module alone: on the 1 fps frame nearest each question's keyframe, where does
     the fine region land for each gaze source?
 
@@ -200,6 +223,7 @@ def keyframe_screen(qs, tracks, metas, a_values=(10, 20, 40, 80, 160), n_other=5
                            (>= min_shift s away; mean of n_other draws): keeps the wearer's
                            typical gaze distribution, breaks the link to this view
     """
+    gaze_fn = gaze_fn or gaze_fixation
     rng = np.random.default_rng(seed)
     rows = []
     for q in qs.itertuples():
@@ -210,11 +234,11 @@ def keyframe_screen(qs, tracks, metas, a_values=(10, 20, 40, 80, 160), n_other=5
         k = int(np.argmin(np.abs(ts_f - q.t0)))
         t, L = ts_f[k], ts_f[-1]
         box = _box336(q, m)
-        g = gaze_at(tr, t)
+        g = gaze_fn(tr, t)
         shifts = rng.uniform(min_shift, max(min_shift, L - min_shift), n_other)
         sources = {"gaze": [g] if g is not None else [],
                    "centre": [(0.5, 0.5)],
-                   "gaze, other time": [x for x in (gaze_at(tr, (t + s) % L) for s in shifts)
+                   "gaze, other time": [x for x in (gaze_fn(tr, (t + s) % L) for s in shifts)
                                         if x is not None]}
         # gaze to box-centre distance in source pixels, to check against the dataset's own
         # AveDist2Gaze (it should rise with it if the gaze projection is right)
@@ -232,12 +256,13 @@ def keyframe_screen(qs, tracks, metas, a_values=(10, 20, 40, 80, 160), n_other=5
     return pd.DataFrame(rows)
 
 
-def combined_screen(qs, sel, conditions, tracks, metas, frame_time, a=40, tol=1.0):
+def combined_screen(qs, sel, conditions, tracks, metas, frame_time, a=40, tol=1.0, gaze_fn=None):
     """Temporal + spatial: for each frame-selection condition, take the sent frame nearest
     each question's keyframe; a hit needs that frame within `tol` s of the keyframe AND the
     target inside the fine region of that frame's foveated layout. The keyframe's box is
     used for the sent frame, so only small `tol` makes sense."""
     rows = []
+    gaze_fn = gaze_fn or gaze_fixation
     for c in conditions:
         per = sel[c]
         for q in qs.itertuples():
@@ -253,7 +278,7 @@ def combined_screen(qs, sel, conditions, tracks, metas, frame_time, a=40, tol=1.
             hit_t = dt <= tol
             box = _box336(q, metas[q.video])
             for src in ("gaze", "centre"):
-                g = (gaze_at(tracks[q.video], t) if src == "gaze" else (0.5, 0.5)) if hit_t else None
+                g = (gaze_fn(tracks[q.video], t) if src == "gaze" else (0.5, 0.5)) if hit_t else None
                 r = box_metrics(g[0], g[1], box, [a])[0] if g is not None else {}
                 rows.append(dict(condition=c, source=src, qid=q.qid, video=q.video, dt=dt,
                                  hit_time=hit_t, hit_fovea=bool(r.get("in_fovea", False)),
