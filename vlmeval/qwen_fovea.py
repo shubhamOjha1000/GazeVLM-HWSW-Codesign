@@ -377,18 +377,41 @@ def fovea_feature_drift(vis, img01, cells, mean, std):
         min_cos=("cos_to_full_res", "min"))
 
 
-# ---------------------------------------------------------------------------- keyframe evaluation
-@torch.no_grad()
-def run_keyframe(model, proc, letter_ids, items, conditions, out_path, build_messages,
-                 log_every=50):
-    """Score single-frame questions under several tokenizations, resumable.
+# ---------------------------------------------------------------------------- evaluation
+def frame_layout(conditions, cond, fr):
+    """(cells, frame side px, gaze used or None) for one frame under one condition.
 
-    items: dicts with qid, video, question, options, answer, path (1344 px frame), t
-           (seconds), gaze (u, v) or None, gaze_other (u, v) or None.
+    fr: dict with gaze (u, v) or None and gaze_other (u, v) or None.
     conditions: {name: (kind, arg)} with kind in
-        'uniform'        arg = side in px (multiple of 28)
-        'uniform_match'  arg = name of a foveated condition: same token count as it
-        'fovea'          arg = dict(a=..., num_scales=..., gaze='gaze' | 'centre' | 'other')
+        'uniform'        arg = side in px (multiple of 28): Qwen's normal tokenization
+        'uniform_match'  arg = name of a 'fovea' condition: a uniform frame with the same
+                         token count as that condition gives THIS frame
+        'fovea'          arg = dict(a=..., num_scales=3, gaze='gaze' | 'centre' | 'other')
+    A missing gaze falls back to the image centre (counted in the results)."""
+    kind, arg = conditions[cond]
+    if kind == "uniform":
+        return uniform_cells(arg), arg, None
+    if kind == "uniform_match":
+        cells, _, _ = frame_layout(conditions, arg, fr)
+        side = same_tokens_size(len(cells))
+        return uniform_cells(side), side, None
+    src = arg["gaze"]
+    g = (0.5, 0.5) if src == "centre" else fr.get("gaze" if src == "gaze" else "gaze_other")
+    used = g
+    if g is None:
+        g = (0.5, 0.5)
+    return foveated_cells(*g, a=arg["a"], num_scales=arg.get("num_scales", 3)), IMG, used
+
+
+@torch.no_grad()
+def run_questions(model, proc, letter_ids, items, conditions, out_path, build_messages,
+                  log_every=25):
+    """Score multiple-choice questions whose frames are tokenized per condition; resumable.
+
+    items: dicts with qid, video, question, options, answer, and frames: a list of dicts
+           (key, path to the 1344 px frame, t seconds, gaze, gaze_other). Items of the same
+           video should be adjacent: each frame's vision features are computed once per
+           video and condition, then reused by every question of that video.
     """
     vis = visual_of(model)
     check_encoder(vis)
@@ -400,71 +423,51 @@ def run_keyframe(model, proc, letter_ids, items, conditions, out_path, build_mes
             if line.strip():
                 r = json.loads(line)
                 done.add((r["condition"], r["qid"]))
-    order = sorted(conditions, key=lambda c: conditions[c][0] == "uniform_match")  # matches last
-    todo = [(c, it) for c in order for it in items if (c, it["qid"]) not in done]
+    todo = [(it, c) for it in items for c in conditions if (c, it["qid"]) not in done]
     print(f"{len(done)} already scored, {len(todo)} to go -> {out_path}")
 
-    fovea_tokens = {}                         # (condition, qid) -> token count, for matching
-    if os.path.exists(out_path):
-        for line in open(out_path):
-            if line.strip():
-                r = json.loads(line)
-                fovea_tokens[(r["condition"], r["qid"])] = r.get("n_image_tokens")
-
-    def layout(c, it):
-        kind, arg = conditions[c]
-        if kind == "uniform":
-            return uniform_cells(arg), arg
-        if kind == "uniform_match":
-            n = fovea_tokens.get((arg, it["qid"]))
-            if n is None:
-                g = _gaze(conditions[arg][1], it)
-                n = len(foveated_cells(*g, a=conditions[arg][1]["a"],
-                                       num_scales=conditions[arg][1].get("num_scales", 3)))
-            side = same_tokens_size(n)
-            return uniform_cells(side), side
-        g = _gaze(arg, it)
-        return foveated_cells(*g, a=arg["a"], num_scales=arg.get("num_scales", 3)), IMG
-
-    t_start, n_new, cache = time.time(), 0, {}
+    feats, video, t_start, n_new = {}, None, time.time(), 0
     with open(out_path, "a") as fh:
-        for c, it in todo:
+        for it, c in todo:
+            if it["video"] != video:                      # new video: drop the old features
+                feats.clear()
+                torch.cuda.empty_cache()
+                video = it["video"]
             t0 = time.time()
-            if it["path"] not in cache:
-                cache.clear()
-                cache[it["path"]] = load_frame01(it["path"], IMG)
-            full = cache[it["path"]]
-            cells, size = layout(c, it)
-            if conditions[c][0] == "fovea" and _gaze(conditions[c][1], it, strict=False) is None:
+            per = []
+            for fr in it["frames"]:
+                key = (c, fr["key"])
+                if key not in feats:
+                    cells, size, used = frame_layout(conditions, c, fr)
+                    img01 = resize01(load_frame01(fr["path"], IMG), size)
+                    feats[key] = (encode_cells(vis, img01, cells, size, mean, std), cells, size,
+                                  conditions[c][0] == "fovea" and used is None)
+                per.append(feats[key])
+            try:
+                msgs = build_messages(it["question"], it["options"],
+                                      [(fr["path"], fr["t"]) for fr in it["frames"]], IMG * IMG)
+                inputs, ids = build_inputs(model, proc, msgs, [p[0] for p in per],
+                                           [p[1] for p in per], [p[2] for p in per])
+                p = letter_probs(model, inputs, letter_ids)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
                 fh.write(json.dumps(dict(condition=c, qid=int(it["qid"]), video=it["video"],
-                                         error="no gaze")) + "\n")
+                                         error="oom", n_frames=len(per))) + "\n")
                 continue
-            img01 = resize01(full, size)
-            feats = encode_cells(vis, img01, cells, size, mean, std)
-            msgs = build_messages(it["question"], it["options"], [(it["path"], it["t"])], size * size)
-            inputs, ids = build_inputs(model, proc, msgs, [feats], [cells], [size])
-            p = letter_probs(model, inputs, letter_ids)
             err = None if np.isfinite(p).all() else "nan"
             pred = "ABCDE"[int(np.nanargmax(p))] if np.isfinite(p).any() else "?"
-            fovea_tokens[(c, it["qid"])] = len(cells)
+            sizes = np.concatenate([q[1][:, 2] for q in per]) if per else np.zeros(0, int)
             fh.write(json.dumps(dict(
                 condition=c, qid=int(it["qid"]), video=it["video"], answer=it["answer"],
                 pred=pred, correct=int(pred == it["answer"]), p=[round(float(v), 4) for v in p],
-                n_frames=1, n_image_tokens=len(cells), img_px=int(size),
-                n_cells_by_size={str(s): int((cells[:, 2] == s).sum()) for s in np.unique(cells[:, 2])},
+                n_frames=len(per), n_image_tokens=int(sum(len(q[1]) for q in per)),
+                cells_by_size={str(s): int((sizes == s).sum()) for s in np.unique(sizes)},
+                frame_px=sorted({int(q[2]) for q in per}), n_gaze_missing=int(sum(q[3] for q in per)),
                 n_tokens=int(ids.shape[1]), sec=round(time.time() - t0, 3), error=err)) + "\n")
             fh.flush()
             n_new += 1
             if n_new % log_every == 0:
                 rate = (time.time() - t_start) / n_new
-                print(f"   {n_new}/{len(todo)}  {rate:.2f} s each  ~{rate * (len(todo) - n_new) / 60:.0f} min left  ({c})",
-                      flush=True)
+                print(f"   {n_new}/{len(todo)}  {rate:.2f} s each  ~{rate * (len(todo) - n_new) / 60:.0f} min left"
+                      f"  ({c}, {it['video']})", flush=True)
     print(f"done: {n_new} new in {(time.time() - t_start) / 60:.1f} min")
-
-
-def _gaze(spec, it, strict=True):
-    src = spec["gaze"]
-    g = (0.5, 0.5) if src == "centre" else it.get("gaze" if src == "gaze" else "gaze_other")
-    if g is None and strict:
-        return (0.5, 0.5)            # only used for token matching; the row itself is skipped
-    return g

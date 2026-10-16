@@ -168,3 +168,18 @@ def test_expand_image_pads():
     assert qf.expand_image_pads(t, [2, 3]) == "a" + "<|image_pad|>" * 2 + "b" + "<|image_pad|>" * 3 + "c"
     with pytest.raises(ValueError):
         qf.expand_image_pads(t, [2])
+
+
+def test_frame_layout_conditions():
+    conds = {"fov": ("fovea", dict(a=40, gaze="gaze")), "ctr": ("fovea", dict(a=40, gaze="centre")),
+             "match": ("uniform_match", "fov"), "u448": ("uniform", 448)}
+    fr = dict(gaze=(0.2, 0.7), gaze_other=None)
+    cells, size, used = qf.frame_layout(conds, "fov", fr)
+    assert size == qf.IMG and used == (0.2, 0.7) and len(cells) == len(qf.foveated_cells(0.2, 0.7, a=40))
+    m_cells, m_size, _ = qf.frame_layout(conds, "match", fr)
+    assert m_size == qf.same_tokens_size(len(cells)) and len(m_cells) == (m_size // 28) ** 2
+    assert abs(len(m_cells) - len(cells)) <= 2 * np.sqrt(len(cells)) + 1     # nearest square grid
+    assert qf.frame_layout(conds, "u448", fr)[1] == 448
+    # missing gaze -> centre layout, reported as not used
+    cells_missing, _, used = qf.frame_layout(conds, "fov", dict(gaze=None, gaze_other=None))
+    assert used is None and np.array_equal(cells_missing, qf.frame_layout(conds, "ctr", fr)[0])
