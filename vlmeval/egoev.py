@@ -139,8 +139,27 @@ def video_labels(clips, preds):
     return out
 
 
+def cap_gaps(sent, max_gap):
+    """Causal gap cap: also send a frame whenever `max_gap` seconds (frames, at 1 fps) have
+    passed since the last one sent. Deployable: it only looks backwards."""
+    out = np.asarray(sent, bool).copy()
+    last = 0
+    for t in range(1, len(out)):
+        if out[t]:
+            last = t
+        elif t - last >= max_gap:
+            out[t] = True
+            last = t
+    return out
+
+
+def fixed_rate(n_frames, every):
+    """One frame every `every` seconds (may be fractional), starting at frame 0."""
+    return np.unique(np.round(np.arange(0, n_frames, every)).astype(int))
+
+
 def select_conditions(clips, model_labels, main="full", timeout=5, hybrid_frac=0.5, seed=0,
-                      fixed_every=(3, 4, 5, 6, 8)):
+                      fixed_every=(3, 4, 5, 6, 8), max_gaps=(5, 6, 8, 10)):
     """-> {condition: {video: sorted frame numbers}} for the full-scale run.
 
     model_labels: {model name: {video: predicted labels, one per frame pair}}.
@@ -168,8 +187,41 @@ def select_conditions(clips, model_labels, main="full", timeout=5, hybrid_frac=0
         put("uniform (E budget)", v, _uniform(fn, ke))
         for e in fixed_every:
             put(f"fixed every {e} s", v, fn[pol.send_every(len(c["labels"]), e)])
+        d_mask = _policy_d(lab)
+        for g in max_gaps:
+            put(f"D + max gap {g} s: {main}", v, fn[cap_gaps(d_mask, g)])
+            put(f"D + max gap {g} s: ground truth", v, fn[cap_gaps(_policy_d(c["labels"]), g)])
         put("blind (no frames)", v, [])
+
+    # For each gap-capped policy, a fixed interval chosen as ONE number for all videos so
+    # that the total frame count matches: the deployable equal-cost baseline.
+    total_s = sum(len(c["frame_no"]) for c in clips)
+    for g in max_gaps:
+        name = f"D + max gap {g} s: {main}"
+        every = total_s / max(1, sum(len(fr) for fr in out[name].values()))
+        for c in clips:
+            put(f"fixed, rate of D + max gap {g} s", c["sequence"],
+                c["frame_no"][fixed_rate(len(c["frame_no"]), every)])
     return out
+
+
+def gap_screen(sel, cov, max_gaps=(5, 6, 8, 10), main="full", n_frames=None):
+    """Coverage of each gap-capped policy against the fixed interval at the same total rate.
+    `cov` is the output of coverage(). Positive advantage = the policy covers more."""
+    hit = cov.groupby("condition")[["hit_1s", "hit_2s", "hit_5s"]].mean() * 100
+    rows = []
+    for g in max_gaps:
+        p, f = f"D + max gap {g} s: {main}", f"fixed, rate of D + max gap {g} s"
+        if p not in hit.index or f not in hit.index:
+            continue
+        fr = sum(len(x) for x in sel[p].values())
+        secs = sum(n_frames.values()) if n_frames else np.nan
+        rows.append(dict(max_gap_s=g, frames_per_min=60 * fr / secs,
+                         policy_within_2s=hit.loc[p, "hit_2s"], fixed_within_2s=hit.loc[f, "hit_2s"],
+                         advantage_2s=hit.loc[p, "hit_2s"] - hit.loc[f, "hit_2s"],
+                         policy_within_1s=hit.loc[p, "hit_1s"], fixed_within_1s=hit.loc[f, "hit_1s"],
+                         advantage_1s=hit.loc[p, "hit_1s"] - hit.loc[f, "hit_1s"]))
+    return pd.DataFrame(rows).set_index("max_gap_s")
 
 
 def budget_table(sel, n_frames):
