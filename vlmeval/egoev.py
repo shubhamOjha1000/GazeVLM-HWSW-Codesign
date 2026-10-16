@@ -102,6 +102,72 @@ def select_frames(clips, test, preds, main="full", seed=0):
     return {c: {v: [int(f) for f in fr] for v, fr in per.items()} for c, per in out.items()}
 
 
+def _uniform(fn, k):
+    return fn[np.unique(np.round(np.linspace(0, len(fn) - 1, max(1, k))).astype(int))]
+
+
+def _hybrid(fn, d_frames, k, frac=0.5):
+    """k frames: round(k*frac) evenly spaced, then the policy's frames that sit farthest
+    from anything already chosen (so the gate fills the gaps the even spacing leaves
+    rather than duplicating it), topped up with the farthest remaining frames if the
+    policy runs out."""
+    chosen = set(_uniform(fn, int(round(k * frac))).tolist()) if k * frac >= 0.5 else set()
+    for pool in ([f for f in d_frames if f not in chosen],
+                 [f for f in fn.tolist() if f not in chosen]):
+        pool = [f for f in pool if f not in chosen]
+        while len(chosen) < k and pool:
+            if chosen:
+                arr = np.array(sorted(chosen))
+                j = int(np.argmax([np.abs(arr - f).min() for f in pool]))
+            else:
+                j = 0
+            chosen.add(pool.pop(j))
+    return sorted(int(f) for f in chosen)
+
+
+def video_labels(clips, preds):
+    """Per-video predicted label sequences from a per-pair prediction table (columns
+    feat_frame_2 and pred, e.g. eyehead.oof.oof_predictions)."""
+    m = dict(zip(preds["feat_frame_2"], preds["pred"]))
+    out = {}
+    for c in clips:
+        tail = c["frames"][1:]                       # feat_frame_2 of each pair, in order
+        miss = sum(p not in m for p in tail)
+        if miss:
+            raise KeyError(f"{c['sequence']}: {miss} frame pairs have no prediction")
+        out[c["sequence"]] = np.array([m[p] for p in tail], dtype=int)
+    return out
+
+
+def select_conditions(clips, model_labels, main="full", timeout=5, hybrid_frac=0.5, seed=0):
+    """-> {condition: {video: sorted frame numbers}} for the full-scale run.
+
+    model_labels: {model name: {video: predicted labels, one per frame pair}}.
+    Budgets are per video: '(D budget)' conditions send as many frames as D: <main>,
+    '(E budget)' as many as E: <main> (D plus one frame every `timeout` s of motion).
+    """
+    rng = np.random.default_rng(seed)
+    out = {}
+    put = lambda cond, v, fr: out.setdefault(cond, {}).__setitem__(v, [int(f) for f in fr])
+    for c in clips:
+        v, fn = c["sequence"], c["frame_no"]
+        n = len(fn)
+        put("D: ground truth", v, fn[_policy_d(c["labels"])])
+        for name, labs in model_labels.items():
+            put(f"D: {name}", v, fn[_policy_d(labs[v])])
+        lab = np.asarray(model_labels[main][v])
+        e = pol.send_settle(np.isin(lab, pol.MOVING), lab == pol.R, refix=True, timeout=timeout)
+        put(f"E: {main}", v, fn[e])
+        kd, ke = len(out[f"D: {main}"][v]), len(out[f"E: {main}"][v])
+        put("uniform (D budget)", v, _uniform(fn, kd))
+        put(f"hybrid {int(100*hybrid_frac)}/{int(100*(1-hybrid_frac))} (D budget)", v,
+            _hybrid(fn, out[f"D: {main}"][v], kd, hybrid_frac))
+        put("random (D budget)", v, sorted(fn[rng.choice(n, kd, replace=False)]))
+        put("uniform (E budget)", v, _uniform(fn, ke))
+        put("blind (no frames)", v, [])
+    return out
+
+
 def budget_table(sel, n_frames):
     """Frames sent per video and overall, per condition."""
     rows = []
