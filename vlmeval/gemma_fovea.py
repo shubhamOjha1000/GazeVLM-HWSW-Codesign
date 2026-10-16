@@ -159,12 +159,15 @@ TOKENIZE = dict(strip_bos=False, add_special_tokens=None, type_ids_key=None)
 
 
 def image_affixes(proc):
-    """Text around an image's soft tokens, as Gemma's processor writes it."""
-    soft = getattr(proc, "image_token", SOFT)
+    """(prefix, suffix, soft token) around an image's soft tokens, as Gemma's processor writes
+    it. The soft token is <image_soft_token>; newer processors call the <start_of_image>
+    placeholder `image_token`, so that attribute is only a fallback and never the boi token."""
     full = getattr(proc, "full_image_sequence", None)
-    if full and soft in full:
-        return full[:full.index(soft)], full[full.rindex(soft) + len(soft):], soft
-    return "\n\n" + getattr(proc, "boi_token", BOI), getattr(proc, "eoi_token", EOI) + "\n\n", soft
+    boi = getattr(proc, "boi_token", BOI)
+    for soft in (SOFT, getattr(proc.tokenizer, "image_token", None), getattr(proc, "image_token", None)):
+        if soft and soft != boi and full and soft in full:
+            return full[:full.index(soft)], full[full.rindex(soft) + len(soft):], soft
+    return "\n\n" + boi, getattr(proc, "eoi_token", EOI) + "\n\n", SOFT
 
 
 def expand_images(proc, text, n_tokens):

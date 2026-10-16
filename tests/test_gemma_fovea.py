@@ -129,10 +129,16 @@ def test_frame_tokens_conditions(projector):
     assert used is None and np.array_equal(miss_cells, gf.frame_tokens(conds, "ctr", fr, grid, projector)[1])
 
 
-def test_expand_images():
+@pytest.mark.parametrize("image_token", [gf.SOFT, gf.BOI])     # transformers 5 names the boi `image_token`
+def test_expand_images(image_token):
+    class Tok:
+        pass
+
     class P:
-        boi_token, eoi_token, image_token = gf.BOI, gf.EOI, gf.SOFT
+        boi_token, eoi_token = gf.BOI, gf.EOI
         full_image_sequence = "\n\n" + gf.BOI + gf.SOFT * 256 + gf.EOI + "\n\n"
+        tokenizer = Tok()
+    P.image_token = image_token
     t = "a" + gf.BOI + "b" + gf.BOI + "c"
     out = gf.expand_images(P(), t, [2, 3])
     assert out == ("a\n\n" + gf.BOI + gf.SOFT * 2 + gf.EOI + "\n\nb\n\n" + gf.BOI + gf.SOFT * 3
