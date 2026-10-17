@@ -265,15 +265,33 @@ def _first_mismatch(tok, a, b, ctx=4):
 
 @torch.no_grad()
 def parity_report(model, proc, letter_ids, img01, question, options, build_messages):
-    """Our foveation path with an all-28 px layout at 448 px vs InternVL's own pipeline (the
-    processor's one-call API on a message holding the image): pixels, vision tokens, token
-    ids, answer probabilities. Also checks our uniform path against the same reference."""
+    """Our foveation path with an all-28 px layout vs InternVL's own pipeline, on one real frame.
+
+    Our path feeds the same patches to the (full-attention) encoder in a different order, which
+    only changes bf16 rounding. So the plumbing is checked without rounding noise, in two parts:
+      vision  in fp32: all-28 px layout through our path vs InternVL's own vision forward +
+              pixel shuffle + projector (encode_uniform, itself checked against
+              get_image_features in bf16)
+      LLM     our prompt + inputs_embeds carrying InternVL's own image tokens vs the
+              processor's one-call API + model: token ids and answer probabilities
+    The bf16 deviation of our path is reported next to InternVL's own bf16-vs-fp32 deviation."""
     ip = proc.image_processor
     mean, std = ip.image_mean, ip.image_std
+    vt, proj, _, _, _ = parts(model)
     x = qf.to_uint8_pil(qf.resize01(img01, TILE))
     x01 = torch.from_numpy(np.array(x)).permute(2, 0, 1).float() / 255.0
-    f_cells = encode_cells(model, x01, qf.uniform_cells(TILE), mean, std).float()
-    f_unif = encode_uniform(model, x01, TILE, mean, std).float()
+    cells = qf.uniform_cells(TILE)
+    f_cells16 = encode_cells(model, x01, cells, mean, std).float()
+    f_unif16 = encode_uniform(model, x01, TILE, mean, std).float()
+
+    dtype = next(vt.parameters()).dtype
+    try:                                                     # vision parity without bf16 rounding
+        vt.float(); proj.float()
+        f_cells32 = encode_cells(model, x01, cells, mean, std).float()
+        f_unif32 = encode_uniform(model, x01, TILE, mean, std).float()
+    finally:
+        vt.to(dtype); proj.to(dtype)
+    cos = lambda a, b: F.cosine_similarity(a, b, dim=-1).min().item()
 
     msgs = build_messages(question, options, [("frame.jpg", 0.0)], TILE * TILE)
     msgs_pil = [dict(m, content=[{"type": "image", "image": x} if c.get("type") == "image" else c
@@ -294,23 +312,28 @@ def parity_report(model, proc, letter_ids, img01, question, options, build_messa
         pixel_values=pv.to(next(model.parameters()).dtype),
         vision_feature_layer=getattr(cfg, "vision_feature_layer", -1),
         vision_feature_select_strategy=getattr(cfg, "vision_feature_select_strategy", "default")))
-    f_stock = f_stock.reshape(-1, f_stock.shape[-1]).float()
+    f_stock = f_stock.reshape(-1, f_stock.shape[-1])
 
-    inputs, ids = build_inputs(model, proc, msgs, [f_cells])
-    p_ours = letter_probs(model, inputs, letter_ids)
     p_stock = torch.softmax(model(**stock, use_cache=False).logits[0, -1, letter_ids].float(), -1).cpu().numpy()
+    inputs, ids = build_inputs(model, proc, msgs, [f_stock])            # LLM plumbing, stock image tokens
+    p_llm = letter_probs(model, inputs, letter_ids)
+    inputs16, _ = build_inputs(model, proc, msgs, [f_cells16])           # our whole path in bf16 (info)
+    p_ours = letter_probs(model, inputs16, letter_ids)
     same_ids = bool(torch.equal(ids[0].cpu(), sid))
     return dict(tiles_in_stock=int(pv.shape[0]),
                 tokenization=f"add_special_tokens={matched[0]}" if matched else "NO VARIANT MATCHED",
                 pixel_max_abs_diff=pix,
-                vision_cells_cos_min=F.cosine_similarity(f_cells, f_stock, dim=-1).min().item(),
-                vision_cells_max_abs_diff=(f_cells - f_stock).abs().max().item(),
-                vision_uniform_max_abs_diff=(f_unif - f_stock).abs().max().item(),
+                uniform_vs_get_image_features=(f_unif16 - f_stock.float()).abs().max().item(),
+                vision_fp32_cos_min=cos(f_cells32, f_unif32),
+                vision_fp32_max_abs_diff=(f_cells32 - f_unif32).abs().max().item(),
                 tokens_ids_equal=same_ids,
                 first_token_mismatch="-" if same_ids else _first_mismatch(proc.tokenizer, ids[0].cpu(), sid),
-                probs_max_abs_diff=float(np.abs(p_ours - p_stock).max()),
-                same_answer=bool(p_ours.argmax() == p_stock.argmax()),
-                probs_ours=np.round(p_ours, 3).tolist(), probs_stock=np.round(p_stock, 3).tolist())
+                llm_probs_max_abs_diff=float(np.abs(p_llm - p_stock).max()),
+                llm_same_answer=bool(p_llm.argmax() == p_stock.argmax()),
+                info_bf16_ours_cos_min=cos(f_cells16, f_unif16),
+                info_bf16_internvl_own_cos_min_vs_fp32=cos(f_unif16, f_unif32),
+                info_bf16_ours_probs_max_abs_diff=float(np.abs(p_ours - p_stock).max()),
+                info_bf16_ours_same_answer=bool(p_ours.argmax() == p_stock.argmax()))
 
 
 @torch.no_grad()
