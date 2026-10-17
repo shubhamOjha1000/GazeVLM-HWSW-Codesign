@@ -120,10 +120,10 @@ def tokens_from_cells(model, sub):
 
 
 # ---------------------------------------------------------------------------- encoding
-@torch.no_grad()
-def encode_cells(model, img01, cells, mean, std):
-    """LLM tokens (N, D), one per cell, for any 28/56/112 px layout of a 448 px frame."""
-    vt, _, _, _, layer = parts(model)
+def embed_cells(vt, img01, cells, mean, std):
+    """InternViT's input sequence for a cell layout: (1, 1 + 4N, C) = CLS + patches in raster
+    order of their positions (InternVL's own order for an all-28 px layout), and the order used
+    (patch i of the sequence = patch order[i] of the cells, each cell's 4 patches row-major)."""
     p = next(vt.parameters())
     n = len(cells)
     patches = qf.cells_to_patches(img01, cells, mean, std, temporal=1).view(4 * n, 3, PATCH, PATCH)
@@ -131,9 +131,20 @@ def encode_cells(model, img01, cells, mean, std):
     x = emb.patch_embeddings.projection(patches.to(p.device, p.dtype)).flatten(1)       # (4N, C)
     h, w = qf.patch_positions(cells)
     x = x + sample_positions(vt, h, w).to(x.dtype)
+    order = torch.argsort(h.double() * 4096 + w.double()).to(x.device)                # raster order
     cls_pos, _ = _pos_table(vt)
     cls = (emb.cls_token.reshape(1, -1) + cls_pos).to(x.dtype)
-    feats = _encoder_features(vt, torch.cat([cls, x]).unsqueeze(0), layer)[0, 1:]     # drop CLS
+    return torch.cat([cls, x[order]]).unsqueeze(0), order
+
+
+@torch.no_grad()
+def encode_cells(model, img01, cells, mean, std):
+    """LLM tokens (N, D), one per cell, for any 28/56/112 px layout of a 448 px frame."""
+    vt, _, _, _, layer = parts(model)
+    seq, order = embed_cells(vt, img01, cells, mean, std)
+    out = _encoder_features(vt, seq, layer)[0, 1:]                                   # drop CLS
+    feats = torch.empty_like(out)
+    feats[order] = out                                                               # back to cell order
     return tokens_from_cells(model, feats)
 
 
@@ -285,12 +296,27 @@ def parity_report(model, proc, letter_ids, img01, question, options, build_messa
     f_unif16 = encode_uniform(model, x01, TILE, mean, std).float()
 
     dtype = next(vt.parameters()).dtype
-    try:                                                     # vision parity without bf16 rounding
+    tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+    try:                                                     # vision parity in true fp32
+        from torch.nn.attention import sdpa_kernel, SDPBackend
+        exact_attention = sdpa_kernel(SDPBackend.MATH)
+    except Exception:
+        from contextlib import nullcontext
+        exact_attention = nullcontext()
+    try:
         vt.float(); proj.float()
-        f_cells32 = encode_cells(model, x01, cells, mean, std).float()
-        f_unif32 = encode_uniform(model, x01, TILE, mean, std).float()
+        torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
+        with exact_attention:
+            f_cells32 = encode_cells(model, x01, cells, mean, std).float()
+            f_unif32 = encode_uniform(model, x01, TILE, mean, std).float()
+            seq32, _ = embed_cells(vt, x01, cells, mean, std)
+            pv32 = ((x01 - torch.as_tensor(mean).view(3, 1, 1)) / torch.as_tensor(std).view(3, 1, 1))
+            stock_emb = vt.embeddings(pv32.unsqueeze(0).to(next(vt.parameters()).device))
+            stock_emb = stock_emb[0] if isinstance(stock_emb, (tuple, list)) else stock_emb
+            embed_diff = (seq32 - stock_emb).abs().max().item()
     finally:
         vt.to(dtype); proj.to(dtype)
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
     cos = lambda a, b: F.cosine_similarity(a, b, dim=-1).min().item()
 
     msgs = build_messages(question, options, [("frame.jpg", 0.0)], TILE * TILE)
@@ -324,6 +350,7 @@ def parity_report(model, proc, letter_ids, img01, question, options, build_messa
                 tokenization=f"add_special_tokens={matched[0]}" if matched else "NO VARIANT MATCHED",
                 pixel_max_abs_diff=pix,
                 uniform_vs_get_image_features=(f_unif16 - f_stock.float()).abs().max().item(),
+                encoder_input_fp32_max_abs_diff=embed_diff,
                 vision_fp32_cos_min=cos(f_cells32, f_unif32),
                 vision_fp32_max_abs_diff=(f_cells32 - f_unif32).abs().max().item(),
                 tokens_ids_equal=same_ids,
