@@ -22,6 +22,7 @@ labels for the test videos:
 
     A  send every frame whose label is not STABLE           (the design PDF's gate)
     B  send TRANSITION + REFIXATION                         (discard PURSUIT + STABLE)
+    D+P  D, plus the first frame of every PURSUIT run (or every PURSUIT frame)
     C  settle: send the first frame of each settled stretch after a moving one
     D  C + send each REFIXATION inside a settled stretch    (new gaze target)
     E  D + a timeout: during a long moving stretch, send every `timeout` frames
@@ -202,12 +203,21 @@ def send_every(n, every):
     return sent
 
 
-def send_settle(mv, rf, refix=False, timeout=None, min_settle=1):
+def send_settle(mv, rf, refix=False, timeout=None, min_settle=1, pu=None, pursuit=None):
     """Frame 0 is always sent. After a moving stretch, the frame on which the view has
     been settled for `min_settle` consecutive pairs is sent (1 = the first settled frame).
     With `refix`, a REFIXATION inside an already-answered settled stretch is sent too.
     With `timeout`, a frame is sent every `timeout` frames while a moving stretch is still
-    unanswered. Settled blips shorter than `min_settle` do not end the stretch."""
+    unanswered. Settled blips shorter than `min_settle` do not end the stretch.
+
+    PURSUIT (`pu`: mask of PURSUIT pairs; the view changes while the eyes stay on a moving
+    target) is a moving label, so by default it is never sent. `pursuit` sends some of it:
+        'first'  the first frame of every run of consecutive PURSUIT pairs
+        'all'    every PURSUIT frame
+        int N    a PURSUIT frame whenever N frames have passed since the last sent frame
+    A pursuit send does not answer the moving stretch: the settle frame is still sent."""
+    if pursuit is not None and pu is None:
+        raise ValueError('pursuit needs the PURSUIT mask pu')
     n = len(mv)
     sent = np.zeros(n + 1, bool)
     sent[0] = True
@@ -220,6 +230,13 @@ def send_settle(mv, rf, refix=False, timeout=None, min_settle=1):
                 pending, moving_since = True, t
             if timeout and t - max(last, moving_since - 1) >= timeout:
                 sent[t] = True
+            if pursuit is not None and pu[k]:
+                if pursuit == 'all':
+                    sent[t] = True
+                elif pursuit == 'first':
+                    sent[t] = sent[t] or k == 0 or not pu[k - 1]
+                else:
+                    sent[t] = sent[t] or t - last >= int(pursuit)
         else:
             settled_run += 1
             if pending:
@@ -257,6 +274,8 @@ def policies(lab, probs=None, timeout=5, hyst=(0.6, 0.4), min_settle=2):
         "B: TRANSITION + REFIX": send_transition_refix(lab),
         "C: settle": send_settle(mv, rf),
         "D: settle + refix": send_settle(mv, rf, refix=True),
+        "D+P: D + first PURSUIT frame": send_settle(mv, rf, refix=True, pu=lab == P, pursuit="first"),
+        "D+P all: D + every PURSUIT frame": send_settle(mv, rf, refix=True, pu=lab == P, pursuit="all"),
         f"E: D + {timeout}s timeout": send_settle(mv, rf, refix=True, timeout=timeout),
         f"G: E, settle >= {min_settle}s": send_settle(mv, rf, refix=True, timeout=timeout,
                                                       min_settle=min_settle),

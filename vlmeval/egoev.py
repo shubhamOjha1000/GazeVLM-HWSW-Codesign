@@ -70,9 +70,12 @@ def gate_clips(folds_dir, test_only=True):
     return clips, test
 
 
-def _policy_d(lab):
+def _policy_d(lab, pursuit=None):
+    """Policy D (send when the view settles + on each REFIXATION). pursuit='first' / 'all' /
+    int also sends PURSUIT frames (see eyehead.policy.send_settle)."""
     lab = np.asarray(lab)
-    return pol.send_settle(np.isin(lab, pol.MOVING), lab == pol.R, refix=True)
+    return pol.send_settle(np.isin(lab, pol.MOVING), lab == pol.R, refix=True,
+                           pu=lab == pol.P, pursuit=pursuit)
 
 
 def select_frames(clips, test, preds, main="full", seed=0):
@@ -178,6 +181,8 @@ def select_conditions(clips, model_labels, main="full", timeout=5, hybrid_frac=0
         put("D: ground truth", v, fn[_policy_d(c["labels"])])
         for name, labs in model_labels.items():
             put(f"D: {name}", v, fn[_policy_d(labs[v])])
+            put(f"D+P: {name}", v, fn[_policy_d(labs[v], pursuit='first')])
+            put(f"D+P all: {name}", v, fn[_policy_d(labs[v], pursuit='all')])
         lab = np.asarray(model_labels[main][v])
         e = pol.send_settle(np.isin(lab, pol.MOVING), lab == pol.R, refix=True, timeout=timeout)
         put(f"E: {main}", v, fn[e])
