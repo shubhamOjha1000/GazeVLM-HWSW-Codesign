@@ -29,6 +29,7 @@ DEFAULTS = {
     "prunevid": {"settings": [{"tau": 0.8, "beta": 0.07}, {"tau": 0.8, "beta": 0.14}], "gamma": 0.25, "knn": 7,
                  "min_tokens": 14},
     "dtd": {"settings": [{"threshold": 0.96, "absolute": False}, {"threshold": 0.91, "absolute": False}]},
+    "avgpool": {"budget": [0.05, 0.1]},
 }
 GAZE_WINDOW = 1.0       # seconds of gaze before a frame: its fixation estimate and its raw trace
 REQUIRED_PATHS = ("folds_dir", "gate_ckpt_dir", "frames_cache_dir")

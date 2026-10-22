@@ -1,5 +1,5 @@
-"""Score the accuracy-table rows (Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid, DTD)
-for one or more VLMs.
+"""Score the accuracy-table rows (Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid, DTD,
+Uniform K + average pooling) for one or more VLMs.
 
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from accuracy_tables import common  # noqa: E402
 from accuracy_tables.models import ADAPTERS, build_messages  # noqa: E402
 
-ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke", "fastvid", "prunevid", "dtd")
+ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke", "fastvid", "prunevid", "dtd", "avgpool")
 BLIND = "blind (question and options only)"
 
 
@@ -67,6 +67,10 @@ def dtd_name(s, k):
     if s["absolute"]:
         return f"DTD feature tau={float(s['threshold']):g} (absolute, K={k})"
     return f"DTD feature drop={float(s['threshold']):g} (relative, K={k})"
+
+
+def avgpool_name(side, k):
+    return f"uniform K={k} + average pooling {side}x{side}"
 
 
 def _done(path):
@@ -203,6 +207,17 @@ def run_model(key, cfg, data, rows, info_extra=None):
             print(f"\n--- DTD (TimeChat-Online): the {k} Uniform K frames per video in time order; settings "
                   f"{[(c['threshold'], 'absolute' if c['absolute'] else 'relative') for c in conds.values()]}")
             dtd.run_questions(ad.dtd_backend(), uniform_items, conds, os.path.join(out_dir, "dtd.jsonl"), build_messages)
+
+        if "avgpool" in rows:
+            from vlmeval import avgpool as ap
+            be = ad.avgpool_backend()
+            sides = sorted({ap.pool_side(float(b), ad.stock_tokens, be.side, getattr(be, "row_breaks", False))
+                            for b in cfg["avgpool"]["budget"]})
+            conds = {avgpool_name(s, k): dict(side=s) for s in sides}
+            print(f"\n--- Uniform K + average pooling: the {k} Uniform K frames, each pooled to "
+                  f"{[f'{s}x{s}' for s in sides]} tokens (budgets {list(cfg['avgpool']['budget'])} of "
+                  f"{ad.stock_tokens} tokens per frame)")
+            ap.run_questions(be, uniform_items, conds, os.path.join(out_dir, "avgpool.jsonl"), build_messages)
     finally:
         try:
             import transformers

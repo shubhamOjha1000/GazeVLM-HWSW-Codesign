@@ -1,12 +1,13 @@
-# accuracy_tables — Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid and DTD on six VLMs
+# accuracy_tables — Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid, DTD and Uniform K + average pooling on six VLMs
 
-This folder produces nine rows of the paper's accuracy tables (Table 1, EgoEverything) for every
+This folder produces ten rows of the paper's accuracy tables (Table 1, EgoEverything) for every
 VLM in the project:
 
 | row in the paper | condition name in the result files | what the model sees |
 |---|---|---|
 | Uniform *K* frames (stock input), the 100% budget | `uniform K=96 (stock input)` | *K* = 96 frames per video, evenly spaced over the 1 fps stream (all frames if the video is shorter), each at the model's stock input |
 | Blind (question and options only), 0% | `blind (question and options only)` | the same prompt without any frame |
+| Uniform *K* + average pooling | `uniform K=96 + average pooling 4x4` (one per pooled size) | the Uniform K frames at stock input, each frame's token grid average-pooled to s x s tokens (section Average pooling below) |
 | Ours (gaze/IMU gate + foveation) | `ours D+P gate + fovea R=70 a=160` (one per fovea setting) | the frames the eye + head gate sends under policy D+P, each foveated at that frame's gaze point |
 | GazeVLM (Chen & Qi) | `GazeVLM rho=0.3 (K=96, sigma=0.1, R_min=0.125, thumb 2x2, fixation gaze)` (one per rho) | the Uniform K frames, each reduced to the tokens of its gaze region plus a 2 x 2-token thumbnail (section GazeVLM below) |
 | StreamingTOM (Chen et al.) | `StreamingTOM CTR G=0.05N (K=96, tau=0.9, k=7, beta=0.6)` (one per G / N) | the Uniform K frames in time order, each reduced to G tokens from its own and the previous frame's tokens (section StreamingTOM below) |
@@ -54,6 +55,8 @@ The models (keys used everywhere in this folder):
 | `../tests/test_prunevid.py` | CPU tests of PruneVid: clustering, the authors' segment refinement rules, static tokens, merging, plans, the run loop |
 | `../vlmeval/dtd.py` | DTD: each frame's tokens dropped where they match the previous frame's, on the StreamingTOM backends' tokens |
 | `../tests/test_dtd.py` | CPU tests of DTD: the absolute and relative drop rules, plans, the retention formula, the run loop |
+| `../vlmeval/avgpool.py` | Uniform K + average pooling: each frame's stock token grid pooled to s x s, on the GazeVLM backends |
+| `../tests/test_avgpool.py` | CPU tests of average pooling: the pooled size per budget, the pooling per model family, the run loop |
 
 No model code lives here: the foveation, the token assembly and each model's parity check are in
 `vlmeval/` and are shared with the per-model notebooks in `notebooks/colab_vlm_egoeverything*.ipynb`.
@@ -95,12 +98,12 @@ python -m pytest tests/test_accuracy_tables.py -q
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model phi --rows gazevlm
-python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows streamingtom,dycoke,fastvid,prunevid,dtd
+python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows avgpool,streamingtom,dycoke,fastvid,prunevid,dtd
 python -m accuracy_tables.summarize --config accuracy_tables/config.yaml
 ```
 
 Options of `run.py`: `--model` one key, a comma list or `all` (one model at a time is loaded and
-freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke,fastvid,prunevid,dtd` (default all nine); `--videos test|all` overrides
+freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke,fastvid,prunevid,dtd,avgpool` (default all ten); `--videos test|all` overrides
 `run.videos`; `--no-parity` skips the parity check.
 
 What a run does, per model:
@@ -358,11 +361,30 @@ so the defaults use it: threshold 0.96 → 5.3% and 0.91 → 10.3% at K = 96 and
 added as `{threshold: 0.5, absolute: true}` (its budget then depends on the content: `kept_share`).
 TimeChat-Online's pixel-level variant (`method='pixel'`) is not used.
 
+## Average pooling
+
+Uniform K + average pooling (the protocol's simplest reduction). Code: `vlmeval/avgpool.py`; settings:
+`avgpool` in the config. Each Uniform K frame is encoded at the model's stock input (the GazeVLM
+backends' `frame_grid`), then its token grid is average-pooled (adaptive pooling, as
+`torch.nn.functional.adaptive_avg_pool2d`) to s x s tokens. For each budget in `avgpool.budget`, s is the
+size whose tokens per frame come closest to budget x the model's stock tokens per frame:
+
+| model | pooled grid | 5% | 10% | where it pools, positions |
+|---|---|---|---|---|
+| Qwen2.5-VL, Qwen3-VL | 16 x 16 LLM tokens | 4 x 4 (6.3%) | 5 x 5 (9.8%) | M-RoPE at the centre of each bin's cells; Qwen3-VL's DeepStack features pooled the same way |
+| InternVL3.5 | 16 x 16 LLM tokens | 4 x 4 | 5 x 5 | raster order |
+| Gemma-3 | its 64 x 64 SigLIP patch grid, before its own norm + projection | 4 x 4 | 5 x 5 | raster order |
+| Phi-3.5 | its 24 x 24 crop-token grid, before projection | 6 x 6 + 6 row breaks (5.5% of 757) | 8 x 8 + 8 (9.5%) | no separator, no global view |
+| SmolVLM2 | 9 x 9 LLM tokens | 2 x 2 (4.9%) | 3 x 3 (11.1%) | raster order |
+
+Pooling after the encoder saves LLM tokens but not encoder compute. The protocol's optional second row
+(resizing before the encoder) is not implemented here.
+
 ## Results
 
 `<out_dir>/<model>/`:
 
-- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`, `dycoke.jsonl`, `fastvid.jsonl`, `prunevid.jsonl`, `dtd.jsonl`: one
+- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`, `dycoke.jsonl`, `fastvid.jsonl`, `prunevid.jsonl`, `dtd.jsonl`, `avgpool.jsonl`: one
   JSON object per (condition, question):
   `condition, qid, video, answer, pred, correct, p` (probabilities over A–E), `n_frames`,
   `n_image_tokens` (visual tokens entering the LLM, every token counted: Phi's row breaks and
@@ -374,7 +396,7 @@ TimeChat-Online's pixel-level variant (`method='pixel'`) is not used.
   rows `kept_share` (share of the frames' tokens kept) and `dycoke`; FastVID rows `n_frames_dropped` (frames
   left without tokens), `n_segments` and `fastvid`; PruneVid rows `n_frames_dropped`, `n_segments`,
   `static_share` (share of the frames' tokens that were static) and `prunevid`; DTD rows
-  `n_frames_dropped`, `kept_share` and `dtd`.
+  `n_frames_dropped`, `kept_share` and `dtd`; average-pooling rows `avgpool` (the pooled side).
 - `run_info.json`: model id, versions, the config used, the frame cap, and the parity report.
 
 `<out_dir>/summary.csv` (from `summarize.py`): per model and condition `n, accuracy, ci_low,
@@ -420,5 +442,6 @@ ci_high` (95% interval from resampling whole videos), `frames_per_q, tokens_per_
   (the authors' Qwen2.5-VL run: `tau: 0.84`); all are in the condition name.
 - **Another PruneVid setting**: add a `{tau, beta}` pair to `prunevid.settings` (the authors' own:
   `{tau: 0.8, beta: 0.5}`) or change `gamma`, `knn`, `min_tokens`; all are in the condition name.
+- **Another pooled size**: add a budget to `avgpool.budget` (sizes are chosen per model; equal sizes run once).
 - **Another DTD setting**: add a `{threshold, absolute}` pair to `dtd.settings` (the authors' own:
   `{threshold: 0.5, absolute: true}`).

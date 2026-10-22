@@ -97,3 +97,9 @@ dtd:                  # DTD, TimeChat-Online's Differential Token Drop (Yao et a
                       # absolute: true = drop every token with cosine > threshold (the authors' default 0.5)
     - {threshold: 0.96, absolute: false}   # ~5.3% (K = 96, 256 tokens/frame)
     - {threshold: 0.91, absolute: false}   # ~10.3%
+
+avgpool:              # Uniform K + average pooling: each Uniform K frame encoded at stock input, its token grid
+                      # average-pooled to s x s tokens
+  budget: [0.05, 0.1] # per budget, s with tokens per frame closest to budget x stock tokens: Qwen / InternVL /
+                      # Gemma 4x4 and 5x5 (6.3%, 9.8%), Phi 6x6 and 8x8 (+ row breaks: 5.5%, 9.5%), SmolVLM 2x2
+                      # and 3x3 (4.9%, 11.1%)
