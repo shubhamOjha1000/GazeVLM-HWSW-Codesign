@@ -12,6 +12,7 @@ patches: the real 27 x 27 grid)
   5. a foveated layout gives one finite token per cell, each following its cell when reordered
   6. the uniform path at a smaller side gives (side / 42)^2 tokens
   7. LLM PARITY: our inputs_embeds (image tokens from our path) give the stock forward's logits
+     (on transformers 5.20 with the in-order merge of the other versions, whose fill is checked too)
   8. prompt expansion and condition layouts
 """
 import numpy as np
@@ -49,6 +50,7 @@ def model():
         m = SmolVLMForConditionalGeneration(cfg).float().eval()
     except Exception as ex:
         pytest.skip(f"cannot build a tiny SmolVLM here: {ex}")
+    sm.fix_stock_merge()                       # transformers 5.20's own merge fails for 81 tokens per image
     torch.manual_seed(0)
     with torch.no_grad():
         for p in m.parameters():
@@ -124,6 +126,19 @@ def test_llm_inputs_reproduce_smolvlm_forward(model):
         ours = model(**inputs, use_cache=False).logits[0]
     assert ours.shape == stock.shape
     assert torch.allclose(ours, stock, atol=1e-4, rtol=1e-4), (ours - stock).abs().max()
+
+
+def test_merge_in_order(model):
+    """The merge given to transformers 5.20's SmolVLM: the k-th <image> token of the batch gets the
+    k-th feature row, every other token keeps its embedding."""
+    P = model.config.image_token_id
+    ids = torch.tensor([[1, P, P, 2, P, 3], [P, 4, P, P, 5, 6]])
+    with torch.no_grad():
+        emb = model.get_input_embeddings()(ids)
+        feats = torch.arange(6 * emb.shape[-1], dtype=emb.dtype).view(6, -1)
+        out = sm._merge_in_order(model.model, ids, emb, feats)
+    mask = ids == P
+    assert torch.equal(out[mask], feats) and torch.equal(out[~mask], emb[~mask])
 
 
 # ---------------------------------------------------------------------------- prompt / conditions

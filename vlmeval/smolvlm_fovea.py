@@ -108,6 +108,37 @@ def parts(model):
     return inner.vision_model, inner.connector
 
 
+def _merge_in_order(self, input_ids, inputs_embeds, image_hidden_states):
+    """SmolVLM's merge of the image features into the prompt as in transformers <= 5.19 and on main:
+    the k-th <image> token of the batch gets the k-th feature row."""
+    if input_ids is None:
+        mask = (inputs_embeds == self.get_input_embeddings()(torch.full(
+            (), self.config.image_token_id, dtype=torch.long, device=inputs_embeds.device))).all(-1)
+    else:
+        mask = input_ids == self.config.image_token_id
+    feats = image_hidden_states.reshape(-1, inputs_embeds.shape[-1]).to(inputs_embeds.device, inputs_embeds.dtype)
+    if int(mask.sum()) != len(feats):
+        raise ValueError(f"{int(mask.sum())} <image> tokens, {len(feats)} image feature rows")
+    return inputs_embeds.masked_scatter(mask.unsqueeze(-1).expand_as(inputs_embeds), feats)
+
+
+def fix_stock_merge():
+    """transformers 5.20 merges SmolVLM's image features in blocks of the vision patch size (14),
+    which fails for 81 tokens per image; that version's SmolVLMModel gets the in-order merge of the
+    versions before and after (the same result wherever theirs works). True if it is in use."""
+    import inspect
+    from transformers.models.smolvlm import modeling_smolvlm as ms
+    merge = getattr(ms.SmolVLMModel, "inputs_merger", None)
+    if merge is not None and merge is not _merge_in_order:
+        try:
+            src = inspect.getsource(merge)
+        except (OSError, TypeError):
+            src = ""
+        if "vision_config.patch_size" in src:
+            ms.SmolVLMModel.inputs_merger = _merge_in_order
+    return getattr(ms.SmolVLMModel, "inputs_merger", None) is _merge_in_order
+
+
 _POS = {}
 
 
@@ -290,6 +321,7 @@ def letter_token_ids(tok, prefix="Assistant:", sep=" "):
 
 def load_model(model_id):
     from transformers import AutoProcessor
+    fix_stock_merge()                          # the stock forward is the parity reference
     try:
         from transformers import SmolVLMForConditionalGeneration as Model
     except ImportError:
@@ -312,10 +344,14 @@ def _first_mismatch(tok, a, b, ctx=4):
 
 
 def _image_features(out):
-    if torch.is_tensor(out):
-        return out
-    pooled = getattr(out, "pooler_output", None)
-    return pooled if pooled is not None else out[0]
+    """get_image_features' tokens as one tensor: it returns a tensor, an output with pooler_output,
+    or (transformers 5.20) an output whose pooler_output is a list, one (n, D) tensor per sample."""
+    f = out if torch.is_tensor(out) else getattr(out, "pooler_output", None)
+    if f is None:
+        f = out[0]
+    if isinstance(f, (list, tuple)):
+        f = torch.cat([x.reshape(-1, x.shape[-1]) for x in f])
+    return f
 
 
 @torch.no_grad()
@@ -327,6 +363,7 @@ def parity_report(model, proc, letter_ids, pil, question, options, build_message
               against get_image_features in bf16); bf16 deviation reported for information
       LLM     our prompt + inputs_embeds carrying SmolVLM's own image tokens vs the processor's
               one-call API + model: token ids and answer probabilities"""
+    merge_fixed = fix_stock_merge()
     ip = proc.image_processor
     mean, std = ip.image_mean, ip.image_std
     vis, connector = parts(model)
@@ -371,7 +408,8 @@ def parity_report(model, proc, letter_ids, pil, question, options, build_message
     inputs16, _ = build_inputs(model, proc, msgs, [f_cells16])           # our whole path in bf16 (info)
     p_ours = letter_probs(model, inputs16, letter_ids)
     same_ids = bool(torch.equal(ids[0].cpu(), sid))
-    return dict(images_in_stock=int(stock["pixel_values"].shape[1]),
+    return dict(stock_merge="in order (5.20's replaced)" if merge_fixed else "transformers' own",
+                images_in_stock=int(stock["pixel_values"].shape[1]),
                 tokenization=f"add_special_tokens={matched[0]}" if matched else "NO VARIANT MATCHED",
                 pixel_max_abs_diff=pix,
                 own_path_vs_get_image_features=(f_pix16 - f_stock.float()).abs().max().item(),
