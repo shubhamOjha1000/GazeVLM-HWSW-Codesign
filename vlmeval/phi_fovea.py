@@ -158,11 +158,10 @@ def load_model(model_id=MODEL_ID):
         llm = Phi3ForCausalLM.from_pretrained(model_id, torch_dtype=torch.bfloat16, **kw)
     img = load_image_weights(PhiImage(cfg["hidden_size"]), _checkpoint_tensors(model_id, PREFIX))
     img = img.to(llm.get_input_embeddings().weight.device, torch.bfloat16).eval()
-    try:                                       # Phi's tokenizer class, loaded directly: AutoTokenizer would
-        from transformers import LlamaTokenizerFast as Tok      # look up AutoConfig and ask to run Phi's
-    except ImportError:                                         # remote configuration code
-        Tok = AutoTokenizer
-    tok = Tok.from_pretrained(model_id)
+    # config= spares AutoTokenizer its config lookup, which asks to run Phi's remote code; for phi3 it then
+    # loads tokenizer.json as published, as Phi's own processor does (LlamaTokenizer rebuilds it in
+    # transformers 5 and writes the letter after <|assistant|> as 'A', where Phi writes '▁A')
+    tok = AutoTokenizer.from_pretrained(model_id, config=llm_cfg)
     gen = tok.apply_chat_template([{"role": "user", "content": "x"}], tokenize=False, add_generation_prompt=True)
     return img, llm.eval(), tok, letter_token_ids(tok, gen)
 
@@ -437,8 +436,11 @@ def load_remote(model_id=MODEL_ID):
         except Exception as ex2:
             notes["remote_image_processor"] = f"not loaded ({type(ex2).__name__}: {str(ex2)[:120]})"
     try:
-        from transformers import AutoModelForCausalLM
-        kw = dict(trust_remote_code=True, attn_implementation="eager", device_map="auto")
+        from transformers import AutoConfig, AutoModelForCausalLM
+        cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+        cfg._attn_implementation = "eager"     # config.json names flash_attention_2: in transformers 5 that wins
+                                               # over the keyword, and this remote class refuses it there
+        kw = dict(config=cfg, trust_remote_code=True, attn_implementation="eager", device_map="auto")
         try:
             model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16, **kw)
         except TypeError:
@@ -497,6 +499,7 @@ def parity_report(img, llm, tok, letter_ids, pil, question, options, build_messa
     nxt = torch.softmax(llm.lm_head(llm.model(**inputs, use_cache=False).last_hidden_state[:, -1:])[0, -1].float(), -1)
     rep["top5_next_tokens"] = tok.convert_ids_to_tokens(nxt.topk(5).indices.tolist())   # is the letter what Phi writes?
     rep["letters_share_of_next_token_prob"] = round(float(nxt[letter_ids].sum()), 4)
+    rep["next_token_is_a_letter"] = int(nxt.argmax()) in letter_ids
 
     ours_pv = torch.cat([glb[None], crops(normalize(hd01), CROP)])          # (global, 4 crops)
     if remote_proc is not None:
