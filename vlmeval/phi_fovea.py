@@ -126,15 +126,31 @@ def letter_token_ids(tok, prefix, sep=""):
     return ids
 
 
+def llm_config(cfg):
+    """transformers' Phi3Config for the LLM of a Phi-3.5-vision config.json dict: vision fields dropped
+    (and sliding_window, 262144, longer than any prompt here, so a plain causal mask is the same).
+    Its RoPE scaling is LongRoPE under the old name "su"; transformers 5 moves
+    original_max_position_embeddings into the RoPE parameters only for a type already named
+    longrope, so it is given as longrope with that length (the same frequencies and scaling)."""
+    from transformers import Phi3Config
+    drop = {"architectures", "auto_map", "embd_layer", "img_processor", "_name_or_path", "model_type",
+            "transformers_version", "torch_dtype", "_attn_implementation", "sliding_window"}
+    keep = {k: v for k, v in cfg.items() if k not in drop}
+    rope = dict(keep.get("rope_scaling") or {})
+    if rope:
+        if rope.get("type", rope.get("rope_type")) == "su":
+            rope["type"] = rope["rope_type"] = "longrope"
+        rope.setdefault("original_max_position_embeddings", keep.get("original_max_position_embeddings", 4096))
+        keep["rope_scaling"] = rope
+    return Phi3Config.from_dict(keep)
+
+
 def load_model(model_id=MODEL_ID):
     """(PhiImage, Phi3ForCausalLM, tokenizer, letter ids), all from the checkpoint, bf16 on the GPU."""
     from huggingface_hub import hf_hub_download
-    from transformers import AutoTokenizer, Phi3Config, Phi3ForCausalLM
+    from transformers import AutoTokenizer, Phi3ForCausalLM
     cfg = json.load(open(hf_hub_download(model_id, "config.json")))
-    drop = {"architectures", "auto_map", "embd_layer", "img_processor", "_name_or_path", "model_type",
-            "transformers_version", "torch_dtype", "_attn_implementation", "sliding_window"}
-    # sliding_window (262144) is longer than any prompt here, so a plain causal mask is the same
-    llm_cfg = Phi3Config.from_dict({k: v for k, v in cfg.items() if k not in drop})
+    llm_cfg = llm_config(cfg)
     kw = dict(config=llm_cfg, device_map="auto", attn_implementation="sdpa")
     try:
         llm = Phi3ForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16, **kw)

@@ -14,7 +14,12 @@ the real 24 x 24 grid) inside phi_fovea.PhiImage:
   7. the uniform path keeps Phi's crop structure: 4 k^2 crop tokens
   8. Phi's prompt: image tags in its chat template; the processor's chunked tokenization (a BOS
      per chunk, -k ids for image k)
+  9. the LLM config: Phi's "su" RoPE scaling becomes transformers' longrope, and its rotary
+     embedding equals Phi's own Phi3SuScaledRotaryEmbedding (copied from the remote code) below and
+     above original_max_position_embeddings
 """
+import math
+
 import numpy as np
 import pytest
 import torch
@@ -191,3 +196,38 @@ def test_letter_ids_follow_the_generation_prompt():
     tok = FakeTok()
     gen = tok.apply_chat_template([{"role": "user", "content": "x"}])
     assert ph.letter_token_ids(tok, gen) == [100 + ord(L) % 50 for L in "ABCDE"]
+
+
+# ---------------------------------------------------------------------------- LLM config
+def _phi_su_rope(position_ids, dim, base, short, long, max_pos, orig):    # Phi3SuScaledRotaryEmbedding.forward
+    seq_len = int(position_ids.max()) + 1
+    ext = torch.tensor(long if seq_len > orig else short, dtype=torch.float32)
+    inv = 1.0 / (ext * base ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim))
+    freqs = (inv[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+             @ position_ids[:, None, :].float()).transpose(1, 2)
+    emb = torch.cat((freqs, freqs), dim=-1)
+    scale = max_pos / orig
+    f = 1.0 if scale <= 1.0 else math.sqrt(1 + math.log(scale) / math.log(orig))
+    return emb.cos() * f, emb.sin() * f
+
+
+@pytest.mark.parametrize("seq", [16, 64])
+def test_llm_rope_is_phis_su_rope(seq):
+    try:
+        from transformers.models.phi3.modeling_phi3 import Phi3RotaryEmbedding
+    except Exception as ex:
+        pytest.skip(f"no Phi3 in this transformers: {ex}")
+    short = [1.0 + 0.1 * i for i in range(8)]
+    long = [2.0 + 0.5 * i for i in range(8)]
+    cfg = dict(model_type="phi3_v", embd_layer={}, img_processor={}, sliding_window=262144,   # Phi's config.json fields
+               vocab_size=64, hidden_size=64, intermediate_size=128, num_hidden_layers=1, num_attention_heads=4,
+               num_key_value_heads=4, max_position_embeddings=1024, original_max_position_embeddings=32,
+               rope_theta=10000.0, rope_scaling=dict(type="su", short_factor=short, long_factor=long))
+    c = ph.llm_config(cfg)
+    params = getattr(c, "rope_parameters", None) or getattr(c, "rope_scaling", None)
+    assert params.get("rope_type", params.get("type")) == "longrope"
+    rot = Phi3RotaryEmbedding(config=c)
+    pos = torch.arange(seq)[None]
+    cos, sin = rot(torch.zeros(1, seq, 16), pos)                # seq 64 > 32: the long factors
+    rc, rs = _phi_su_rope(pos, 16, 10000.0, short, long, 1024, 32)
+    assert torch.allclose(cos, rc, atol=1e-5) and torch.allclose(sin, rs, atol=1e-5)
