@@ -129,15 +129,20 @@ def test_all_28px_layout_equals_clip_on_the_crops(img):
 
 
 def test_clip_in_fp32_rest_in_bf16(img):
-    """As in parity_report: CLIP converted to fp32 while the separators / projection stay bf16 -- both
-    paths must take CLIP's own dtype."""
+    """As in parity_report: CLIP in fp32 (fp32_exact) while the separators / projection stay bf16 --
+    both paths must take CLIP's own dtype; afterwards the same bf16 weights are back."""
     m = copy.deepcopy(img).to(torch.bfloat16)
-    m.img_processor.float()
+    w = m.clip.embeddings.patch_embedding.weight
+    ptr, flags = w.data_ptr(), (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
     hd = rand_img(ph.HD, 4)
-    ours = ph.encode_cells(m, hd, qf.uniform_cells(ph.HD))
-    stock = ph.crop_grid(m, hd).reshape(-1, ours.shape[-1])
+    with ph.fp32_exact(m.img_processor):
+        assert w.dtype == torch.float32 and m.glb_GN.dtype == torch.bfloat16
+        ours = ph.encode_cells(m, hd, qf.uniform_cells(ph.HD))
+        stock = ph.crop_grid(m, hd).reshape(-1, ours.shape[-1])
     assert ours.dtype == stock.dtype == torch.float32
     assert torch.allclose(ours, stock, atol=1e-4, rtol=1e-4), (ours - stock).abs().max()
+    assert w.dtype == torch.bfloat16 and w.data_ptr() == ptr
+    assert (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32) == flags
 
 
 def test_foveated_tokens_follow_their_cells(img):

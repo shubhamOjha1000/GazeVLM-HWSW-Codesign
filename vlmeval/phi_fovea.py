@@ -37,7 +37,7 @@ import json
 import os
 import re
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 import numpy as np
 import torch
@@ -420,6 +420,30 @@ def letter_probs(llm, inputs, letter_ids, all_positions=False):
 
 
 # ---------------------------------------------------------------------------- checks on the real model
+@contextmanager
+def fp32_exact(*modules):
+    """Inside: the modules' floating-point weights in fp32, TF32 off and SDPA's exact (math) kernel,
+    so that two computations can be compared without bf16 rounding; the weights (the same tensors)
+    and the flags are restored on exit."""
+    saved = [(t, t.data) for m in modules for t in [*m.parameters(), *m.buffers()] if t.is_floating_point()]
+    tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+    try:
+        from torch.nn.attention import sdpa_kernel, SDPBackend
+        exact_attention = sdpa_kernel(SDPBackend.MATH)
+    except Exception:
+        exact_attention = nullcontext()
+    try:
+        for t, d in saved:
+            t.data = d.float()
+        torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
+        with exact_attention:
+            yield
+    finally:
+        for t, d in saved:
+            t.data = d
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
+
+
 def load_remote(model_id=MODEL_ID):
     """Phi-3.5-vision's own remote-code model (eager attention) and processor (or, failing that,
     its image processor), for parity: (model or None, processor or None, notes)."""
@@ -460,34 +484,21 @@ def parity_report(img, llm, tok, letter_ids, pil, question, options, build_messa
               tokens before projection), in fp32 (TF32 off, exact attention) and bf16
       remote  where this transformers can load Phi's remote code: its processor's pixel values and
               token ids vs ours (views, prompt_ids); its model (eager attention) vs our path: image
-              embeddings (Phi's own hd_feature_transform), answer probabilities, and the LLMs alone
-              (Phi's own embeddings through our native LLM)"""
+              embeddings (Phi's own hd_feature_transform; in bf16, and in fp32 where only true
+              differences remain), answer probabilities, and the LLMs alone (Phi's own embeddings
+              through our native LLM)"""
     rep = {}
     hd01, glb = views(pil)
     cells = qf.uniform_cells(HD)
     stock16 = crop_grid(img, hd01).reshape(-1, img.glb_GN.shape[-1])
     ours16 = encode_cells(img, hd01, cells)
-    clip = img.img_processor
-    dtype = img.clip.embeddings.patch_embedding.weight.dtype
-    tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
-    try:
-        from torch.nn.attention import sdpa_kernel, SDPBackend
-        exact_attention = sdpa_kernel(SDPBackend.MATH)
-    except Exception:
-        exact_attention = nullcontext()
-    try:                                                     # vision parity in true fp32
-        clip.float()
-        torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
-        with exact_attention:
-            stock32 = crop_grid(img, hd01).reshape(-1, img.glb_GN.shape[-1]).float()
-            ours32 = encode_cells(img, hd01, cells).float()
-    finally:
-        clip.to(dtype)
-        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
+    with fp32_exact(img.img_processor):                      # vision parity in true fp32
+        stock32 = crop_grid(img, hd01).reshape(-1, img.glb_GN.shape[-1]).float()
+        ours32 = encode_cells(img, hd01, cells).float()
     cos = lambda a, b: F.cosine_similarity(a.float(), b.float(), dim=-1).min().item()
     mx = lambda a, b: (a.float() - b.float()).abs().max().item()
     rep.update(vision_fp32_cos_min=cos(ours32, stock32), vision_fp32_max_abs_diff=mx(ours32, stock32),
-               vision_bf16_max_abs_diff=mx(ours16, stock16))
+               vision_bf16_cos_min=cos(ours16, stock16), vision_bf16_max_abs_diff=mx(ours16, stock16))
 
     glb_seq = global_rows(img, glb)
     feats = image_embeds(img, grid_rows(stock16.view(GRID, GRID, -1), img.sub_GN), glb_seq)
@@ -533,6 +544,12 @@ def parity_report(img, llm, tok, letter_ids, pil, question, options, build_messa
             p_llm = letter_probs(llm, dict(inputs_embeds=rem_emb.to(inputs["inputs_embeds"].device),
                                            attention_mask=inputs["attention_mask"]), letter_ids, all_positions=True)
             rep["llm_native_vs_remote_probs_max_abs_diff"] = float(np.abs(p_llm - p_rem).max())
+            rep["embeds_ours_vs_remote_probs_max_abs_diff"] = float(np.abs(p_llm - p_ours).max())
+            with fp32_exact(img, emb_mod):                   # the image embeddings again, without bf16 rounding
+                rem32 = emb_mod(ip_ids.to(w_rem.device), pixel_values=ours_pv[None].to(w_rem.device),
+                                image_sizes=sizes)
+                feats32 = image_embeds(img, grid_rows(crop_grid(img, hd01), img.sub_GN), global_rows(img, glb))
+            rep["remote_image_embeds_fp32_cos_min"] = cos(rem32[mask], feats32)
         except Exception as ex:
             rep["remote_model_check"] = f"not checked ({type(ex).__name__}: {str(ex)[:120]})"
     return rep
