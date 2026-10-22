@@ -28,6 +28,7 @@ DEFAULTS = {
     "fastvid": {"r": [0.05, 0.1], "c": 8, "tau": 0.9, "ignore": 0.95, "d": 0.4, "p": 4, "beta": 0.6},
     "prunevid": {"settings": [{"tau": 0.8, "beta": 0.07}, {"tau": 0.8, "beta": 0.14}], "gamma": 0.25, "knn": 7,
                  "min_tokens": 14},
+    "dtd": {"settings": [{"threshold": 0.96, "absolute": False}, {"threshold": 0.91, "absolute": False}]},
 }
 GAZE_WINDOW = 1.0       # seconds of gaze before a frame: its fixation estimate and its raw trace
 REQUIRED_PATHS = ("folds_dir", "gate_ckpt_dir", "frames_cache_dir")
@@ -89,6 +90,10 @@ def load_config(path):
             raise ValueError(f"prunevid.settings: 0 < beta <= 1 and -1 <= tau <= 1, got {s}")
     if not 0 < float(cfg["prunevid"]["gamma"]) <= 1:
         raise ValueError(f"prunevid.gamma must be in (0, 1], got {cfg['prunevid']['gamma']}")
+    for s in cfg["dtd"]["settings"]:
+        lo = -1.0 if s["absolute"] else 0.0
+        if not lo <= float(s["threshold"]) <= 1:
+            raise ValueError(f"dtd.settings: threshold in [{lo:g}, 1] (absolute: cosine; relative: share dropped), got {s}")
     return cfg
 
 

@@ -3,8 +3,8 @@
 Each adapter knows how to load its model, check parity on one frame, name the stock and the
 foveated conditions in its module's vocabulary, score items through the module's
 run_questions (Uniform K, ours), tokenize a text-only prompt (Blind), and hand its loaded model
-to its GazeVLM, StreamingTOM, DyCoke, FastVID and PruneVid backends (vlmeval/gazevlm.py, streamingtom.py,
-dycoke.py, fastvid.py, prunevid.py). The model code itself lives in vlmeval/ and is not duplicated here.
+to its GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid and DTD backends (vlmeval/gazevlm.py,
+streamingtom.py, dycoke.py, fastvid.py, prunevid.py, dtd.py). The model code itself lives in vlmeval/ and is not duplicated here.
 
     key        module                      stock input per frame
     qwen2.5    vlmeval/qwen_fovea.py       256 tokens (448 px)
@@ -95,6 +95,11 @@ class Adapter:
         """This model's PruneVid backend in vlmeval/prunevid.py (same class name)."""
         from vlmeval import prunevid as pv
         return getattr(pv, type(self).__name__)(self.model, self.proc, self.letter_ids)
+
+    def dtd_backend(self):
+        """This model's DTD backend in vlmeval/dtd.py (same class name)."""
+        from vlmeval import dtd
+        return getattr(dtd, type(self).__name__)(self.model, self.proc, self.letter_ids)
 
     # -- shared
     def load(self):
@@ -317,6 +322,10 @@ class Phi(Adapter):
     def prunevid_backend(self):
         from vlmeval import prunevid as pv
         return pv.Phi(self.img, self.llm, self.tok, self.letter_ids)
+
+    def dtd_backend(self):
+        from vlmeval import dtd
+        return dtd.Phi(self.img, self.llm, self.tok, self.letter_ids)
 
 
 class SmolVLM(Adapter):

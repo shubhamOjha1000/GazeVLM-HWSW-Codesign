@@ -89,3 +89,11 @@ prunevid:             # PruneVid (Huang et al., ACL Findings 2025), its token me
   gamma: 0.25         # temporal_segment_ratio: int(gamma T) frame clusters before they are made contiguous
   knn: 7              # neighbours of the DPC-KNN clustering (frames and tokens)
   min_tokens: 14      # a set (a segment's static tokens, a frame's dynamic tokens) is clustered only above this
+
+dtd:                  # DTD, TimeChat-Online's Differential Token Drop (Yao et al., ACM MM 2025), on the Uniform K
+                      # frames in time order: each frame vs the previous one, cosine of the same position
+  settings:           # one condition each. absolute: false = drop each frame's int(threshold N) most similar
+                      # tokens, keeping (N + (T - 1)(N - int(threshold N))) / (T N) for T frames (exact budgets);
+                      # absolute: true = drop every token with cosine > threshold (the authors' default 0.5)
+    - {threshold: 0.96, absolute: false}   # ~5.3% (K = 96, 256 tokens/frame)
+    - {threshold: 0.91, absolute: false}   # ~10.3%

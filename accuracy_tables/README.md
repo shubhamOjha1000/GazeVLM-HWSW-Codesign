@@ -1,6 +1,6 @@
-# accuracy_tables — Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID and PruneVid on six VLMs
+# accuracy_tables — Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid and DTD on six VLMs
 
-This folder produces eight rows of the paper's accuracy tables (Table 1, EgoEverything) for every
+This folder produces nine rows of the paper's accuracy tables (Table 1, EgoEverything) for every
 VLM in the project:
 
 | row in the paper | condition name in the result files | what the model sees |
@@ -13,6 +13,7 @@ VLM in the project:
 | DyCoke (Tao et al.) | `DyCoke TTM prune=0.98 window=32 (K=96)` (one per window / pruning rate) | the Uniform K frames in windows: each window's first frame whole, the others pruned to their tokens least similar to a reference frame (section DyCoke below) |
 | FastVID (Shen et al.) | `FastVID r=0.05 (K=96, c=8, tau=0.9, ignore=0.95, d=0.4, p=4, beta=0.6)` (one per r) | the Uniform K frames cut into segments of similar frames, each segment reduced to salient tokens ([CLS] attention) plus merged density-peak anchors (section FastVID below) |
 | PruneVid (Huang et al.) | `PruneVid tau=0.8 beta=0.07 (K=96, gamma=0.25, k=7, sets > 14 merged)` (one per tau / beta) | the Uniform K frames cut into segments; tokens static over a segment averaged into one, then each set clustered and averaged (section PruneVid below) |
+| DTD (TimeChat-Online, Yao et al.) | `DTD feature drop=0.96 (relative, K=96)` (one per setting) | the Uniform K frames in time order: the first whole, each later frame without its tokens most similar to the previous frame's (section DTD below) |
 
 Every row uses the same prompt (`vlmeval.qwen_mcq.build_messages`: each frame labelled
 "Frame at m:ss", then the question, the five options and "Answer with the option's letter"),
@@ -51,6 +52,8 @@ The models (keys used everywhere in this folder):
 | `../tests/test_fastvid.py` | CPU tests of FastVID: (pseudo-)[CLS] attention, segmentation, budgets, the merge weights, plans, the run loop |
 | `../vlmeval/prunevid.py` | PruneVid's token merging: frame clustering into segments, static / dynamic tokens, DPC-KNN merging, on the StreamingTOM backends' tokens |
 | `../tests/test_prunevid.py` | CPU tests of PruneVid: clustering, the authors' segment refinement rules, static tokens, merging, plans, the run loop |
+| `../vlmeval/dtd.py` | DTD: each frame's tokens dropped where they match the previous frame's, on the StreamingTOM backends' tokens |
+| `../tests/test_dtd.py` | CPU tests of DTD: the absolute and relative drop rules, plans, the retention formula, the run loop |
 
 No model code lives here: the foveation, the token assembly and each model's parity check are in
 `vlmeval/` and are shared with the per-model notebooks in `notebooks/colab_vlm_egoeverything*.ipynb`.
@@ -92,12 +95,12 @@ python -m pytest tests/test_accuracy_tables.py -q
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model phi --rows gazevlm
-python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows streamingtom,dycoke,fastvid,prunevid
+python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows streamingtom,dycoke,fastvid,prunevid,dtd
 python -m accuracy_tables.summarize --config accuracy_tables/config.yaml
 ```
 
 Options of `run.py`: `--model` one key, a comma list or `all` (one model at a time is loaded and
-freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke,fastvid,prunevid` (default all eight); `--videos test|all` overrides
+freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke,fastvid,prunevid,dtd` (default all nine); `--videos test|all` overrides
 `run.videos`; `--no-parity` skips the parity check.
 
 What a run does, per model:
@@ -329,11 +332,37 @@ Where the released code has gaps: a set gets at least one cluster (int(beta n) c
 at least one segment cluster, and DPC-KNN uses at most n - 1 neighbours on small sets (the released
 code needs n > k); the density tie-break noise is seeded (theirs is random).
 
+## DTD
+
+[Yao et al., "TimeChat-Online: 80% Visual Tokens are Naturally Redundant in Streaming Videos",
+ACM MM 2025]: its Differential Token Drop, training-free (TimeChat-Online itself is a fine-tuned
+Qwen2.5-VL; here only DTD is used, on the stock models). Code: `vlmeval/dtd.py`; settings: `dtd` in the
+config. Causal: the Uniform K frames in time order, each frame using only the previous one.
+
+As the authors' code (`token_drop` with `method='feature'` in `demo/qwen2_5_vl/modeling_qwen2_5_vl.py` of
+github.com/yaolinli/TimeChat-Online), on the visual tokens entering the LLM: the first frame keeps all its
+tokens; every later frame is compared with the previous frame position by position (cosine of the two
+tokens at the same position; the previous frame's tokens as encoded, not what was kept of them) and drops
+
+- `absolute: true`: every token whose cosine is > threshold (the authors' default: 0.5), or
+- `absolute: false`: its int(threshold N) most similar tokens (their relative mode; threshold = share dropped).
+
+Kept tokens keep their positions and order (Qwen's M-RoPE: their own cells; Qwen3-VL's DeepStack features
+the same tokens; Phi-3.5's 576 crop tokens a row break after each row that has tokens, no global view;
+InternVL, Gemma, SmolVLM raster order). A frame that keeps no token (absolute mode) leaves the prompt with
+its time label (`n_frames_dropped`).
+
+**Budget.** The relative mode fixes it: (N + (T - 1)(N - int(threshold N))) / (T N) for T frames of N tokens,
+so the defaults use it: threshold 0.96 → 5.3% and 0.91 → 10.3% at K = 96 and 256 tokens per frame (SmolVLM2,
+64 frames of 81: 6.4% and 11.3%; Phi-3.5's row breaks come on top). The authors' absolute setting can be
+added as `{threshold: 0.5, absolute: true}` (its budget then depends on the content: `kept_share`).
+TimeChat-Online's pixel-level variant (`method='pixel'`) is not used.
+
 ## Results
 
 `<out_dir>/<model>/`:
 
-- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`, `dycoke.jsonl`, `fastvid.jsonl`, `prunevid.jsonl`: one
+- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`, `dycoke.jsonl`, `fastvid.jsonl`, `prunevid.jsonl`, `dtd.jsonl`: one
   JSON object per (condition, question):
   `condition, qid, video, answer, pred, correct, p` (probabilities over A–E), `n_frames`,
   `n_image_tokens` (visual tokens entering the LLM, every token counted: Phi's row breaks and
@@ -344,7 +373,8 @@ code needs n > k); the density tie-break noise is seeded (theirs is random).
   add `static_share` (mean share of static tokens per frame), `n_merged_tokens` and `streamingtom`; DyCoke
   rows `kept_share` (share of the frames' tokens kept) and `dycoke`; FastVID rows `n_frames_dropped` (frames
   left without tokens), `n_segments` and `fastvid`; PruneVid rows `n_frames_dropped`, `n_segments`,
-  `static_share` (share of the frames' tokens that were static) and `prunevid`.
+  `static_share` (share of the frames' tokens that were static) and `prunevid`; DTD rows
+  `n_frames_dropped`, `kept_share` and `dtd`.
 - `run_info.json`: model id, versions, the config used, the frame cap, and the parity report.
 
 `<out_dir>/summary.csv` (from `summarize.py`): per model and condition `n, accuracy, ci_low,
@@ -390,3 +420,5 @@ ci_high` (95% interval from resampling whole videos), `frames_per_q, tokens_per_
   (the authors' Qwen2.5-VL run: `tau: 0.84`); all are in the condition name.
 - **Another PruneVid setting**: add a `{tau, beta}` pair to `prunevid.settings` (the authors' own:
   `{tau: 0.8, beta: 0.5}`) or change `gamma`, `knn`, `min_tokens`; all are in the condition name.
+- **Another DTD setting**: add a `{threshold, absolute}` pair to `dtd.settings` (the authors' own:
+  `{threshold: 0.5, absolute: true}`).

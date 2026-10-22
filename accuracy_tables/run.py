@@ -1,4 +1,5 @@
-"""Score the accuracy-table rows (Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid) for one or more VLMs.
+"""Score the accuracy-table rows (Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid, DTD)
+for one or more VLMs.
 
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
@@ -22,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from accuracy_tables import common  # noqa: E402
 from accuracy_tables.models import ADAPTERS, build_messages  # noqa: E402
 
-ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke", "fastvid", "prunevid")
+ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke", "fastvid", "prunevid", "dtd")
 BLIND = "blind (question and options only)"
 
 
@@ -60,6 +61,12 @@ def prunevid_name(c, s, k):
     """Every parameter in the name, so settings never mix in one result file."""
     return (f"PruneVid tau={float(c['tau']):g} beta={float(c['beta']):g} (K={k}, gamma={float(s['gamma']):g}, "
             f"k={int(s['knn'])}, sets > {int(s['min_tokens'])} merged)")
+
+
+def dtd_name(s, k):
+    if s["absolute"]:
+        return f"DTD feature tau={float(s['threshold']):g} (absolute, K={k})"
+    return f"DTD feature drop={float(s['threshold']):g} (relative, K={k})"
 
 
 def _done(path):
@@ -188,6 +195,14 @@ def run_model(key, cfg, data, rows, info_extra=None):
                   f"{[(c['tau'], c['beta']) for c in conds.values()]} (tau, beta)")
             pv.run_questions(ad.prunevid_backend(), uniform_items, conds, os.path.join(out_dir, "prunevid.jsonl"),
                              build_messages)
+
+        if "dtd" in rows:
+            from vlmeval import dtd
+            conds = {dtd_name(s, k): dict(threshold=float(s["threshold"]), absolute=bool(s["absolute"]))
+                     for s in cfg["dtd"]["settings"]}
+            print(f"\n--- DTD (TimeChat-Online): the {k} Uniform K frames per video in time order; settings "
+                  f"{[(c['threshold'], 'absolute' if c['absolute'] else 'relative') for c in conds.values()]}")
+            dtd.run_questions(ad.dtd_backend(), uniform_items, conds, os.path.join(out_dir, "dtd.jsonl"), build_messages)
     finally:
         try:
             import transformers
