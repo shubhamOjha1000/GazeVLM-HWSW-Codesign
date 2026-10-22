@@ -85,13 +85,14 @@ def foveated_cells(gu, gv, a=40.0, img=IMG, num_scales=3, fov=sp.FOV, R_deg=None
     return sort_raster(np.array(cells, dtype=np.int64))
 
 
-def uniform_cells(img):
-    """All 28 px cells of an img x img frame: Qwen's normal tokenization."""
-    if img % BASE:
-        raise ValueError(f"image size {img} is not a multiple of {BASE}")
-    r = np.arange(img // BASE) * BASE
+def uniform_cells(img, base=BASE):
+    """All base px cells of an img x img frame: Qwen's normal tokenization (28 px cells for
+    Qwen2.5-VL; models with another token cell pass their own)."""
+    if img % base:
+        raise ValueError(f"image size {img} is not a multiple of {base}")
+    r = np.arange(img // base) * base
     Y, X = np.meshgrid(r, r, indexing="ij")
-    return np.stack([Y.ravel(), X.ravel(), np.full(Y.size, BASE)], 1).astype(np.int64)
+    return np.stack([Y.ravel(), X.ravel(), np.full(Y.size, base)], 1).astype(np.int64)
 
 
 def sort_raster(cells):
@@ -99,43 +100,45 @@ def sort_raster(cells):
     return cells[np.lexsort((cells[:, 1], cells[:, 0]))]
 
 
-def same_tokens_size(n_tokens):
-    """Side (px, multiple of 28) of the uniform frame whose token count is closest to n."""
-    return BASE * max(1, int(round(np.sqrt(n_tokens))))
+def same_tokens_size(n_tokens, base=BASE):
+    """Side (px, multiple of base) of the uniform frame whose token count is closest to n."""
+    return base * max(1, int(round(np.sqrt(n_tokens))))
 
 
 # ---------------------------------------------------------------------------- patches
-def cells_to_patches(img01, cells, mean, std, temporal=2):
-    """img01: (3, H, W) float in [0, 1]. Returns (4N, 3 * temporal * 14 * 14) patches in
-    Qwen's processor layout: cells in the given order, each cell's 2 x 2 patches row-major,
-    features ordered (channel, time, row, column), the image repeated over time."""
+def cells_to_patches(img01, cells, mean, std, temporal=2, patch=PATCH):
+    """img01: (3, H, W) float in [0, 1]. Returns (4N, 3 * temporal * patch * patch) patches in
+    Qwen's processor layout: each cell resized to 2 x 2 patches, cells in the given order, each
+    cell's patches row-major, features ordered (channel, time, row, column), the image repeated
+    over time. patch = 14 px for Qwen2.5-VL (28 px cells)."""
     N = len(cells)
-    crops = torch.empty(N, 3, BASE, BASE, dtype=torch.float32)
+    base = 2 * patch
+    crops = torch.empty(N, 3, base, base, dtype=torch.float32)
     for s in np.unique(cells[:, 2]):
         idx = np.nonzero(cells[:, 2] == s)[0]
         c = torch.stack([img01[:, y:y + s, x:x + s] for y, x, _ in cells[idx]]).float()
-        if s != BASE:
-            c = F.interpolate(c, size=(BASE, BASE), mode="bicubic", antialias=True,
+        if s != base:
+            c = F.interpolate(c, size=(base, base), mode="bicubic", antialias=True,
                               align_corners=False).clamp(0, 1)
         crops[torch.as_tensor(idx)] = c
     m = torch.as_tensor(mean, dtype=torch.float32).view(1, 3, 1, 1)
     sd = torch.as_tensor(std, dtype=torch.float32).view(1, 3, 1, 1)
     crops = (crops - m) / sd
-    p = crops.reshape(N, 3, 2, PATCH, 2, PATCH).permute(0, 2, 4, 1, 3, 5)   # N, mh, mw, C, py, px
-    p = p.unsqueeze(4).expand(N, 2, 2, 3, temporal, PATCH, PATCH)
-    return p.reshape(N * 4, 3 * temporal * PATCH * PATCH)
+    p = crops.reshape(N, 3, 2, patch, 2, patch).permute(0, 2, 4, 1, 3, 5)   # N, mh, mw, C, py, px
+    p = p.unsqueeze(4).expand(N, 2, 2, 3, temporal, patch, patch)
+    return p.reshape(N * 4, 3 * temporal * patch * patch)
 
 
-def patch_positions(cells):
-    """(h, w) of each patch on Qwen's 14 px grid, float: the centre of the cell quadrant
-    the patch shows, in Qwen's convention that patch index i covers [14 i, 14 i + 14).
-    Integer (= Qwen's own) for 28 px cells."""
+def patch_positions(cells, patch=PATCH):
+    """(h, w) of each patch on the patch grid, float: the centre of the cell quadrant the
+    patch shows, in Qwen's convention that patch index i covers [patch i, patch (i + 1)).
+    Integer (= Qwen's own) for cells of 2 x 2 patches (28 px on Qwen2.5-VL's 14 px grid)."""
     c = torch.as_tensor(cells, dtype=torch.float64)
     y, x, s = c[:, :1], c[:, 1:2], c[:, 2:]
     qi = torch.tensor([[0.5, 0.5, 1.5, 1.5]], dtype=torch.float64)
     qj = torch.tensor([[0.5, 1.5, 0.5, 1.5]], dtype=torch.float64)
-    h = (y + qi * s / 2 - PATCH / 2) / PATCH
-    w = (x + qj * s / 2 - PATCH / 2) / PATCH
+    h = (y + qi * s / 2 - patch / 2) / patch
+    w = (x + qj * s / 2 - patch / 2) / patch
     return h.reshape(-1).float(), w.reshape(-1).float()
 
 
@@ -269,21 +272,22 @@ def expand_image_pads(text, n_tokens):
     return parts[0] + "".join(IMAGE_PAD * n + p for n, p in zip(n_tokens, parts[1:]))
 
 
-def mrope_positions(input_ids, image_token_id, cells_list, img_list):
-    """(3, 1, L) float M-RoPE positions (time, height, width) in Qwen2.5-VL's scheme: text
-    advances all three by 1; an image's tokens share the current start and add the token
-    row / column; text after an image starts at start + grid size. Image token row / column
-    = the cell centre on the 28 px token grid (integer for 28 px cells)."""
+def mrope_positions(input_ids, image_token_id, cells_list, img_list, base=BASE):
+    """(3, 1, L) float M-RoPE positions (time, height, width) in Qwen2.5-VL's scheme (also
+    Qwen3-VL's for images): text advances all three by 1; an image's tokens share the current
+    start and add the token row / column; text after an image starts at start + grid size.
+    Image token row / column = the cell centre on the base px token grid (integer for base px
+    cells)."""
     ids = input_ids[0].tolist()
     out, cur, i, k = [], 0.0, 0, 0
     while i < len(ids):
         if ids[i] == image_token_id:
             c = np.asarray(cells_list[k], dtype=np.float64)
-            s = c[:, 2] / BASE
-            hh = c[:, 0] / BASE + (s - 1) / 2
-            ww = c[:, 1] / BASE + (s - 1) / 2
+            s = c[:, 2] / base
+            hh = c[:, 0] / base + (s - 1) / 2
+            ww = c[:, 1] / base + (s - 1) / 2
             out += [(cur, cur + a, cur + b) for a, b in zip(hh, ww)]
-            cur += img_list[k] // BASE
+            cur += img_list[k] // base
             i += len(c)
             k += 1
         else:
