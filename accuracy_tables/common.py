@@ -24,6 +24,7 @@ DEFAULTS = {
     "gazevlm": {"rho": [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6], "sigma": 0.1, "r_min": 0.125, "thumb": 2,
                 "gaze": "fixation"},
     "streamingtom": {"ratio": [0.05, 0.1], "tau": 0.9, "knn": 7, "beta": 0.6, "released_dpc": False},
+    "dycoke": {"settings": [{"window": 32, "prune": 0.98}, {"window": 32, "prune": 0.93}]},
 }
 GAZE_WINDOW = 1.0       # seconds of gaze before a frame: its fixation estimate and its raw trace
 REQUIRED_PATHS = ("folds_dir", "gate_ckpt_dir", "frames_cache_dir")
@@ -77,6 +78,9 @@ def load_config(path):
         raise ValueError(f"run.policy must be one of {POLICIES}, got {cfg['run']['policy']!r}")
     if cfg["gazevlm"]["gaze"] not in ("fixation", "trace"):
         raise ValueError(f"gazevlm.gaze must be fixation or trace, got {cfg['gazevlm']['gaze']!r}")
+    for s in cfg["dycoke"]["settings"]:
+        if int(s["window"]) < 2 or not 0 <= float(s["prune"]) < 1:
+            raise ValueError(f"dycoke.settings: window >= 2 and 0 <= prune < 1, got {s}")
     return cfg
 
 

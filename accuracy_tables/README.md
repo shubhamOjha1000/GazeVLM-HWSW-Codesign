@@ -1,6 +1,6 @@
-# accuracy_tables — Uniform K, Blind, Ours, GazeVLM and StreamingTOM on six VLMs
+# accuracy_tables — Uniform K, Blind, Ours, GazeVLM, StreamingTOM and DyCoke on six VLMs
 
-This folder produces five rows of the paper's accuracy tables (Table 1, EgoEverything) for every
+This folder produces six rows of the paper's accuracy tables (Table 1, EgoEverything) for every
 VLM in the project:
 
 | row in the paper | condition name in the result files | what the model sees |
@@ -10,6 +10,7 @@ VLM in the project:
 | Ours (gaze/IMU gate + foveation) | `ours D+P gate + fovea R=70 a=160` (one per fovea setting) | the frames the eye + head gate sends under policy D+P, each foveated at that frame's gaze point |
 | GazeVLM (Chen & Qi) | `GazeVLM rho=0.3 (K=96, sigma=0.1, R_min=0.125, thumb 2x2, fixation gaze)` (one per rho) | the Uniform K frames, each reduced to the tokens of its gaze region plus a 2 x 2-token thumbnail (section GazeVLM below) |
 | StreamingTOM (Chen et al.) | `StreamingTOM CTR G=0.05N (K=96, tau=0.9, k=7, beta=0.6)` (one per G / N) | the Uniform K frames in time order, each reduced to G tokens from its own and the previous frame's tokens (section StreamingTOM below) |
+| DyCoke (Tao et al.) | `DyCoke TTM prune=0.98 window=32 (K=96)` (one per window / pruning rate) | the Uniform K frames in windows: each window's first frame whole, the others pruned to their tokens least similar to a reference frame (section DyCoke below) |
 
 Every row uses the same prompt (`vlmeval.qwen_mcq.build_messages`: each frame labelled
 "Frame at m:ss", then the question, the five options and "Answer with the option's letter"),
@@ -33,7 +34,7 @@ The models (keys used everywhere in this folder):
 |---|---|
 | `config.example.yaml` | every data path and run option; copy it to `config.yaml` and edit |
 | `common.py` | config loading (path resolution), and the data every model is scored on: questions, gate frames, Uniform K frames, gaze per frame, items |
-| `models.py` | one adapter per VLM over its `vlmeval/*_fovea.py` module: load, parity check, stock / fovea condition, scoring, text-only prompt for Blind, its GazeVLM and StreamingTOM backends |
+| `models.py` | one adapter per VLM over its `vlmeval/*_fovea.py` module: load, parity check, stock / fovea condition, scoring, text-only prompt for Blind, its GazeVLM, StreamingTOM and DyCoke backends |
 | `run.py` | command line: scores the chosen rows for the chosen models, resumably |
 | `summarize.py` | command line: accuracy, 95% interval, frames, visual tokens and token budget per row and model → `summary.csv` |
 | `colab_accuracy_tables.ipynb` | the same steps on Colab (Google Drive paths) |
@@ -42,6 +43,8 @@ The models (keys used everywhere in this folder):
 | `../tests/test_gazevlm.py` | CPU tests of GazeVLM: the box, the token layouts per model family, positions, the run loop |
 | `../vlmeval/streamingtom.py` | StreamingTOM's causal temporal reduction: saliency from the encoder's attention, the static / dynamic split, DPC-KNN merging, one backend per VLM |
 | `../tests/test_streamingtom.py` | CPU tests of StreamingTOM: the attention capture on a real (tiny) CLIP, the CTR plan, packing, the run loop |
+| `../vlmeval/dycoke.py` | DyCoke's temporal token merging over windows of frames, on the StreamingTOM backends' tokens |
+| `../tests/test_dycoke.py` | CPU tests of DyCoke: the 4-frame window against DyCoke's own rules, longer and shorter windows, the run loop |
 
 No model code lives here: the foveation, the token assembly and each model's parity check are in
 `vlmeval/` and are shared with the per-model notebooks in `notebooks/colab_vlm_egoeverything*.ipynb`.
@@ -83,12 +86,12 @@ python -m pytest tests/test_accuracy_tables.py -q
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model phi --rows gazevlm
-python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows streamingtom
+python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows streamingtom,dycoke
 python -m accuracy_tables.summarize --config accuracy_tables/config.yaml
 ```
 
 Options of `run.py`: `--model` one key, a comma list or `all` (one model at a time is loaded and
-freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom` (default all five); `--videos test|all` overrides
+freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke` (default all six); `--videos test|all` overrides
 `run.videos`; `--no-parity` skips the parity check.
 
 What a run does, per model:
@@ -207,18 +210,53 @@ Chat-UniVi's batched DPC-KNN that it otherwise follows), which does not match th
 clustering the paper describes. The default here is standard DPC-KNN; `released_dpc: true`
 reproduces the released behaviour exactly.
 
+## DyCoke
+
+[Tao, Qin, You, Sui & Wang, "DyCoke: Dynamic Compression of Tokens for Fast Video Large Language
+Models", CVPR 2025]. Code: `vlmeval/dycoke.py`; settings: `dycoke` in the config. Only its first
+stage, temporal token merging (TTM), is used: its second stage prunes the KV cache during decoding,
+inside the LLM and after the first answer token, and every method of the tables is counted at the LLM
+input.
+
+**TTM**, as in the paper and the authors' code (`dycole_ttm` in `llava/model/llava_arch.py` of
+github.com/KD-TAO/DyCoke): frames are taken in windows of 4; the first frame of a window keeps all
+its tokens; frame 2 keeps the int((1 - K) N) tokens least similar (cosine, same position) to frame 1,
+frame 4 likewise against frame 3, and frame 3 against frame 1; K is the pruning rate. It runs on the
+post-projector tokens.
+
+**Budget: longer windows.** A 4-frame window keeps at least a quarter of the tokens (the first
+frames), above the tables' 5% and 10%, so, as the protocol allows, windows of W frames are used with
+the same rules (a frame at an odd offset is compared with the frame before it, one at an even offset
+with the window's first frame; W = 4 is exactly DyCoke's TTM). A full window keeps
+(N + (W - 1) int((1 - K) N)) / (W N) of its tokens: defaults W = 32 with K = 0.98 (≈5%: 5 of 256 tokens
+per pruned frame) and K = 0.93 (≈10%: 17 of 256). The protocol's other option, pooling the kept first
+frames, is not implemented. On SmolVLM2 (81 tokens, 64 frames: two windows) the two settings keep
+about 4% and 9%; on Phi-3.5 the row breaks come on top.
+
+Model handling (the StreamingTOM backends' tokens, without saliency): Qwen's M-RoPE gets every kept
+token at its own cell; Qwen3-VL's DeepStack features keep the same tokens; Phi-3.5's 576 crop tokens
+get a row break after each row that has tokens (no global view); InternVL, Gemma (projected tokens) and
+SmolVLM take kept tokens in raster order.
+
+Where the released code has gaps or quirks: a pruned frame keeps at least one token; kept tokens stay
+in raster order (the released code orders them by similarity); a shorter last window follows the same
+rules (the released code drops the last frame when the frame count is odd, and leaves the last
+window's third frame whole because its loop stops one window early).
+
 ## Results
 
 `<out_dir>/<model>/`:
 
-- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`: one JSON object per (condition, question):
+- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`, `dycoke.jsonl`: one JSON object per
+  (condition, question):
   `condition, qid, video, answer, pred, correct, p` (probabilities over A–E), `n_frames`,
   `n_image_tokens` (visual tokens entering the LLM, every token counted: Phi's row breaks and
   global view, SmolVLM's per-frame tokens), `n_tokens` (whole prompt), `sec`, `error`
   (`null`, `"oom"` or `"nan"`; rows with an error are left out of the summary), plus
   model-specific fields (cell sizes, gaze-missing counts). GazeVLM rows add `n_roi_tokens`,
   `roi_area` (mean ROI area, fraction of the frame) and `gazevlm` (its parameters); StreamingTOM rows
-  add `static_share` (mean share of static tokens per frame), `n_merged_tokens` and `streamingtom`.
+  add `static_share` (mean share of static tokens per frame), `n_merged_tokens` and `streamingtom`; DyCoke
+  rows `kept_share` (share of the frames' tokens kept) and `dycoke`.
 - `run_info.json`: model id, versions, the config used, the frame cap, and the parity report.
 
 `<out_dir>/summary.csv` (from `summarize.py`): per model and condition `n, accuracy, ci_low,
@@ -242,8 +280,8 @@ ci_high` (95% interval from resampling whole videos), `frames_per_q, tokens_per_
   (`n_gaze_missing`).
 - transformers 5.20 breaks SmolVLM's own image-token merge; `vlmeval/smolvlm_fovea.py` patches it
   for the parity reference (our scoring path does not use it).
-- The other rows of Table 1 (Uniform K + average pooling, DyCoke, FastVID, PruneVid, DTD) and
-  HD-EPIC are not implemented here yet.
+- The other rows of Table 1 (Uniform K + average pooling, FastVID, PruneVid, DTD) and HD-EPIC are
+  not implemented here yet.
 
 ## Extending
 
@@ -258,3 +296,5 @@ ci_high` (95% interval from resampling whole videos), `frames_per_q, tokens_per_
   `gaze`; every parameter is in the condition name, so old and new settings never mix.
 - **Another StreamingTOM setting**: add a ratio to `streamingtom.ratio` (the authors' own is 50 of 196
   tokens, 0.255), or change `tau`, `knn`, `beta`, `released_dpc`; likewise in the condition name.
+- **Another DyCoke setting**: add a `{window, prune}` pair to `dycoke.settings` (DyCoke's own:
+  `{window: 4, prune: 0.7}`, ~47% of the tokens).

@@ -33,7 +33,7 @@ then the stock function runs as usual.
 import json
 import os
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import numpy as np
 import torch
@@ -87,6 +87,12 @@ def capture_saliency(target):
         yield got
     finally:
         mapping[impl] = orig
+
+
+def _capture(backend, target):
+    """capture_saliency(target), or nothing for a backend that needs no saliency (saliency = False:
+    vlmeval/dycoke.py reuses these backends for their tokens only)."""
+    return capture_saliency(target) if getattr(backend, "saliency", True) else nullcontext([])
 
 
 def encoder_layers(m):
@@ -186,13 +192,15 @@ class Qwen25(gz.Qwen25):
         qf = self.qf
         img = qf.resize01(qf.load_frame01(fr["path"], qf.IMG), self.px)
         cells = qf.uniform_cells(self.px)
-        with capture_saliency(self.vis.blocks[-1].attn) as got:
+        with _capture(self, self.vis.blocks[-1].attn) as got:
             tok = qf.encode_cells(self.vis, img, cells, self.px, self.mean, self.std)
-        order, _ = qf.window_groups(cells, self.px)               # the encoder's cell order (4 patches each)
-        seq = torch.cat([g[0] for g in got]).view(-1, 4).mean(1)
-        sal = torch.empty_like(seq)
-        sal[order.to(seq.device)] = seq
-        return dict(tokens=tok, sal=sal)
+        st = dict(tokens=tok)
+        if got:
+            order, _ = qf.window_groups(cells, self.px)           # the encoder's cell order (4 patches each)
+            seq = torch.cat([g[0] for g in got]).view(-1, 4).mean(1)
+            st["sal"] = torch.empty_like(seq)
+            st["sal"][order.to(seq.device)] = seq
+        return st
 
     def pack(self, st, plan, beta):
         cells = self.qf.uniform_cells(self.px)[[p for p, _ in plan]]
@@ -205,13 +213,15 @@ class Qwen3(gz.Qwen3):
         qf, q3 = self.qf, self.q3
         img = qf.resize01(qf.load_frame01(fr["path"], qf.IMG), q3.IMG)
         cells = q3.uniform_cells(q3.IMG)
-        with capture_saliency(self.vis.blocks[-1].attn) as got:
+        with _capture(self, self.vis.blocks[-1].attn) as got:
             tok, deep = q3.encode_cells(self.vis, img, cells, q3.IMG, self.mean, self.std)
-        order = torch.as_tensor(np.lexsort((cells[:, 1], cells[:, 0])))   # the encoder's (raster) order
-        seq = torch.cat([g[0] for g in got]).view(-1, 4).mean(1)
-        sal = torch.empty_like(seq)
-        sal[order.to(seq.device)] = seq
-        return dict(tokens=tok, deep=deep, sal=sal)
+        st = dict(tokens=tok, deep=deep)
+        if got:
+            order = torch.as_tensor(np.lexsort((cells[:, 1], cells[:, 0])))   # the encoder's (raster) order
+            seq = torch.cat([g[0] for g in got]).view(-1, 4).mean(1)
+            st["sal"] = torch.empty_like(seq)
+            st["sal"][order.to(seq.device)] = seq
+        return st
 
     def pack(self, st, plan, beta):
         cells = self.q3.uniform_cells(self.q3.IMG)[[p for p, _ in plan]]
@@ -224,10 +234,13 @@ class InternVL(gz.InternVL):
     def frame_state(self, fr):
         vt, _, _, _, layer = self.iv.parts(self.model)
         img = self.qf.load_frame01(fr["path"], self.qf.IMG)
-        with capture_saliency(encoder_layers(vt)[layer].attention) as got:
+        with _capture(self, encoder_layers(vt)[layer].attention) as got:
             tok = self.iv.encode_uniform(self.model, img, self.iv.TILE, self.mean, self.std)
-        s = got[0][0, 1:]
-        return dict(tokens=tok, sal=pool_saliency(s, int(round(len(s) ** 0.5)), 2))
+        st = dict(tokens=tok)
+        if got:
+            s = got[0][0, 1:]
+            st["sal"] = pool_saliency(s, int(round(len(s) ** 0.5)), 2)
+        return st
 
     def pack(self, st, plan, beta):
         return (apply_plan(st["tokens"], plan, beta),)
@@ -238,10 +251,12 @@ class Gemma(gz.Gemma):
     def frame_state(self, fr):
         qf, gf = self.qf, self.gf
         img = qf.resize01(qf.load_frame01(fr["path"], qf.IMG), gf.G_IMG)
-        with capture_saliency(encoder_layers(self.vt)[-1].self_attn) as got:
+        with _capture(self, encoder_layers(self.vt)[-1].self_attn) as got:
             grid = gf.vision_grids(self.vt, [img], self.mean, self.std)[0]
-        tok = gf.project(self.pj, gf.pool_cells(grid, gf.stock_cells()))
-        return dict(tokens=tok, sal=pool_saliency(got[0][0], gf.GRID, gf.BASE))
+        st = dict(tokens=gf.project(self.pj, gf.pool_cells(grid, gf.stock_cells())))
+        if got:
+            st["sal"] = pool_saliency(got[0][0], gf.GRID, gf.BASE)
+        return st
 
     def pack(self, st, plan, beta):
         return (apply_plan(st["tokens"], plan, beta),)
@@ -253,14 +268,15 @@ class Phi(gz.Phi):
     def frame_state(self, fr):
         ph, img = self.ph, self.img
         hd01, _ = ph.views(ph.load_pil(fr["path"]))
-        with capture_saliency(img.clip.encoder.layers[-2].self_attn) as got:
+        with _capture(self, img.clip.encoder.layers[-2].self_attn) as got:
             grid = ph.crop_grid(img, hd01)                                       # (24, 24, 4096)
-        tok = img.img_projection(grid.reshape(-1, grid.shape[-1]))
-        s = got[0][:, 1:]                                                        # 4 crops, CLS dropped
-        p = int(round(s.shape[1] ** 0.5))
-        s = F.avg_pool2d(s.float().view(-1, 1, p, p), 2)                         # (4, 1, 12, 12)
-        sal = ph.arrange_crops(s.permute(0, 2, 3, 1)).reshape(-1)
-        return dict(tokens=tok, sal=sal)
+        st = dict(tokens=img.img_projection(grid.reshape(-1, grid.shape[-1])))
+        if got:
+            s = got[0][:, 1:]                                                    # 4 crops, CLS dropped
+            p = int(round(s.shape[1] ** 0.5))
+            s = F.avg_pool2d(s.float().view(-1, 1, p, p), 2)                     # (4, 1, 12, 12)
+            st["sal"] = ph.arrange_crops(s.permute(0, 2, 3, 1)).reshape(-1)
+        return st
 
     def pack(self, st, plan, beta):
         x = apply_plan(st["tokens"], plan, beta)
@@ -279,10 +295,13 @@ class SmolVLM(gz.SmolVLM):
         sm = self.sm
         vis, _ = sm.parts(self.model)
         rec = sm.stock_input(self.ip, Image.open(fr["path"]).convert("RGB"))
-        with capture_saliency(encoder_layers(vis)[-1].self_attn) as got:
+        with _capture(self, encoder_layers(vis)[-1].self_attn) as got:
             tok = sm.encode_uniform(self.model, rec, sm.IMG, self.mean, self.std)
-        s = got[0][0]
-        return dict(tokens=tok, sal=pool_saliency(s, int(round(len(s) ** 0.5)), 3))
+        st = dict(tokens=tok)
+        if got:
+            s = got[0][0]
+            st["sal"] = pool_saliency(s, int(round(len(s) ** 0.5)), 3)
+        return st
 
     def pack(self, st, plan, beta):
         return (apply_plan(st["tokens"], plan, beta),)
@@ -326,6 +345,9 @@ def run_questions(backend, items, conditions, out_path, build_messages, log_ever
                 key = (c, prev, fr["key"])
                 if fr["key"] not in states:
                     states[fr["key"]] = backend.frame_state(fr)
+                    if "sal" not in states[fr["key"]]:
+                        raise RuntimeError(f"{type(backend).__name__}: no saliency captured (its target attention "
+                                           f"layer was not called through the attention registry)")
                 if key not in toks:
                     st = states[fr["key"]]
                     F_prev = states[prev]["tokens"] if prev is not None else None

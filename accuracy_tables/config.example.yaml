@@ -62,3 +62,10 @@ streamingtom:         # StreamingTOM (Chen et al., arXiv 2510.18269), causal tem
   knn: 7              # neighbours for the density-peak clustering of static tokens
   beta: 0.6           # merged token = beta * centre + (1 - beta) * mean of its other members
   released_dpc: false # true = the released code's density comparison (see README), false = standard DPC-KNN
+
+dycoke:               # DyCoke (Tao et al., CVPR 2025), temporal token merging only, on the Uniform K frames
+  settings:           # one condition per (window W, pruning rate K); a full window keeps about
+                      # (1 + (W - 1)(1 - K)) / W of the tokens. DyCoke's own W = 4 keeps >= 25%
+                      # (its main setting, W 4 / K 0.7, ~48%), so longer windows reach the budgets:
+    - {window: 32, prune: 0.98}    # ~5%
+    - {window: 32, prune: 0.93}    # ~10%

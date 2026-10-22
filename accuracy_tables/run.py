@@ -1,4 +1,4 @@
-"""Score the accuracy-table rows Uniform K, Blind, Ours, GazeVLM and StreamingTOM for one or more VLMs.
+"""Score the accuracy-table rows Uniform K, Blind, Ours, GazeVLM, StreamingTOM and DyCoke for one or more VLMs.
 
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from accuracy_tables import common  # noqa: E402
 from accuracy_tables.models import ADAPTERS, build_messages  # noqa: E402
 
-ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom")
+ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke")
 BLIND = "blind (question and options only)"
 
 
@@ -44,6 +44,10 @@ def streamingtom_name(ratio, s, k):
     """Every parameter in the name, so settings never mix in one result file."""
     return (f"StreamingTOM CTR G={float(ratio):g}N (K={k}, tau={s['tau']:g}, k={s['knn']}, beta={s['beta']:g}"
             f"{', released DPC' if s['released_dpc'] else ''})")
+
+
+def dycoke_name(window, prune, k):
+    return f"DyCoke TTM prune={float(prune):g} window={int(window)} (K={k})"
 
 
 def _done(path):
@@ -142,6 +146,15 @@ def run_model(key, cfg, data, rows, info_extra=None):
             print(f"\n--- StreamingTOM (CTR): the {k} Uniform K frames per video in time order, G / N in {list(s['ratio'])}")
             stm.run_questions(ad.streamingtom_backend(), uniform_items, conds,
                               os.path.join(out_dir, "streamingtom.jsonl"), build_messages)
+
+        if "dycoke" in rows:
+            from vlmeval import dycoke as dy
+            conds = {dycoke_name(s["window"], s["prune"], k): dict(window=int(s["window"]), prune=float(s["prune"]))
+                     for s in cfg["dycoke"]["settings"]}
+            print(f"\n--- DyCoke (TTM): the {k} Uniform K frames per video in windows; settings "
+                  f"{[(c['window'], c['prune']) for c in conds.values()]}")
+            dy.run_questions(ad.dycoke_backend(), uniform_items, conds, os.path.join(out_dir, "dycoke.jsonl"),
+                             build_messages)
     finally:
         try:
             import transformers
