@@ -1,6 +1,6 @@
-# accuracy_tables — Uniform K, Blind and Ours on six VLMs
+# accuracy_tables — Uniform K, Blind, Ours and GazeVLM on six VLMs
 
-This folder produces three rows of the paper's accuracy tables (Table 1, EgoEverything) for every
+This folder produces four rows of the paper's accuracy tables (Table 1, EgoEverything) for every
 VLM in the project:
 
 | row in the paper | condition name in the result files | what the model sees |
@@ -8,6 +8,7 @@ VLM in the project:
 | Uniform *K* frames (stock input), the 100% budget | `uniform K=96 (stock input)` | *K* = 96 frames per video, evenly spaced over the 1 fps stream (all frames if the video is shorter), each at the model's stock input |
 | Blind (question and options only), 0% | `blind (question and options only)` | the same prompt without any frame |
 | Ours (gaze/IMU gate + foveation) | `ours D+P gate + fovea R=70 a=160` (one per fovea setting) | the frames the eye + head gate sends under policy D+P, each foveated at that frame's gaze point |
+| GazeVLM (Chen & Qi) | `GazeVLM rho=0.3 (K=96, sigma=0.1, R_min=0.125, thumb 2x2, fixation gaze)` (one per rho) | the Uniform K frames, each reduced to the tokens of its gaze region plus a 2 x 2-token thumbnail (section GazeVLM below) |
 
 Every row uses the same prompt (`vlmeval.qwen_mcq.build_messages`: each frame labelled
 "Frame at m:ss", then the question, the five options and "Answer with the option's letter"),
@@ -31,11 +32,13 @@ The models (keys used everywhere in this folder):
 |---|---|
 | `config.example.yaml` | every data path and run option; copy it to `config.yaml` and edit |
 | `common.py` | config loading (path resolution), and the data every model is scored on: questions, gate frames, Uniform K frames, gaze per frame, items |
-| `models.py` | one adapter per VLM over its `vlmeval/*_fovea.py` module: load, parity check, stock / fovea condition, scoring, text-only prompt for Blind |
+| `models.py` | one adapter per VLM over its `vlmeval/*_fovea.py` module: load, parity check, stock / fovea condition, scoring, text-only prompt for Blind, its GazeVLM backend |
 | `run.py` | command line: scores the chosen rows for the chosen models, resumably |
 | `summarize.py` | command line: accuracy, 95% interval, frames, visual tokens and token budget per row and model → `summary.csv` |
 | `colab_accuracy_tables.ipynb` | the same steps on Colab (Google Drive paths) |
 | `../tests/test_accuracy_tables.py` | CPU tests of the config, frame selection and budget code |
+| `../vlmeval/gazevlm.py` | GazeVLM: the method (heatmap, rho-mass box, token-grid mapping, thumbnail) and one backend per VLM |
+| `../tests/test_gazevlm.py` | CPU tests of GazeVLM: the box, the token layouts per model family, positions, the run loop |
 
 No model code lives here: the foveation, the token assembly and each model's parity check are in
 `vlmeval/` and are shared with the per-model notebooks in `notebooks/colab_vlm_egoeverything*.ipynb`.
@@ -76,11 +79,12 @@ cp accuracy_tables/config.example.yaml accuracy_tables/config.yaml      # then e
 python -m pytest tests/test_accuracy_tables.py -q
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
+python -m accuracy_tables.run --config accuracy_tables/config.yaml --model phi --rows gazevlm
 python -m accuracy_tables.summarize --config accuracy_tables/config.yaml
 ```
 
 Options of `run.py`: `--model` one key, a comma list or `all` (one model at a time is loaded and
-freed); `--rows` any of `uniform,blind,ours` (default all three); `--videos test|all` overrides
+freed); `--rows` any of `uniform,blind,ours,gazevlm` (default all four); `--videos test|all` overrides
 `run.videos`; `--no-parity` skips the parity check.
 
 What a run does, per model:
@@ -101,16 +105,65 @@ Every row is resumable: rerunning skips (condition, question) pairs already in t
 a row, delete its file. Rough A100 times for 204 questions: Blind a minute, Ours ~10–30 min per
 fovea setting, Uniform K 30–90 min (Phi-3.5, at 757 tokens per frame, is the slowest).
 
+## GazeVLM
+
+[Chen & Qi, "Eye Gaze Tells You Where to Compute: Gaze-Driven Efficient VLMs", arXiv 2509.16476]
+(not Yoon et al.'s GazeVLM). Code: `vlmeval/gazevlm.py`; settings: `gazevlm` in the config.
+
+**The original** (single images, Qwen2.5-VL): the gaze trace is smoothed with a Gaussian into a
+heatmap over the image (sum 1); pixels are taken in descending heat until a fraction rho of the gaze
+mass is covered; their bounding box, grown to at least R_min, is the region of interest (ROI). The
+VLM gets two images: a 28 x 28 px global thumbnail of the whole image, then the ROI crop at high
+resolution. rho sets the size of the ROI, hence the token count.
+
+**The token-map version used here** (the paper's protocol, so that all six models get the same
+method): a native-resolution crop saves tokens only on the Qwen models; on InternVL, Phi, SmolVLM
+and Gemma (fixed inputs) a crop plus a thumbnail costs more than the frame. So each frame is encoded
+once at the model's stock input, the ROI is mapped onto the model's token grid, the tokens it
+touches are kept, and the whole grid average-pooled to 2 x 2 tokens is the thumbnail. Per frame the
+LLM gets [thumbnail, 4 tokens] then [ROI tokens, raster order], the original's order.
+
+| model | token grid the ROI is mapped on | model-specific handling |
+|---|---|---|
+| Qwen2.5-VL | 16 x 16 tokens of 28 px (448 px frame) | M-RoPE: ROI tokens at their own (row, column), each thumbnail token at the centre of the 8 x 8 tokens it averages |
+| Qwen3-VL | 16 x 16 tokens of 32 px (512 px frame) | as Qwen2.5-VL, and each token's DeepStack features are kept / pooled the same way |
+| InternVL3.5 | 16 x 16 tokens of 28 px (448 px tile) | 1D positions: tokens in the order above |
+| Gemma-3 | 16 x 16 tokens of 56 px | pooling where Gemma pools: on its 64 x 64 SigLIP patch grid before its projector (ROI tokens are its own 4 x 4-patch tokens, thumbnail tokens 32 x 32 patches) |
+| Phi-3.5 | 24 x 24 crop tokens of 28 px (672 px view) | Phi's layout: ROI rows each followed by a row break, the separator, the thumbnail rows (with row breaks) as the global view; Phi's own 156-token global view is dropped (21% of its 757 tokens, more than the budgets compared) |
+| SmolVLM2 | 9 x 9 tokens of 42 px (384 px image) | 1D positions; on a 9-token side the 2 x 2 thumbnail bins overlap by one row / column (adaptive pooling) |
+
+Settings (`gazevlm` in the config):
+
+- `rho`: the budget knob, one condition per value. On a 256-token frame (estimates for one gaze
+  point; GazeVLM uses the same K frames as Uniform K, so tokens per frame / 256 is its budget):
+  rho 0.05–0.1 → about 8–13 tokens per frame (3–5%), 0.2–0.3 → 13–20 (5–8%), 0.4–0.5 → 20–29
+  (8–11%), 0.6 → 29–40 (11–16%). `summarize.py` reports the measured budget; pick the rho that
+  matches ours.
+- `sigma` (0.1 of the frame side), `r_min` (0.125 of the frame side, 56 px on a 448 px frame,
+  Qwen's smallest image) and the 224-cell heatmap grid are our choices: the authors' code is not
+  public and the paper gives no values. With one gaze point per frame, sigma and rho together only
+  set the ROI size, so sweeping rho covers sigma too.
+- `gaze`: `fixation` (default, the protocol: our fixation estimate per frame, the same gaze as
+  "ours") or `trace` (the raw gaze samples of the second before the frame, closer to the original's
+  heatmap of a trace).
+- `thumb`: thumbnail side in tokens (2 per the protocol).
+
+GazeVLM is image-only: it does not select frames, so it runs on the Uniform K frames, and a frame
+without a gaze estimate uses the image centre (counted in `n_gaze_missing`). Its floor is the
+thumbnail plus the smallest ROI: about 8 tokens on a 256-token frame (≈3%) but 8 of 81 on SmolVLM2
+(≈10%), so SmolVLM2 has no GazeVLM point near 5%.
+
 ## Results
 
 `<out_dir>/<model>/`:
 
-- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`: one JSON object per (condition, question):
+- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`: one JSON object per (condition, question):
   `condition, qid, video, answer, pred, correct, p` (probabilities over A–E), `n_frames`,
   `n_image_tokens` (visual tokens entering the LLM, every token counted: Phi's row breaks and
   global view, SmolVLM's per-frame tokens), `n_tokens` (whole prompt), `sec`, `error`
   (`null`, `"oom"` or `"nan"`; rows with an error are left out of the summary), plus
-  model-specific fields (cell sizes, gaze-missing counts).
+  model-specific fields (cell sizes, gaze-missing counts). GazeVLM rows add `n_roi_tokens`,
+  `roi_area` (mean ROI area, fraction of the frame) and `gazevlm` (its parameters).
 - `run_info.json`: model id, versions, the config used, the frame cap, and the parity report.
 
 `<out_dir>/summary.csv` (from `summarize.py`): per model and condition `n, accuracy, ci_low,
@@ -134,8 +187,8 @@ ci_high` (95% interval from resampling whole videos), `frames_per_q, tokens_per_
   (`n_gaze_missing`).
 - transformers 5.20 breaks SmolVLM's own image-token merge; `vlmeval/smolvlm_fovea.py` patches it
   for the parity reference (our scoring path does not use it).
-- The other rows of Table 1 (Uniform K + average pooling, GazeVLM, StreamingTOM, DyCoke, FastVID,
-  PruneVid, DTD) and HD-EPIC are not implemented here yet.
+- The other rows of Table 1 (Uniform K + average pooling, StreamingTOM, DyCoke, FastVID, PruneVid,
+  DTD) and HD-EPIC are not implemented here yet.
 
 ## Extending
 
@@ -146,3 +199,5 @@ ci_high` (95% interval from resampling whole videos), `frames_per_q, tokens_per_
   `models.py` and an entry in `ADAPTERS`.
 - **Another policy**: `run.policy: D` or `D+P all`; condition names include the policy, so results
   of different policies can share a file.
+- **Another GazeVLM setting**: add a rho to `gazevlm.rho`, or change `sigma`, `r_min`, `thumb`,
+  `gaze`; every parameter is in the condition name, so old and new settings never mix.

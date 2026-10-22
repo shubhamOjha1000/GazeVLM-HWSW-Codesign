@@ -21,7 +21,10 @@ DEFAULTS = {
     "models": {},
     "ours": {"rings": [{"R": 70, "a": 160}, {"R": 180, "a": 40}, {"R": 180, "a": 160}, {"R": 240, "a": 160}],
              "smolvlm_k": [1, 3, 5, 7]},
+    "gazevlm": {"rho": [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6], "sigma": 0.1, "r_min": 0.125, "thumb": 2,
+                "gaze": "fixation"},
 }
+GAZE_WINDOW = 1.0       # seconds of gaze before a frame: its fixation estimate and its raw trace
 REQUIRED_PATHS = ("folds_dir", "gate_ckpt_dir", "frames_cache_dir")
 POLICIES = ("D", "D+P", "D+P all")
 _VAR = re.compile(r"\$\{([^}]+)\}")
@@ -71,6 +74,8 @@ def load_config(path):
         raise KeyError(f"{path}: set paths.{', paths.'.join(missing)}")
     if cfg["run"]["policy"] not in POLICIES:
         raise ValueError(f"run.policy must be one of {POLICIES}, got {cfg['run']['policy']!r}")
+    if cfg["gazevlm"]["gaze"] not in ("fixation", "trace"):
+        raise ValueError(f"gazevlm.gaze must be fixation or trace, got {cfg['gazevlm']['gaze']!r}")
     return cfg
 
 
@@ -158,7 +163,8 @@ def _frame_metas(cfg, videos):
 
 def load_data(cfg):
     """dict(qs, videos, test_videos, metas, gate = {video: [frame]}, uniform = {video: [frame]})
-    with frame = dict(key=(video, frame number), path, t seconds, gaze=(u, v) or None)."""
+    with frame = dict(key=(video, frame number), path, t seconds, gaze=(u, v) or None,
+    gaze_trace=[(u, v), ...] the raw gaze samples of the GAZE_WINDOW seconds before t)."""
     from vlmeval import spatial as sp
     from vlmeval.frames import frame_path
     qs, clips, test_videos = _questions_and_clips(cfg)
@@ -173,9 +179,13 @@ def load_data(cfg):
 
     def frame(v, f):
         t = float(metas[v]["ts"][f])
-        g = sp.gaze_fixation(tracks[v], t) if v in tracks else None
+        g = sp.gaze_fixation(tracks[v], t, window=GAZE_WINDOW) if v in tracks else None
+        trace = []
+        if v in tracks:
+            ts_, xy_ = tracks[v]
+            trace = [tuple(map(float, p)) for p in xy_[(ts_ >= t - GAZE_WINDOW) & (ts_ <= t)]]
         return dict(key=(v, int(f)), path=frame_path(metas[v], f), t=t,
-                    gaze=tuple(map(float, g)) if g is not None else None)
+                    gaze=tuple(map(float, g)) if g is not None else None, gaze_trace=trace)
 
     gate = {v: [frame(v, f) for f in sent[v] if f < metas[v]["n"]] for v in videos}
     uniform = {v: [frame(v, f) for f in uniform_indices(metas[v]["n"], cfg["run"]["K"])] for v in videos}

@@ -1,4 +1,4 @@
-"""Score the accuracy-table rows Uniform K, Blind and Ours for one or more VLMs.
+"""Score the accuracy-table rows Uniform K, Blind, Ours and GazeVLM for one or more VLMs.
 
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from accuracy_tables import common  # noqa: E402
 from accuracy_tables.models import ADAPTERS, build_messages  # noqa: E402
 
-ROWS = ("uniform", "blind", "ours")
+ROWS = ("uniform", "blind", "ours", "gazevlm")
 BLIND = "blind (question and options only)"
 
 
@@ -32,6 +32,12 @@ def uniform_name(k):
 
 def ours_name(policy, label):
     return f"ours {policy} gate + fovea {label}"
+
+
+def gazevlm_name(rho, g, k):
+    """Every parameter in the name, so settings never mix in one result file."""
+    return (f"GazeVLM rho={float(rho):g} (K={k}, sigma={g['sigma']:g}, R_min={g['r_min']:g}, "
+            f"thumb {g['thumb']}x{g['thumb']}, {g['gaze']} gaze)")
 
 
 def _done(path):
@@ -92,12 +98,11 @@ def run_model(key, cfg, data, rows, info_extra=None):
                 raise RuntimeError(f"{key}: parity failed; nothing scored (see the report above)")
             print("parity OK")
 
+        k = min(run["K"], cap) if cap else run["K"]
+        uniform_items = common.make_items(data["qs"], {v: common.cap_frames(f, cap) for v, f in data["uniform"].items()})
         if "uniform" in rows:
-            k = min(run["K"], cap) if cap else run["K"]
-            frames = {v: common.cap_frames(f, cap) for v, f in data["uniform"].items()}
-            items = common.make_items(data["qs"], frames)
-            print(f"\n--- Uniform K: {k} frames per video at stock input, {len(items)} questions")
-            ad.score(items, {uniform_name(k): ad.stock_condition()}, os.path.join(out_dir, "uniform.jsonl"))
+            print(f"\n--- Uniform K: {k} frames per video at stock input, {len(uniform_items)} questions")
+            ad.score(uniform_items, {uniform_name(k): ad.stock_condition()}, os.path.join(out_dir, "uniform.jsonl"))
 
         if "blind" in rows:
             print(f"\n--- Blind: question and options only")
@@ -111,6 +116,16 @@ def run_model(key, cfg, data, rows, info_extra=None):
             print(f"\n--- Ours: {run['policy']} gate frames (mean "
                   f"{np.mean([len(it['frames']) for it in items]):.1f} per question) x {len(conds)} fovea settings")
             ad.score(items, conds, os.path.join(out_dir, "ours.jsonl"))
+
+        if "gazevlm" in rows:
+            from vlmeval import gazevlm as gz
+            g = cfg["gazevlm"]
+            conds = {gazevlm_name(r, g, k): dict(rho=float(r), sigma=float(g["sigma"]), r_min=float(g["r_min"]),
+                                                 thumb=int(g["thumb"]), gaze=g["gaze"]) for r in g["rho"]}
+            print(f"\n--- GazeVLM: the {k} Uniform K frames per video, ROI + {g['thumb']}x{g['thumb']} thumbnail "
+                  f"tokens, rho in {list(g['rho'])}")
+            gz.run_questions(ad.gazevlm_backend(), uniform_items, conds, os.path.join(out_dir, "gazevlm.jsonl"),
+                             build_messages)
     finally:
         try:
             import transformers

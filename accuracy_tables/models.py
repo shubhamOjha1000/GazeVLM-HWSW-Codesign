@@ -2,8 +2,9 @@
 
 Each adapter knows how to load its model, check parity on one frame, name the stock and the
 foveated conditions in its module's vocabulary, score items through the module's
-run_questions (Uniform K, ours), and tokenize a text-only prompt (Blind). The model code itself
-lives in vlmeval/ and is not duplicated here.
+run_questions (Uniform K, ours), tokenize a text-only prompt (Blind), and hand its loaded model
+to its GazeVLM backend (vlmeval/gazevlm.py). The model code itself lives in vlmeval/ and is not
+duplicated here.
 
     key        module                      stock input per frame
     qwen2.5    vlmeval/qwen_fovea.py       256 tokens (448 px)
@@ -69,6 +70,11 @@ class Adapter:
         out = self.model(input_ids=ids.to(self.model.device), attention_mask=torch.ones_like(ids).to(self.model.device),
                          use_cache=False)
         return out.logits[0, -1]
+
+    def gazevlm_backend(self):
+        """This model's GazeVLM backend in vlmeval/gazevlm.py (same class name as the adapter)."""
+        from vlmeval import gazevlm as gz
+        return getattr(gz, type(self).__name__)(self.model, self.proc, self.letter_ids)
 
     # -- shared
     def load(self):
@@ -271,6 +277,10 @@ class Phi(Adapter):
     def blind_ids(self, messages):
         from vlmeval import phi_fovea as ph
         return ph.prompt_ids(self.tok, ph.phi_text(self.tok, messages), [])
+
+    def gazevlm_backend(self):
+        from vlmeval import gazevlm as gz
+        return gz.Phi(self.img, self.llm, self.tok, self.letter_ids)
 
 
 class SmolVLM(Adapter):

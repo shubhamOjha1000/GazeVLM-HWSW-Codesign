@@ -42,7 +42,7 @@ def test_example_config_loads():
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         "accuracy_tables", "config.example.yaml")
     c = common.load_config(path)
-    assert c["run"]["policy"] == "D+P" and len(c["ours"]["rings"]) == 4
+    assert c["run"]["policy"] == "D+P" and len(c["ours"]["rings"]) == 4 and c["gazevlm"]["gaze"] == "fixation"
 
 
 @pytest.mark.parametrize("n,k", [(299, 96), (59, 96), (96, 96), (1, 96), (10, 3)])
