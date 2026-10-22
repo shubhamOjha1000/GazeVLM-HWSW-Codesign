@@ -30,3 +30,6 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+
+# --- accuracy_tables: personal paths -------------------------------------------
+accuracy_tables/config.yaml
