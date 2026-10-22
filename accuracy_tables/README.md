@@ -1,6 +1,6 @@
-# accuracy_tables — Uniform K, Blind, Ours, GazeVLM, StreamingTOM and DyCoke on six VLMs
+# accuracy_tables — Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke and FastVID on six VLMs
 
-This folder produces six rows of the paper's accuracy tables (Table 1, EgoEverything) for every
+This folder produces seven rows of the paper's accuracy tables (Table 1, EgoEverything) for every
 VLM in the project:
 
 | row in the paper | condition name in the result files | what the model sees |
@@ -11,6 +11,7 @@ VLM in the project:
 | GazeVLM (Chen & Qi) | `GazeVLM rho=0.3 (K=96, sigma=0.1, R_min=0.125, thumb 2x2, fixation gaze)` (one per rho) | the Uniform K frames, each reduced to the tokens of its gaze region plus a 2 x 2-token thumbnail (section GazeVLM below) |
 | StreamingTOM (Chen et al.) | `StreamingTOM CTR G=0.05N (K=96, tau=0.9, k=7, beta=0.6)` (one per G / N) | the Uniform K frames in time order, each reduced to G tokens from its own and the previous frame's tokens (section StreamingTOM below) |
 | DyCoke (Tao et al.) | `DyCoke TTM prune=0.98 window=32 (K=96)` (one per window / pruning rate) | the Uniform K frames in windows: each window's first frame whole, the others pruned to their tokens least similar to a reference frame (section DyCoke below) |
+| FastVID (Shen et al.) | `FastVID r=0.05 (K=96, c=8, tau=0.9, ignore=0.95, d=0.4, p=4, beta=0.6)` (one per r) | the Uniform K frames cut into segments of similar frames, each segment reduced to salient tokens ([CLS] attention) plus merged density-peak anchors (section FastVID below) |
 
 Every row uses the same prompt (`vlmeval.qwen_mcq.build_messages`: each frame labelled
 "Frame at m:ss", then the question, the five options and "Answer with the option's letter"),
@@ -34,7 +35,7 @@ The models (keys used everywhere in this folder):
 |---|---|
 | `config.example.yaml` | every data path and run option; copy it to `config.yaml` and edit |
 | `common.py` | config loading (path resolution), and the data every model is scored on: questions, gate frames, Uniform K frames, gaze per frame, items |
-| `models.py` | one adapter per VLM over its `vlmeval/*_fovea.py` module: load, parity check, stock / fovea condition, scoring, text-only prompt for Blind, its GazeVLM, StreamingTOM and DyCoke backends |
+| `models.py` | one adapter per VLM over its `vlmeval/*_fovea.py` module: load, parity check, stock / fovea condition, scoring, text-only prompt for Blind, its GazeVLM, StreamingTOM, DyCoke and FastVID backends |
 | `run.py` | command line: scores the chosen rows for the chosen models, resumably |
 | `summarize.py` | command line: accuracy, 95% interval, frames, visual tokens and token budget per row and model → `summary.csv` |
 | `colab_accuracy_tables.ipynb` | the same steps on Colab (Google Drive paths) |
@@ -45,6 +46,8 @@ The models (keys used everywhere in this folder):
 | `../tests/test_streamingtom.py` | CPU tests of StreamingTOM: the attention capture on a real (tiny) CLIP, the CTR plan, packing, the run loop |
 | `../vlmeval/dycoke.py` | DyCoke's temporal token merging over windows of frames, on the StreamingTOM backends' tokens |
 | `../tests/test_dycoke.py` | CPU tests of DyCoke: the 4-frame window against DyCoke's own rules, longer and shorter windows, the run loop |
+| `../vlmeval/fastvid.py` | FastVID: dynamic segmentation, the per-segment budgets, [CLS]-attention selection and density-based merging |
+| `../tests/test_fastvid.py` | CPU tests of FastVID: (pseudo-)[CLS] attention, segmentation, budgets, the merge weights, plans, the run loop |
 
 No model code lives here: the foveation, the token assembly and each model's parity check are in
 `vlmeval/` and are shared with the per-model notebooks in `notebooks/colab_vlm_egoeverything*.ipynb`.
@@ -86,12 +89,12 @@ python -m pytest tests/test_accuracy_tables.py -q
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model phi --rows gazevlm
-python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows streamingtom,dycoke
+python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows streamingtom,dycoke,fastvid
 python -m accuracy_tables.summarize --config accuracy_tables/config.yaml
 ```
 
 Options of `run.py`: `--model` one key, a comma list or `all` (one model at a time is loaded and
-freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke` (default all six); `--videos test|all` overrides
+freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke,fastvid` (default all seven); `--videos test|all` overrides
 `run.videos`; `--no-parity` skips the parity check.
 
 What a run does, per model:
@@ -243,12 +246,50 @@ in raster order (the released code orders them by similarity); a shorter last wi
 rules (the released code drops the last frame when the frame count is odd, and leaves the last
 window's third frame whole because its loop stops one window early).
 
+## FastVID
+
+[Shen, Gong, He, Zhang, Liu, Zhao & Ding, "FastVID: Dynamic Density Pruning for Fast Video Large
+Language Models", NeurIPS 2025]. Code: `vlmeval/fastvid.py`; settings: `fastvid` in the config.
+Offline: it needs all K frames of a question at once (the Uniform K frames).
+
+As in the paper and the authors' Qwen2.5-VL implementation (`fastvid_qwen25vl/.../modeling_qwen2_5_vl.py`
+of github.com/LunarShen/FastVID), which is general (any frame count) and is followed for all six models:
+
+1. **Dynamic temporal segmentation.** A frame's global feature is the mean of its LLM tokens; the video
+   is cut at the c - 1 lowest adjacent-frame cosines and at every cosine below tau.
+2. **Budgets per segment** of P frames: r P N tokens, a share d made by merging (context), the rest
+   selected (salient). A frame nearly identical to the one before it (cosine >= ignore) gets no tokens of
+   its own; the salient budget is spread over the other (valid) frames, the context budget over anchor
+   frames, every p-th valid frame counted from the segment's end, at most N / 2 each.
+3. **Attention-based token selection**: a frame's salient tokens are those with the highest [CLS]
+   attention in the vision encoder's last (feature) layer.
+4. **Density-based token merging**: an anchor frame's context tokens are density peaks (DPC-KNN, 4
+   neighbours) among its non-salient tokens; every other token of the segment (salient tokens and this
+   frame's anchors excepted) joins its most similar anchor (cosine); an anchor with n members becomes
+   w a + (1 - w) mean(members), w = max(1 / (n + 1), beta). Anchors keep their positions.
+5. The kept tokens go to the LLM frame by frame in raster order; a frame left without tokens leaves the
+   prompt with its time label (`n_frames_dropped`; in FastVID's single video block it simply vanishes).
+
+| model | [CLS] attention | handling |
+|---|---|---|
+| Qwen2.5-VL | pseudo-[CLS] (FastVID's Qwen recipe): the mean query of the last ViT block against keys averaged over each token's 2 x 2 patches | M-RoPE: every kept token at its own cell |
+| Qwen3-VL | pseudo-[CLS] as Qwen2.5-VL | as Qwen2.5-VL; DeepStack features kept and merged with the same tokens and weights |
+| InternVL3.5 | the real [CLS] token of InternViT's feature layer, patch attention averaged per token | 1D positions |
+| Gemma-3 | pseudo-[CLS], keys averaged over each token's 4 x 4 SigLIP patches | 1D positions, projected tokens |
+| Phi-3.5 | the real [CLS] token of each crop in CLIP's second-to-last layer | 576 crop tokens, a row break after each row that has tokens, no global view |
+| SmolVLM2 | pseudo-[CLS], keys averaged over each token's 3 x 3 patches | 1D positions |
+
+Settings: `r` = 0.05 and 0.1 (the tables' budgets; FastVID runs on the same K frames as Uniform K, so r
+is its budget; Phi's row breaks come on top), the paper's c = 8, tau = 0.9, d = 0.4, p = 4, beta = 0.6
+(the authors' Qwen2.5-VL run used tau = 0.84) and the Qwen2.5-VL code's ignore = 0.95. The [CLS]
+attention is read like StreamingTOM's saliency (`capture_saliency`, no model changes).
+
 ## Results
 
 `<out_dir>/<model>/`:
 
-- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`, `dycoke.jsonl`: one JSON object per
-  (condition, question):
+- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`, `dycoke.jsonl`, `fastvid.jsonl`: one
+  JSON object per (condition, question):
   `condition, qid, video, answer, pred, correct, p` (probabilities over A–E), `n_frames`,
   `n_image_tokens` (visual tokens entering the LLM, every token counted: Phi's row breaks and
   global view, SmolVLM's per-frame tokens), `n_tokens` (whole prompt), `sec`, `error`
@@ -256,7 +297,8 @@ window's third frame whole because its loop stops one window early).
   model-specific fields (cell sizes, gaze-missing counts). GazeVLM rows add `n_roi_tokens`,
   `roi_area` (mean ROI area, fraction of the frame) and `gazevlm` (its parameters); StreamingTOM rows
   add `static_share` (mean share of static tokens per frame), `n_merged_tokens` and `streamingtom`; DyCoke
-  rows `kept_share` (share of the frames' tokens kept) and `dycoke`.
+  rows `kept_share` (share of the frames' tokens kept) and `dycoke`; FastVID rows `n_frames_dropped` (frames
+  left without tokens), `n_segments` and `fastvid`.
 - `run_info.json`: model id, versions, the config used, the frame cap, and the parity report.
 
 `<out_dir>/summary.csv` (from `summarize.py`): per model and condition `n, accuracy, ci_low,
@@ -280,8 +322,8 @@ ci_high` (95% interval from resampling whole videos), `frames_per_q, tokens_per_
   (`n_gaze_missing`).
 - transformers 5.20 breaks SmolVLM's own image-token merge; `vlmeval/smolvlm_fovea.py` patches it
   for the parity reference (our scoring path does not use it).
-- The other rows of Table 1 (Uniform K + average pooling, FastVID, PruneVid, DTD) and HD-EPIC are
-  not implemented here yet.
+- The other rows of Table 1 (Uniform K + average pooling, PruneVid, DTD) and HD-EPIC are not
+  implemented here yet.
 
 ## Extending
 
@@ -298,3 +340,5 @@ ci_high` (95% interval from resampling whole videos), `frames_per_q, tokens_per_
   tokens, 0.255), or change `tau`, `knn`, `beta`, `released_dpc`; likewise in the condition name.
 - **Another DyCoke setting**: add a `{window, prune}` pair to `dycoke.settings` (DyCoke's own:
   `{window: 4, prune: 0.7}`, ~47% of the tokens).
+- **Another FastVID setting**: add an `r` to `fastvid.r` or change `c`, `tau`, `ignore`, `d`, `p`, `beta`
+  (the authors' Qwen2.5-VL run: `tau: 0.84`); all are in the condition name.

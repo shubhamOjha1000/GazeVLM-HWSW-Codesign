@@ -64,11 +64,35 @@ def received_attention(q, k, mask=None, scaling=None, chunk=1024):
     return out / (H * Lq)
 
 
+def cls_attention(q, k, mask=None, scaling=None):
+    """[CLS] attention (B, Lk): softmax of the query at position 0 over all keys, averaged over heads."""
+    return received_attention(q[:, :, :1], k, None if mask is None else mask[..., :1, :], scaling)
+
+
+def pseudo_cls_attention(q, k, mask=None, scaling=None, pool=None):
+    """Pseudo-[CLS] attention (B, N) for encoders without a [CLS] token (FastVID's recipe for Qwen-VL):
+    the mean query over all positions against the keys averaged per LLM token by `pool` ((B, H, L, d)
+    -> (B, H, N, d)), softmax over the N tokens, averaged over heads."""
+    return received_attention(q.float().mean(2, keepdim=True), pool(k.float()), None, scaling)
+
+
+def group_pool(g):
+    """Key pooling over consecutive groups of g positions (Qwen: a token's 2 x 2 patches are adjacent)."""
+    return lambda k: k.unflatten(2, (-1, g)).mean(3)
+
+
+def block_pool(side, b):
+    """Key pooling over the b x b blocks of a side x side raster patch grid (SigLIP patches -> tokens)."""
+    return lambda k: k.unflatten(2, (side // b, b, side // b, b)).mean((3, 5)).flatten(2, 3)
+
+
 @contextmanager
-def capture_saliency(target):
+def capture_saliency(target, score=None):
     """Inside: every call of the attention module `target` through transformers' attention registry
-    appends its received attention (B, L) to the yielded list. Other modules are untouched."""
+    appends score(query, key, mask, scaling) to the yielded list (default: the received attention,
+    (B, L)). Other modules are untouched."""
     from transformers.modeling_utils import AttentionInterface
+    score = score or received_attention
     impl = target.config._attn_implementation
     mapping = AttentionInterface._global_mapping
     orig = mapping.get(impl)
@@ -79,7 +103,7 @@ def capture_saliency(target):
 
     def wrapped(module, query, key, value, attention_mask=None, *args, **kwargs):
         if module is target:
-            got.append(received_attention(query, key, attention_mask, kwargs.get("scaling")))
+            got.append(score(query, key, attention_mask, kwargs.get("scaling")))
         return orig(module, query, key, value, attention_mask, *args, **kwargs)
 
     mapping[impl] = wrapped
@@ -89,10 +113,18 @@ def capture_saliency(target):
         mapping[impl] = orig
 
 
-def _capture(backend, target):
-    """capture_saliency(target), or nothing for a backend that needs no saliency (saliency = False:
-    vlmeval/dycoke.py reuses these backends for their tokens only)."""
-    return capture_saliency(target) if getattr(backend, "saliency", True) else nullcontext([])
+def _kind(backend):
+    """The backend's saliency: 'received' (StreamingTOM, the default), 'cls' (FastVID: [CLS] attention,
+    pseudo-[CLS] on encoders without one) or None (DyCoke: tokens only)."""
+    return getattr(backend, "saliency", "received")
+
+
+def _capture(backend, target, cls_score):
+    """capture_saliency for the backend's kind (cls_score = its [CLS] / pseudo-[CLS] score), or nothing."""
+    kind = _kind(backend)
+    if not kind:
+        return nullcontext([])
+    return capture_saliency(target, cls_score if kind == "cls" else received_attention)
 
 
 def encoder_layers(m):
@@ -192,12 +224,15 @@ class Qwen25(gz.Qwen25):
         qf = self.qf
         img = qf.resize01(qf.load_frame01(fr["path"], qf.IMG), self.px)
         cells = qf.uniform_cells(self.px)
-        with _capture(self, self.vis.blocks[-1].attn) as got:
+        pseudo = lambda q, k, m, s: pseudo_cls_attention(q, k, m, s, group_pool(4))
+        with _capture(self, self.vis.blocks[-1].attn, pseudo) as got:
             tok = qf.encode_cells(self.vis, img, cells, self.px, self.mean, self.std)
         st = dict(tokens=tok)
         if got:
             order, _ = qf.window_groups(cells, self.px)           # the encoder's cell order (4 patches each)
-            seq = torch.cat([g[0] for g in got]).view(-1, 4).mean(1)
+            seq = torch.cat([g[0] for g in got])
+            if _kind(self) == "received":
+                seq = seq.view(-1, 4).mean(1)
             st["sal"] = torch.empty_like(seq)
             st["sal"][order.to(seq.device)] = seq
         return st
@@ -213,12 +248,15 @@ class Qwen3(gz.Qwen3):
         qf, q3 = self.qf, self.q3
         img = qf.resize01(qf.load_frame01(fr["path"], qf.IMG), q3.IMG)
         cells = q3.uniform_cells(q3.IMG)
-        with _capture(self, self.vis.blocks[-1].attn) as got:
+        pseudo = lambda q, k, m, s: pseudo_cls_attention(q, k, m, s, group_pool(4))
+        with _capture(self, self.vis.blocks[-1].attn, pseudo) as got:
             tok, deep = q3.encode_cells(self.vis, img, cells, q3.IMG, self.mean, self.std)
         st = dict(tokens=tok, deep=deep)
         if got:
             order = torch.as_tensor(np.lexsort((cells[:, 1], cells[:, 0])))   # the encoder's (raster) order
-            seq = torch.cat([g[0] for g in got]).view(-1, 4).mean(1)
+            seq = torch.cat([g[0] for g in got])
+            if _kind(self) == "received":
+                seq = seq.view(-1, 4).mean(1)
             st["sal"] = torch.empty_like(seq)
             st["sal"][order.to(seq.device)] = seq
         return st
@@ -234,7 +272,7 @@ class InternVL(gz.InternVL):
     def frame_state(self, fr):
         vt, _, _, _, layer = self.iv.parts(self.model)
         img = self.qf.load_frame01(fr["path"], self.qf.IMG)
-        with _capture(self, encoder_layers(vt)[layer].attention) as got:
+        with _capture(self, encoder_layers(vt)[layer].attention, cls_attention) as got:
             tok = self.iv.encode_uniform(self.model, img, self.iv.TILE, self.mean, self.std)
         st = dict(tokens=tok)
         if got:
@@ -251,11 +289,12 @@ class Gemma(gz.Gemma):
     def frame_state(self, fr):
         qf, gf = self.qf, self.gf
         img = qf.resize01(qf.load_frame01(fr["path"], qf.IMG), gf.G_IMG)
-        with _capture(self, encoder_layers(self.vt)[-1].self_attn) as got:
+        pseudo = lambda q, k, m, s: pseudo_cls_attention(q, k, m, s, block_pool(gf.GRID, gf.BASE))
+        with _capture(self, encoder_layers(self.vt)[-1].self_attn, pseudo) as got:
             grid = gf.vision_grids(self.vt, [img], self.mean, self.std)[0]
         st = dict(tokens=gf.project(self.pj, gf.pool_cells(grid, gf.stock_cells())))
         if got:
-            st["sal"] = pool_saliency(got[0][0], gf.GRID, gf.BASE)
+            st["sal"] = got[0][0] if _kind(self) == "cls" else pool_saliency(got[0][0], gf.GRID, gf.BASE)
         return st
 
     def pack(self, st, plan, beta):
@@ -268,7 +307,7 @@ class Phi(gz.Phi):
     def frame_state(self, fr):
         ph, img = self.ph, self.img
         hd01, _ = ph.views(ph.load_pil(fr["path"]))
-        with _capture(self, img.clip.encoder.layers[-2].self_attn) as got:
+        with _capture(self, img.clip.encoder.layers[-2].self_attn, cls_attention) as got:
             grid = ph.crop_grid(img, hd01)                                       # (24, 24, 4096)
         st = dict(tokens=img.img_projection(grid.reshape(-1, grid.shape[-1])))
         if got:
@@ -295,12 +334,13 @@ class SmolVLM(gz.SmolVLM):
         sm = self.sm
         vis, _ = sm.parts(self.model)
         rec = sm.stock_input(self.ip, Image.open(fr["path"]).convert("RGB"))
-        with _capture(self, encoder_layers(vis)[-1].self_attn) as got:
+        side = sm.IMG // sm.PATCH                                                # 27 patches per side
+        pseudo = lambda q, k, m, s: pseudo_cls_attention(q, k, m, s, block_pool(side, 3))
+        with _capture(self, encoder_layers(vis)[-1].self_attn, pseudo) as got:
             tok = sm.encode_uniform(self.model, rec, sm.IMG, self.mean, self.std)
         st = dict(tokens=tok)
         if got:
-            s = got[0][0]
-            st["sal"] = pool_saliency(s, int(round(len(s) ** 0.5)), 3)
+            st["sal"] = got[0][0] if _kind(self) == "cls" else pool_saliency(got[0][0], side, 3)
         return st
 
     def pack(self, st, plan, beta):

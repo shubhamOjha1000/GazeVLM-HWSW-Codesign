@@ -69,3 +69,12 @@ dycoke:               # DyCoke (Tao et al., CVPR 2025), temporal token merging o
                       # (its main setting, W 4 / K 0.7, ~48%), so longer windows reach the budgets:
     - {window: 32, prune: 0.98}    # ~5%
     - {window: 32, prune: 0.93}    # ~10%
+
+fastvid:              # FastVID (Shen et al., NeurIPS 2025) on the Uniform K frames (offline: all of them at once)
+  r: [0.05, 0.1]      # retention ratio r: tokens kept, share of all frames' tokens, one condition each
+  c: 8                # at least c segments: cut at the c - 1 lowest frame transitions...
+  tau: 0.9            # ...and at every transition below tau (the authors' Qwen2.5-VL run used 0.84)
+  ignore: 0.95        # a frame this similar to the one before it gets no tokens of its own (their Qwen2.5-VL code)
+  d: 0.4              # share of the kept tokens made by density-based merging (the rest: [CLS]-attention selection)
+  p: 4                # anchor frame every p valid frames
+  beta: 0.6           # anchor weight when merging: max(1 / (n + 1), beta)

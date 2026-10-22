@@ -1,4 +1,4 @@
-"""Score the accuracy-table rows Uniform K, Blind, Ours, GazeVLM, StreamingTOM and DyCoke for one or more VLMs.
+"""Score the accuracy-table rows (Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID) for one or more VLMs.
 
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from accuracy_tables import common  # noqa: E402
 from accuracy_tables.models import ADAPTERS, build_messages  # noqa: E402
 
-ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke")
+ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke", "fastvid")
 BLIND = "blind (question and options only)"
 
 
@@ -48,6 +48,12 @@ def streamingtom_name(ratio, s, k):
 
 def dycoke_name(window, prune, k):
     return f"DyCoke TTM prune={float(prune):g} window={int(window)} (K={k})"
+
+
+def fastvid_name(r, s, k):
+    """Every parameter in the name, so settings never mix in one result file."""
+    return (f"FastVID r={float(r):g} (K={k}, c={s['c']}, tau={s['tau']:g}, ignore={s['ignore']:g}, d={s['d']:g}, "
+            f"p={s['p']}, beta={s['beta']:g})")
 
 
 def _done(path):
@@ -154,6 +160,16 @@ def run_model(key, cfg, data, rows, info_extra=None):
             print(f"\n--- DyCoke (TTM): the {k} Uniform K frames per video in windows; settings "
                   f"{[(c['window'], c['prune']) for c in conds.values()]}")
             dy.run_questions(ad.dycoke_backend(), uniform_items, conds, os.path.join(out_dir, "dycoke.jsonl"),
+                             build_messages)
+
+        if "fastvid" in rows:
+            from vlmeval import fastvid as fv
+            s = cfg["fastvid"]
+            conds = {fastvid_name(r, s, k): dict(r=float(r), c=int(s["c"]), tau=float(s["tau"]),
+                                                 ignore=float(s["ignore"]), d=float(s["d"]), p=int(s["p"]),
+                                                 beta=float(s["beta"])) for r in s["r"]}
+            print(f"\n--- FastVID: the {k} Uniform K frames per video (offline), r in {list(s['r'])}")
+            fv.run_questions(ad.fastvid_backend(), uniform_items, conds, os.path.join(out_dir, "fastvid.jsonl"),
                              build_messages)
     finally:
         try:

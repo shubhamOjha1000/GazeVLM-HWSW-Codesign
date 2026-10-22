@@ -25,6 +25,7 @@ DEFAULTS = {
                 "gaze": "fixation"},
     "streamingtom": {"ratio": [0.05, 0.1], "tau": 0.9, "knn": 7, "beta": 0.6, "released_dpc": False},
     "dycoke": {"settings": [{"window": 32, "prune": 0.98}, {"window": 32, "prune": 0.93}]},
+    "fastvid": {"r": [0.05, 0.1], "c": 8, "tau": 0.9, "ignore": 0.95, "d": 0.4, "p": 4, "beta": 0.6},
 }
 GAZE_WINDOW = 1.0       # seconds of gaze before a frame: its fixation estimate and its raw trace
 REQUIRED_PATHS = ("folds_dir", "gate_ckpt_dir", "frames_cache_dir")
