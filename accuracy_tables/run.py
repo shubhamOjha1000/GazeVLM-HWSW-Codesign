@@ -1,4 +1,4 @@
-"""Score the accuracy-table rows Uniform K, Blind, Ours and GazeVLM for one or more VLMs.
+"""Score the accuracy-table rows Uniform K, Blind, Ours, GazeVLM and StreamingTOM for one or more VLMs.
 
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from accuracy_tables import common  # noqa: E402
 from accuracy_tables.models import ADAPTERS, build_messages  # noqa: E402
 
-ROWS = ("uniform", "blind", "ours", "gazevlm")
+ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom")
 BLIND = "blind (question and options only)"
 
 
@@ -38,6 +38,12 @@ def gazevlm_name(rho, g, k):
     """Every parameter in the name, so settings never mix in one result file."""
     return (f"GazeVLM rho={float(rho):g} (K={k}, sigma={g['sigma']:g}, R_min={g['r_min']:g}, "
             f"thumb {g['thumb']}x{g['thumb']}, {g['gaze']} gaze)")
+
+
+def streamingtom_name(ratio, s, k):
+    """Every parameter in the name, so settings never mix in one result file."""
+    return (f"StreamingTOM CTR G={float(ratio):g}N (K={k}, tau={s['tau']:g}, k={s['knn']}, beta={s['beta']:g}"
+            f"{', released DPC' if s['released_dpc'] else ''})")
 
 
 def _done(path):
@@ -126,6 +132,16 @@ def run_model(key, cfg, data, rows, info_extra=None):
                   f"tokens, rho in {list(g['rho'])}")
             gz.run_questions(ad.gazevlm_backend(), uniform_items, conds, os.path.join(out_dir, "gazevlm.jsonl"),
                              build_messages)
+
+        if "streamingtom" in rows:
+            from vlmeval import streamingtom as stm
+            s = cfg["streamingtom"]
+            conds = {streamingtom_name(r, s, k): dict(ratio=float(r), tau=float(s["tau"]), knn=int(s["knn"]),
+                                                      beta=float(s["beta"]), released_dpc=bool(s["released_dpc"]))
+                     for r in s["ratio"]}
+            print(f"\n--- StreamingTOM (CTR): the {k} Uniform K frames per video in time order, G / N in {list(s['ratio'])}")
+            stm.run_questions(ad.streamingtom_backend(), uniform_items, conds,
+                              os.path.join(out_dir, "streamingtom.jsonl"), build_messages)
     finally:
         try:
             import transformers

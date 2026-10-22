@@ -1,6 +1,6 @@
-# accuracy_tables — Uniform K, Blind, Ours and GazeVLM on six VLMs
+# accuracy_tables — Uniform K, Blind, Ours, GazeVLM and StreamingTOM on six VLMs
 
-This folder produces four rows of the paper's accuracy tables (Table 1, EgoEverything) for every
+This folder produces five rows of the paper's accuracy tables (Table 1, EgoEverything) for every
 VLM in the project:
 
 | row in the paper | condition name in the result files | what the model sees |
@@ -9,6 +9,7 @@ VLM in the project:
 | Blind (question and options only), 0% | `blind (question and options only)` | the same prompt without any frame |
 | Ours (gaze/IMU gate + foveation) | `ours D+P gate + fovea R=70 a=160` (one per fovea setting) | the frames the eye + head gate sends under policy D+P, each foveated at that frame's gaze point |
 | GazeVLM (Chen & Qi) | `GazeVLM rho=0.3 (K=96, sigma=0.1, R_min=0.125, thumb 2x2, fixation gaze)` (one per rho) | the Uniform K frames, each reduced to the tokens of its gaze region plus a 2 x 2-token thumbnail (section GazeVLM below) |
+| StreamingTOM (Chen et al.) | `StreamingTOM CTR G=0.05N (K=96, tau=0.9, k=7, beta=0.6)` (one per G / N) | the Uniform K frames in time order, each reduced to G tokens from its own and the previous frame's tokens (section StreamingTOM below) |
 
 Every row uses the same prompt (`vlmeval.qwen_mcq.build_messages`: each frame labelled
 "Frame at m:ss", then the question, the five options and "Answer with the option's letter"),
@@ -32,13 +33,15 @@ The models (keys used everywhere in this folder):
 |---|---|
 | `config.example.yaml` | every data path and run option; copy it to `config.yaml` and edit |
 | `common.py` | config loading (path resolution), and the data every model is scored on: questions, gate frames, Uniform K frames, gaze per frame, items |
-| `models.py` | one adapter per VLM over its `vlmeval/*_fovea.py` module: load, parity check, stock / fovea condition, scoring, text-only prompt for Blind, its GazeVLM backend |
+| `models.py` | one adapter per VLM over its `vlmeval/*_fovea.py` module: load, parity check, stock / fovea condition, scoring, text-only prompt for Blind, its GazeVLM and StreamingTOM backends |
 | `run.py` | command line: scores the chosen rows for the chosen models, resumably |
 | `summarize.py` | command line: accuracy, 95% interval, frames, visual tokens and token budget per row and model → `summary.csv` |
 | `colab_accuracy_tables.ipynb` | the same steps on Colab (Google Drive paths) |
 | `../tests/test_accuracy_tables.py` | CPU tests of the config, frame selection and budget code |
 | `../vlmeval/gazevlm.py` | GazeVLM: the method (heatmap, rho-mass box, token-grid mapping, thumbnail) and one backend per VLM |
 | `../tests/test_gazevlm.py` | CPU tests of GazeVLM: the box, the token layouts per model family, positions, the run loop |
+| `../vlmeval/streamingtom.py` | StreamingTOM's causal temporal reduction: saliency from the encoder's attention, the static / dynamic split, DPC-KNN merging, one backend per VLM |
+| `../tests/test_streamingtom.py` | CPU tests of StreamingTOM: the attention capture on a real (tiny) CLIP, the CTR plan, packing, the run loop |
 
 No model code lives here: the foveation, the token assembly and each model's parity check are in
 `vlmeval/` and are shared with the per-model notebooks in `notebooks/colab_vlm_egoeverything*.ipynb`.
@@ -80,11 +83,12 @@ python -m pytest tests/test_accuracy_tables.py -q
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model phi --rows gazevlm
+python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows streamingtom
 python -m accuracy_tables.summarize --config accuracy_tables/config.yaml
 ```
 
 Options of `run.py`: `--model` one key, a comma list or `all` (one model at a time is loaded and
-freed); `--rows` any of `uniform,blind,ours,gazevlm` (default all four); `--videos test|all` overrides
+freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom` (default all five); `--videos test|all` overrides
 `run.videos`; `--no-parity` skips the parity check.
 
 What a run does, per model:
@@ -153,17 +157,68 @@ without a gaze estimate uses the image centre (counted in `n_gaze_missing`). Its
 thumbnail plus the smallest ROI: about 8 tokens on a 256-token frame (≈3%) but 8 of 81 on SmolVLM2
 (≈10%), so SmolVLM2 has no GazeVLM point near 5%.
 
+## StreamingTOM
+
+[Chen, Tao, Shao & Wang, "StreamingTOM: Streaming Token Compression for Efficient Video
+Understanding", arXiv 2510.18269]. Code: `vlmeval/streamingtom.py`; settings: `streamingtom` in
+the config. Only its first stage, Causal Temporal Reduction (CTR), is used: its second stage (4-bit
+kv-cache memory with question-guided retrieval) acts inside the LLM, and every method of the tables
+is counted at the LLM input.
+
+**CTR**, as in the paper and the authors' code (`streamingtom/modules/ctr.py` of
+github.com/YIGE24/StreamingTOM). Frames arrive in time order (here the Uniform K frames) and each
+frame's N tokens are reduced to exactly G using that frame and the previous one only:
+
+1. token i is *static* if the cosine of its features with token i of the previous frame is above
+   tau = 0.9, *dynamic* otherwise; every token of the first frame is dynamic;
+2. the budget is split in proportion: G_s = floor(G |S| / N) for the static tokens, G_d = G - G_s
+   for the dynamic ones (each capped by its set's size, the rest moved to the other);
+3. dynamic: the G_d tokens with the highest *saliency*, the attention each token receives in the
+   vision encoder's last layer, averaged over heads and queries;
+4. static: density-peak clustering (DPC-KNN: density from the k = 7 nearest distances, distance to
+   the nearest denser token, the G_s tokens with the largest density x distance as centres); every
+   other static token joins its nearest centre; a merged token is beta * centre + (1 - beta) *
+   mean(other members), beta = 0.6, at the centre's position;
+5. the G tokens go to the LLM in position (raster) order.
+
+| model | tokens (N per frame) | saliency from | model-specific handling |
+|---|---|---|---|
+| Qwen2.5-VL | 256 (448 px) | last ViT block (full attention), 2 x 2 patches per token | M-RoPE: every token at its own cell, a merged token at its centre's |
+| Qwen3-VL | 256 (512 px) | last ViT block, 2 x 2 patches per token | as Qwen2.5-VL; the DeepStack features are reduced with the same plan |
+| InternVL3.5 | 256 (448 px tile) | InternViT feature layer, CLS dropped, 2 x 2 patches | 1D positions |
+| Gemma-3 | 256 projected tokens | SigLIP last layer, 4 x 4 patches per token | 1D positions; merging after the projector, as the authors do |
+| Phi-3.5 | 576 crop tokens (672 px view), projected | CLIP's second-to-last layer (Phi's feature layer) on the 4 crops, 2 x 2 patches | a row break after each token row that has tokens; no separator and no 156-token global view (alone above the budgets) |
+| SmolVLM2 | 81 (384 px) | SigLIP last layer, 3 x 3 patches per token | 1D positions |
+
+The tokens are the model's own LLM-input tokens (after its projector, as in the authors' code). The
+saliency is read without modifying the models: while a frame is encoded, transformers' shared
+attention-function registry entry for `sdpa` is wrapped so that, for the one target attention module
+only, softmax(q k^T * scale) is computed from the q, k it receives (after RoPE) before the stock
+function runs (`capture_saliency`; checked against a recomputation in the tests).
+
+Settings (`streamingtom` in the config): `ratio` = G / N, one condition per value (default 0.05 and
+0.1, the tables' budgets: StreamingTOM uses the same K frames as Uniform K, so G / N is its budget,
+except on Phi, whose row breaks come on top: ~5.5% and ~11% of 757); `tau`, `knn`, `beta` (the
+authors' 0.9, 7, 0.6).
+
+One deliberate difference from the released code: its `_dpc_cluster` compares densities the other
+way round (each token's distance to the nearest *less* dense token, the transpose of the mask in
+Chat-UniVi's batched DPC-KNN that it otherwise follows), which does not match the density-peak
+clustering the paper describes. The default here is standard DPC-KNN; `released_dpc: true`
+reproduces the released behaviour exactly.
+
 ## Results
 
 `<out_dir>/<model>/`:
 
-- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`: one JSON object per (condition, question):
+- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`: one JSON object per (condition, question):
   `condition, qid, video, answer, pred, correct, p` (probabilities over A–E), `n_frames`,
   `n_image_tokens` (visual tokens entering the LLM, every token counted: Phi's row breaks and
   global view, SmolVLM's per-frame tokens), `n_tokens` (whole prompt), `sec`, `error`
   (`null`, `"oom"` or `"nan"`; rows with an error are left out of the summary), plus
   model-specific fields (cell sizes, gaze-missing counts). GazeVLM rows add `n_roi_tokens`,
-  `roi_area` (mean ROI area, fraction of the frame) and `gazevlm` (its parameters).
+  `roi_area` (mean ROI area, fraction of the frame) and `gazevlm` (its parameters); StreamingTOM rows
+  add `static_share` (mean share of static tokens per frame), `n_merged_tokens` and `streamingtom`.
 - `run_info.json`: model id, versions, the config used, the frame cap, and the parity report.
 
 `<out_dir>/summary.csv` (from `summarize.py`): per model and condition `n, accuracy, ci_low,
@@ -187,8 +242,8 @@ ci_high` (95% interval from resampling whole videos), `frames_per_q, tokens_per_
   (`n_gaze_missing`).
 - transformers 5.20 breaks SmolVLM's own image-token merge; `vlmeval/smolvlm_fovea.py` patches it
   for the parity reference (our scoring path does not use it).
-- The other rows of Table 1 (Uniform K + average pooling, StreamingTOM, DyCoke, FastVID, PruneVid,
-  DTD) and HD-EPIC are not implemented here yet.
+- The other rows of Table 1 (Uniform K + average pooling, DyCoke, FastVID, PruneVid, DTD) and
+  HD-EPIC are not implemented here yet.
 
 ## Extending
 
@@ -201,3 +256,5 @@ ci_high` (95% interval from resampling whole videos), `frames_per_q, tokens_per_
   of different policies can share a file.
 - **Another GazeVLM setting**: add a rho to `gazevlm.rho`, or change `sigma`, `r_min`, `thumb`,
   `gaze`; every parameter is in the condition name, so old and new settings never mix.
+- **Another StreamingTOM setting**: add a ratio to `streamingtom.ratio` (the authors' own is 50 of 196
+  tokens, 0.255), or change `tau`, `knn`, `beta`, `released_dpc`; likewise in the condition name.

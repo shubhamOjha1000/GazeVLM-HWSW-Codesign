@@ -23,6 +23,7 @@ DEFAULTS = {
              "smolvlm_k": [1, 3, 5, 7]},
     "gazevlm": {"rho": [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6], "sigma": 0.1, "r_min": 0.125, "thumb": 2,
                 "gaze": "fixation"},
+    "streamingtom": {"ratio": [0.05, 0.1], "tau": 0.9, "knn": 7, "beta": 0.6, "released_dpc": False},
 }
 GAZE_WINDOW = 1.0       # seconds of gaze before a frame: its fixation estimate and its raw trace
 REQUIRED_PATHS = ("folds_dir", "gate_ckpt_dir", "frames_cache_dir")

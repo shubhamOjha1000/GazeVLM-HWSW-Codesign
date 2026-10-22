@@ -53,3 +53,12 @@ gazevlm:              # GazeVLM (Chen & Qi, arXiv 2509.16476), token-map version
   thumb: 2            # global thumbnail: thumb x thumb average-pooled tokens per frame
   gaze: fixation      # fixation = our one fixation estimate per frame (the protocol);
                       # trace = the raw gaze samples of the second before the frame
+
+streamingtom:         # StreamingTOM (Chen et al., arXiv 2510.18269), causal temporal reduction only, on the
+                      # Uniform K frames in time order
+  ratio: [0.05, 0.1]  # G / N: tokens kept per frame as a share of its tokens, one condition each (the
+                      # budget knob; the authors use 50 / 196 = 0.255)
+  tau: 0.9            # cosine with the same token of the previous frame above which a token is static
+  knn: 7              # neighbours for the density-peak clustering of static tokens
+  beta: 0.6           # merged token = beta * centre + (1 - beta) * mean of its other members
+  released_dpc: false # true = the released code's density comparison (see README), false = standard DPC-KNN
