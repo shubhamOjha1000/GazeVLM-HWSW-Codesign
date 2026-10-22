@@ -78,3 +78,14 @@ fastvid:              # FastVID (Shen et al., NeurIPS 2025) on the Uniform K fra
   d: 0.4              # share of the kept tokens made by density-based merging (the rest: [CLS]-attention selection)
   p: 4                # anchor frame every p valid frames
   beta: 0.6           # anchor weight when merging: max(1 / (n + 1), beta)
+
+prunevid:             # PruneVid (Huang et al., ACL Findings 2025), its token merging only (no layer-10 pruning),
+                      # on the Uniform K frames (offline)
+  settings:           # one condition per (tau, beta); the kept share depends on the content, about
+                      # beta (1 - s (1 - 1 / W)) with s the static share and W ~ 1 / gamma frames per segment
+                      # (the authors' own setting: tau 0.8, beta 0.5); summarize.py reports the measured budget
+    - {tau: 0.8, beta: 0.07}       # ~5% (estimate)
+    - {tau: 0.8, beta: 0.14}       # ~10% (estimate)
+  gamma: 0.25         # temporal_segment_ratio: int(gamma T) frame clusters before they are made contiguous
+  knn: 7              # neighbours of the DPC-KNN clustering (frames and tokens)
+  min_tokens: 14      # a set (a segment's static tokens, a frame's dynamic tokens) is clustered only above this

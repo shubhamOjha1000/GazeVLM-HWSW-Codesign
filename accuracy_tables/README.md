@@ -1,6 +1,6 @@
-# accuracy_tables — Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke and FastVID on six VLMs
+# accuracy_tables — Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID and PruneVid on six VLMs
 
-This folder produces seven rows of the paper's accuracy tables (Table 1, EgoEverything) for every
+This folder produces eight rows of the paper's accuracy tables (Table 1, EgoEverything) for every
 VLM in the project:
 
 | row in the paper | condition name in the result files | what the model sees |
@@ -12,6 +12,7 @@ VLM in the project:
 | StreamingTOM (Chen et al.) | `StreamingTOM CTR G=0.05N (K=96, tau=0.9, k=7, beta=0.6)` (one per G / N) | the Uniform K frames in time order, each reduced to G tokens from its own and the previous frame's tokens (section StreamingTOM below) |
 | DyCoke (Tao et al.) | `DyCoke TTM prune=0.98 window=32 (K=96)` (one per window / pruning rate) | the Uniform K frames in windows: each window's first frame whole, the others pruned to their tokens least similar to a reference frame (section DyCoke below) |
 | FastVID (Shen et al.) | `FastVID r=0.05 (K=96, c=8, tau=0.9, ignore=0.95, d=0.4, p=4, beta=0.6)` (one per r) | the Uniform K frames cut into segments of similar frames, each segment reduced to salient tokens ([CLS] attention) plus merged density-peak anchors (section FastVID below) |
+| PruneVid (Huang et al.) | `PruneVid tau=0.8 beta=0.07 (K=96, gamma=0.25, k=7, sets > 14 merged)` (one per tau / beta) | the Uniform K frames cut into segments; tokens static over a segment averaged into one, then each set clustered and averaged (section PruneVid below) |
 
 Every row uses the same prompt (`vlmeval.qwen_mcq.build_messages`: each frame labelled
 "Frame at m:ss", then the question, the five options and "Answer with the option's letter"),
@@ -35,7 +36,7 @@ The models (keys used everywhere in this folder):
 |---|---|
 | `config.example.yaml` | every data path and run option; copy it to `config.yaml` and edit |
 | `common.py` | config loading (path resolution), and the data every model is scored on: questions, gate frames, Uniform K frames, gaze per frame, items |
-| `models.py` | one adapter per VLM over its `vlmeval/*_fovea.py` module: load, parity check, stock / fovea condition, scoring, text-only prompt for Blind, its GazeVLM, StreamingTOM, DyCoke and FastVID backends |
+| `models.py` | one adapter per VLM over its `vlmeval/*_fovea.py` module: load, parity check, stock / fovea condition, scoring, text-only prompt for Blind, its GazeVLM, StreamingTOM, DyCoke, FastVID and PruneVid backends |
 | `run.py` | command line: scores the chosen rows for the chosen models, resumably |
 | `summarize.py` | command line: accuracy, 95% interval, frames, visual tokens and token budget per row and model → `summary.csv` |
 | `colab_accuracy_tables.ipynb` | the same steps on Colab (Google Drive paths) |
@@ -48,6 +49,8 @@ The models (keys used everywhere in this folder):
 | `../tests/test_dycoke.py` | CPU tests of DyCoke: the 4-frame window against DyCoke's own rules, longer and shorter windows, the run loop |
 | `../vlmeval/fastvid.py` | FastVID: dynamic segmentation, the per-segment budgets, [CLS]-attention selection and density-based merging |
 | `../tests/test_fastvid.py` | CPU tests of FastVID: (pseudo-)[CLS] attention, segmentation, budgets, the merge weights, plans, the run loop |
+| `../vlmeval/prunevid.py` | PruneVid's token merging: frame clustering into segments, static / dynamic tokens, DPC-KNN merging, on the StreamingTOM backends' tokens |
+| `../tests/test_prunevid.py` | CPU tests of PruneVid: clustering, the authors' segment refinement rules, static tokens, merging, plans, the run loop |
 
 No model code lives here: the foveation, the token assembly and each model's parity check are in
 `vlmeval/` and are shared with the per-model notebooks in `notebooks/colab_vlm_egoeverything*.ipynb`.
@@ -89,12 +92,12 @@ python -m pytest tests/test_accuracy_tables.py -q
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model phi --rows gazevlm
-python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows streamingtom,dycoke,fastvid
+python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows streamingtom,dycoke,fastvid,prunevid
 python -m accuracy_tables.summarize --config accuracy_tables/config.yaml
 ```
 
 Options of `run.py`: `--model` one key, a comma list or `all` (one model at a time is loaded and
-freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke,fastvid` (default all seven); `--videos test|all` overrides
+freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke,fastvid,prunevid` (default all eight); `--videos test|all` overrides
 `run.videos`; `--no-parity` skips the parity check.
 
 What a run does, per model:
@@ -284,11 +287,53 @@ is its budget; Phi's row breaks come on top), the paper's c = 8, tau = 0.9, d = 
 (the authors' Qwen2.5-VL run used tau = 0.84) and the Qwen2.5-VL code's ignore = 0.95. The [CLS]
 attention is read like StreamingTOM's saliency (`capture_saliency`, no model changes).
 
+## PruneVid
+
+[Huang, Zhou, Chen, Wang & Han, "PruneVid: Visual Token Pruning for Efficient Video Large Language
+Models", ACL Findings 2025]. Code: `vlmeval/prunevid.py`; settings: `prunevid` in the config. Offline
+(all K frames at once). Only its first stage, spatial-temporal token merging before the LLM, is used:
+its second stage prunes visual tokens by the question's attention at LLM layer 10, after the first
+answer token's logits are fixed (UTOPI disabled it too).
+
+As the authors' code (`merge_frames_dynamic`, `cluster_dpc_knn`, `refine_clusters` in
+`models/pllava/modeling_pllava.py` of github.com/Visual-AI/PruneVid; settings from its README), on the
+post-projector tokens:
+
+1. **Temporal segmentation.** The frames' mean tokens are clustered by DPC-KNN (k = 7) into
+   int(gamma T) clusters (gamma = 0.25). The labels are then made contiguous: each cluster keeps its
+   longest run(s); its other runs, and clusters whose runs are all one frame long, take the label of the
+   longer neighbouring run (the left one on a tie). Every run is a segment.
+2. **Static tokens.** In a segment of W frames a position is static if the mean pairwise cosine of its W
+   tokens is > tau (0.8); its tokens are averaged into one. Dynamic tokens stay per frame. A one-frame
+   segment has no static tokens.
+3. **Spatial merging.** The segment's static tokens, and each frame's dynamic tokens, are clustered by
+   DPC-KNN (k = 7) into int(beta n) clusters (beta = cluster ratio, 0.5 in the paper) when there are
+   more than 14 of them, and each cluster becomes the mean of its tokens.
+
+**Packing** (PLLaVA takes one flat sequence: per segment its static tokens, then each frame's dynamic
+tokens). Here a segment's merged static tokens go with its first frame and each frame keeps its merged
+dynamic tokens; a merged token takes its cluster centre's position (Qwen's M-RoPE: the centre's cell at
+that frame's time, so static tokens sit at the segment's start; others: position (raster) order). Static
+and dynamic positions are disjoint, so no position repeats within a frame. A frame left without tokens
+leaves the prompt with its time label (`n_frames_dropped`). Qwen3-VL's DeepStack features are averaged
+with the same segments and clusters; Phi-3.5's 576 crop tokens get a row break after each row that has
+tokens (no global view). Tokens come from the StreamingTOM backends (no attention needed).
+
+**Budget.** The kept share depends on the content: about beta (1 - s (1 - 1 / W)), with s the static
+share and W ≈ 1 / gamma frames per segment. Defaults beta = 0.07 and 0.14 at tau = 0.8 aim at ≈5% and ≈10%
+(estimates; `summarize.py` reports the measured budget, and `static_share` is recorded per question);
+retune beta on held-out videos as the protocol says. Sets of at most 14 tokens are kept whole (the
+authors' rule), which limits the reduction on SmolVLM2's 81-token frames.
+
+Where the released code has gaps: a set gets at least one cluster (int(beta n) can be 0), int(gamma T)
+at least one segment cluster, and DPC-KNN uses at most n - 1 neighbours on small sets (the released
+code needs n > k); the density tie-break noise is seeded (theirs is random).
+
 ## Results
 
 `<out_dir>/<model>/`:
 
-- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`, `dycoke.jsonl`, `fastvid.jsonl`: one
+- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`, `dycoke.jsonl`, `fastvid.jsonl`, `prunevid.jsonl`: one
   JSON object per (condition, question):
   `condition, qid, video, answer, pred, correct, p` (probabilities over A–E), `n_frames`,
   `n_image_tokens` (visual tokens entering the LLM, every token counted: Phi's row breaks and
@@ -298,7 +343,8 @@ attention is read like StreamingTOM's saliency (`capture_saliency`, no model cha
   `roi_area` (mean ROI area, fraction of the frame) and `gazevlm` (its parameters); StreamingTOM rows
   add `static_share` (mean share of static tokens per frame), `n_merged_tokens` and `streamingtom`; DyCoke
   rows `kept_share` (share of the frames' tokens kept) and `dycoke`; FastVID rows `n_frames_dropped` (frames
-  left without tokens), `n_segments` and `fastvid`.
+  left without tokens), `n_segments` and `fastvid`; PruneVid rows `n_frames_dropped`, `n_segments`,
+  `static_share` (share of the frames' tokens that were static) and `prunevid`.
 - `run_info.json`: model id, versions, the config used, the frame cap, and the parity report.
 
 `<out_dir>/summary.csv` (from `summarize.py`): per model and condition `n, accuracy, ci_low,
@@ -342,3 +388,5 @@ ci_high` (95% interval from resampling whole videos), `frames_per_q, tokens_per_
   `{window: 4, prune: 0.7}`, ~47% of the tokens).
 - **Another FastVID setting**: add an `r` to `fastvid.r` or change `c`, `tau`, `ignore`, `d`, `p`, `beta`
   (the authors' Qwen2.5-VL run: `tau: 0.84`); all are in the condition name.
+- **Another PruneVid setting**: add a `{tau, beta}` pair to `prunevid.settings` (the authors' own:
+  `{tau: 0.8, beta: 0.5}`) or change `gamma`, `knn`, `min_tokens`; all are in the condition name.

@@ -1,4 +1,4 @@
-"""Score the accuracy-table rows (Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID) for one or more VLMs.
+"""Score the accuracy-table rows (Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid) for one or more VLMs.
 
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from accuracy_tables import common  # noqa: E402
 from accuracy_tables.models import ADAPTERS, build_messages  # noqa: E402
 
-ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke", "fastvid")
+ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke", "fastvid", "prunevid")
 BLIND = "blind (question and options only)"
 
 
@@ -54,6 +54,12 @@ def fastvid_name(r, s, k):
     """Every parameter in the name, so settings never mix in one result file."""
     return (f"FastVID r={float(r):g} (K={k}, c={s['c']}, tau={s['tau']:g}, ignore={s['ignore']:g}, d={s['d']:g}, "
             f"p={s['p']}, beta={s['beta']:g})")
+
+
+def prunevid_name(c, s, k):
+    """Every parameter in the name, so settings never mix in one result file."""
+    return (f"PruneVid tau={float(c['tau']):g} beta={float(c['beta']):g} (K={k}, gamma={float(s['gamma']):g}, "
+            f"k={int(s['knn'])}, sets > {int(s['min_tokens'])} merged)")
 
 
 def _done(path):
@@ -170,6 +176,17 @@ def run_model(key, cfg, data, rows, info_extra=None):
                                                  beta=float(s["beta"])) for r in s["r"]}
             print(f"\n--- FastVID: the {k} Uniform K frames per video (offline), r in {list(s['r'])}")
             fv.run_questions(ad.fastvid_backend(), uniform_items, conds, os.path.join(out_dir, "fastvid.jsonl"),
+                             build_messages)
+
+        if "prunevid" in rows:
+            from vlmeval import prunevid as pv
+            s = cfg["prunevid"]
+            conds = {prunevid_name(c, s, k): dict(tau=float(c["tau"]), beta=float(c["beta"]), gamma=float(s["gamma"]),
+                                                  knn=int(s["knn"]), min_tokens=int(s["min_tokens"]))
+                     for c in s["settings"]}
+            print(f"\n--- PruneVid (token merging): the {k} Uniform K frames per video (offline); settings "
+                  f"{[(c['tau'], c['beta']) for c in conds.values()]} (tau, beta)")
+            pv.run_questions(ad.prunevid_backend(), uniform_items, conds, os.path.join(out_dir, "prunevid.jsonl"),
                              build_messages)
     finally:
         try:
