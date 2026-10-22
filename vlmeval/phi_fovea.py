@@ -158,7 +158,11 @@ def load_model(model_id=MODEL_ID):
         llm = Phi3ForCausalLM.from_pretrained(model_id, torch_dtype=torch.bfloat16, **kw)
     img = load_image_weights(PhiImage(cfg["hidden_size"]), _checkpoint_tensors(model_id, PREFIX))
     img = img.to(llm.get_input_embeddings().weight.device, torch.bfloat16).eval()
-    tok = AutoTokenizer.from_pretrained(model_id)
+    try:                                       # Phi's tokenizer class, loaded directly: AutoTokenizer would
+        from transformers import LlamaTokenizerFast as Tok      # look up AutoConfig and ask to run Phi's
+    except ImportError:                                         # remote configuration code
+        Tok = AutoTokenizer
+    tok = Tok.from_pretrained(model_id)
     gen = tok.apply_chat_template([{"role": "user", "content": "x"}], tokenize=False, add_generation_prompt=True)
     return img, llm.eval(), tok, letter_token_ids(tok, gen)
 
@@ -240,7 +244,7 @@ def clip_tokens(img, pixel_values, interpolate=False):
     """CLIP's own forward on B square views (normalized), features as Phi uses them (second-to-last
     layer, CLS dropped), merged 2 x 2: (B, k, k, 4096). interpolate: CLIP's own interpolated
     position table for views other than 336 px."""
-    p = next(img.parameters())
+    p = img.clip.embeddings.patch_embedding.weight                 # CLIP's own dtype (fp32 in parity checks)
     out = img.img_processor(pixel_values=pixel_values.to(p.device, p.dtype), output_hidden_states=True,
                             interpolate_pos_encoding=interpolate)
     return merge_2x2(out.hidden_states[-2][:, 1:])
@@ -269,8 +273,8 @@ def encode_cells(img, hd01, cells):
     cell in raster order of their positions, position table read at the quadrant centres),
     second-to-last layer, CLS dropped, each cell's 4 patch features concatenated."""
     clip = img.clip
-    p = next(img.parameters())
     emb = clip.embeddings
+    p = emb.patch_embedding.weight                                 # CLIP's own dtype (fp32 in parity checks)
     feats = torch.empty(len(cells), 4 * emb.embed_dim, device=p.device, dtype=p.dtype)
     crop_id = (cells[:, 0] // CROP) * (HD // CROP) + cells[:, 1] // CROP
     cls = (emb.class_embedding + emb.position_embedding.weight[0])[None].to(p.dtype)
@@ -462,7 +466,7 @@ def parity_report(img, llm, tok, letter_ids, pil, question, options, build_messa
     stock16 = crop_grid(img, hd01).reshape(-1, img.glb_GN.shape[-1])
     ours16 = encode_cells(img, hd01, cells)
     clip = img.img_processor
-    dtype = next(img.parameters()).dtype
+    dtype = img.clip.embeddings.patch_embedding.weight.dtype
     tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
     try:
         from torch.nn.attention import sdpa_kernel, SDPBackend
@@ -490,6 +494,9 @@ def parity_report(img, llm, tok, letter_ids, pil, question, options, build_messa
     inputs, ids = build_inputs(llm, tok, msgs, [feats])
     p_ours = letter_probs(llm, inputs, letter_ids, all_positions=True)
     rep["ours_answer"] = "ABCDE"[int(p_ours.argmax())]
+    nxt = torch.softmax(llm.lm_head(llm.model(**inputs, use_cache=False).last_hidden_state[:, -1:])[0, -1].float(), -1)
+    rep["top5_next_tokens"] = tok.convert_ids_to_tokens(nxt.topk(5).indices.tolist())   # is the letter what Phi writes?
+    rep["letters_share_of_next_token_prob"] = round(float(nxt[letter_ids].sum()), 4)
 
     ours_pv = torch.cat([glb[None], crops(normalize(hd01), CROP)])          # (global, 4 crops)
     if remote_proc is not None:

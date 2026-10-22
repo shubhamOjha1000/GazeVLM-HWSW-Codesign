@@ -18,6 +18,7 @@ the real 24 x 24 grid) inside phi_fovea.PhiImage:
      embedding equals Phi's own Phi3SuScaledRotaryEmbedding (copied from the remote code) below and
      above original_max_position_embeddings
 """
+import copy
 import math
 
 import numpy as np
@@ -124,6 +125,18 @@ def test_all_28px_layout_equals_clip_on_the_crops(img):
     ours = ph.encode_cells(img, hd, qf.uniform_cells(ph.HD))
     stock = ph.crop_grid(img, hd).reshape(-1, ours.shape[-1])
     assert ours.shape == stock.shape == (576, 128)
+    assert torch.allclose(ours, stock, atol=1e-4, rtol=1e-4), (ours - stock).abs().max()
+
+
+def test_clip_in_fp32_rest_in_bf16(img):
+    """As in parity_report: CLIP converted to fp32 while the separators / projection stay bf16 -- both
+    paths must take CLIP's own dtype."""
+    m = copy.deepcopy(img).to(torch.bfloat16)
+    m.img_processor.float()
+    hd = rand_img(ph.HD, 4)
+    ours = ph.encode_cells(m, hd, qf.uniform_cells(ph.HD))
+    stock = ph.crop_grid(m, hd).reshape(-1, ours.shape[-1])
+    assert ours.dtype == stock.dtype == torch.float32
     assert torch.allclose(ours, stock, atol=1e-4, rtol=1e-4), (ours - stock).abs().max()
 
 
