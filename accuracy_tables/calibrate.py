@@ -245,7 +245,7 @@ def main(argv=None):
         picked = sorted(ours, key=ours.get)[:a.points]
     if not picked:
         raise SystemExit(f"no ours setting matches {a.match!r}")
-    targets = [ours[c] for c in sorted(picked, key=ours.get)]
+    targets = [float(ours[c]) for c in sorted(picked, key=ours.get)]
     print(f"matching every baseline to {[f'{100 * t:.2f}%' for t in targets]}")
 
     knobs = calibrate(cfg, a.model, targets)
@@ -261,7 +261,7 @@ def main(argv=None):
         out.setdefault("paths", {})["out_dir"] = out_dir
     with open(a.write, "w") as f:
         f.write(f"# Budget-matched copy of {os.path.basename(a.config)}: every baseline set to ours' measured budgets "
-                f"{[round(100 * t, 2) for t in targets]} % ({a.model}); written by accuracy_tables/calibrate.py\n")
+                f"{[round(100 * float(t), 2) for t in targets]} % ({a.model}); written by accuracy_tables/calibrate.py\n")
         yaml.safe_dump(out, f, sort_keys=False)
     rec = dict(model=a.model, ours=ours, matched=picked, targets=targets, knobs=knobs)
     os.makedirs(os.path.join(out_dir, a.model), exist_ok=True)
