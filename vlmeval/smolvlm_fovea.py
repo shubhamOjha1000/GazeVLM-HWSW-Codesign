@@ -301,8 +301,13 @@ def inputs_from_ids(model, ids, feats_list):
 
 
 @torch.no_grad()
-def letter_probs(model, inputs, letter_ids):
-    logits = model(**inputs, use_cache=False).logits[0, -1, letter_ids].float()
+def letter_probs(model, inputs, letter_ids, all_positions=False):
+    """Softmax over A-E of the raw next-token logits.
+    all_positions=True runs the LM head over the whole sequence, the shape the stock forward
+    computes (parity checks); otherwise only over the last position (logits_to_keep=1): the full
+    logits are sequence x vocabulary, e.g. 7.5 GB in bf16 for 96 frames on a 152k vocabulary."""
+    kw = {} if all_positions else dict(logits_to_keep=1)
+    logits = model(**inputs, use_cache=False, **kw).logits[0, -1, letter_ids].float()
     return torch.softmax(logits, -1).cpu().numpy()
 
 
@@ -404,9 +409,9 @@ def parity_report(model, proc, letter_ids, pil, question, options, build_message
 
     p_stock = torch.softmax(model(**stock, use_cache=False).logits[0, -1, letter_ids].float(), -1).cpu().numpy()
     inputs, ids = build_inputs(model, proc, msgs, [f_stock])            # LLM plumbing, stock image tokens
-    p_llm = letter_probs(model, inputs, letter_ids)
+    p_llm = letter_probs(model, inputs, letter_ids, all_positions=True)
     inputs16, _ = build_inputs(model, proc, msgs, [f_cells16])           # our whole path in bf16 (info)
-    p_ours = letter_probs(model, inputs16, letter_ids)
+    p_ours = letter_probs(model, inputs16, letter_ids, all_positions=True)
     same_ids = bool(torch.equal(ids[0].cpu(), sid))
     return dict(stock_merge="in order (5.20's replaced)" if merge_fixed else "transformers' own",
                 images_in_stock=int(stock["pixel_values"].shape[1]),

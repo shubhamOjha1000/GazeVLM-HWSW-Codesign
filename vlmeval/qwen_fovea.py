@@ -321,10 +321,14 @@ def build_inputs(model, proc, messages, feats_list, cells_list, img_list):
 
 
 @torch.no_grad()
-def letter_probs(model, inputs, letter_ids):
+def letter_probs(model, inputs, letter_ids, all_positions=False):
     """Softmax over A-E of the raw next-token logits (no generation-time penalties, so it
-    differs slightly from qwen_mcq.score, which goes through generate())."""
-    logits = model(**inputs, use_cache=False).logits[0, -1, letter_ids].float()
+    differs slightly from qwen_mcq.score, which goes through generate()).
+    all_positions=True runs the LM head over the whole sequence, the shape the stock forward
+    computes (parity checks); otherwise only over the last position (logits_to_keep=1): the full
+    logits are sequence x vocabulary, e.g. 7.5 GB in bf16 for 96 frames on a 152k vocabulary."""
+    kw = {} if all_positions else dict(logits_to_keep=1)
+    logits = model(**inputs, use_cache=False, **kw).logits[0, -1, letter_ids].float()
     return torch.softmax(logits, -1).cpu().numpy()
 
 
@@ -376,7 +380,7 @@ def parity_report(model, proc, letter_ids, img01, question, options, build_messa
 
     msgs = build_messages(question, options, [("frame.jpg", 0.0)], size * size)
     inputs, ids = build_inputs(model, proc, msgs, [f_ours.to(f_stock.dtype)], [cells], [size])
-    p_ours = letter_probs(model, inputs, letter_ids)
+    p_ours = letter_probs(model, inputs, letter_ids, all_positions=True)
 
     text = proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
     stock = proc(text=[text], images=[x], return_tensors="pt").to(model.device)

@@ -227,8 +227,13 @@ def build_inputs(model, proc, messages, feats_list):
 
 
 @torch.no_grad()
-def letter_probs(model, inputs, letter_ids):
-    logits = model(**inputs, use_cache=False).logits[0, -1, letter_ids].float()
+def letter_probs(model, inputs, letter_ids, all_positions=False):
+    """Softmax over A-E of the raw next-token logits.
+    all_positions=True runs the LM head over the whole sequence, the shape the stock forward
+    computes (parity checks); otherwise only over the last position (logits_to_keep=1): the full
+    logits are sequence x vocabulary, e.g. 7.5 GB in bf16 for 96 frames on a 152k vocabulary."""
+    kw = {} if all_positions else dict(logits_to_keep=1)
+    logits = model(**inputs, use_cache=False, **kw).logits[0, -1, letter_ids].float()
     return torch.softmax(logits, -1).cpu().numpy()
 
 
@@ -308,7 +313,7 @@ def parity_report(model, proc, letter_ids, img01, question, options, build_messa
             break
 
     inputs, ids = build_inputs(model, proc, msgs, [f_ours])
-    p_ours = letter_probs(model, inputs, letter_ids)
+    p_ours = letter_probs(model, inputs, letter_ids, all_positions=True)
     pv = stock["pixel_values"]
     m = torch.as_tensor(ip.image_mean).view(3, 1, 1)
     s = torch.as_tensor(ip.image_std).view(3, 1, 1)
