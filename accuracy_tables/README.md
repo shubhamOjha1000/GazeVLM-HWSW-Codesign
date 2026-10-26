@@ -1,6 +1,6 @@
-# accuracy_tables — Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid, DTD and Uniform K + average pooling on six VLMs
+# accuracy_tables — Uniform K, Blind, Ours, GazeVLM (both), StreamingTOM, DyCoke, FastVID, PruneVid, DTD and Uniform K + average pooling on six VLMs
 
-This folder produces ten rows of the paper's accuracy tables (Table 1, EgoEverything) for every
+This folder produces eleven rows of the paper's accuracy tables (Table 1, EgoEverything) for every
 VLM in the project:
 
 | row in the paper | condition name in the result files | what the model sees |
@@ -10,6 +10,7 @@ VLM in the project:
 | Uniform *K* + average pooling | `uniform K=96 + average pooling 4x4` (one per pooled size) | the Uniform K frames at stock input, each frame's token grid average-pooled to s x s tokens (section Average pooling below) |
 | Ours (gaze/IMU gate + foveation) | `ours D+P gate + fovea R=70 a=160` (one per fovea setting) | the frames the eye + head gate sends under policy D+P, each foveated at that frame's gaze point |
 | GazeVLM (Chen & Qi) | `GazeVLM rho=0.3 (K=96, sigma=0.1, R_min=0.125, thumb 2x2, fixation gaze)` (one per rho) | the Uniform K frames, each reduced to the tokens of its gaze region plus a 2 x 2-token thumbnail (section GazeVLM below) |
+| GazeVLM, two-view (anonymous ICLR 2026 submission) | `GazeVLM two-view B=13 per frame (K=96, alpha=0.5, beta=0.5, fixation gaze)` (one per budget) | the Uniform K frames, each as a global and a gaze-centred view, both encoded, then per view half the budget: tokens nearest the gaze plus a uniform grid (section Two-view GazeVLM below) |
 | StreamingTOM (Chen et al.) | `StreamingTOM CTR G=0.05N (K=96, tau=0.9, k=7, beta=0.6)` (one per G / N) | the Uniform K frames in time order, each reduced to G tokens from its own and the previous frame's tokens (section StreamingTOM below) |
 | DyCoke (Tao et al.) | `DyCoke TTM prune=0.98 window=32 (K=96)` (one per window / pruning rate) | the Uniform K frames in windows: each window's first frame whole, the others pruned to their tokens least similar to a reference frame (section DyCoke below) |
 | FastVID (Shen et al.) | `FastVID r=0.05 (K=96, c=8, tau=0.9, ignore=0.95, d=0.4, p=4, beta=0.6)` (one per r) | the Uniform K frames cut into segments of similar frames, each segment reduced to salient tokens ([CLS] attention) plus merged density-peak anchors (section FastVID below) |
@@ -57,6 +58,8 @@ The models (keys used everywhere in this folder):
 | `../tests/test_dtd.py` | CPU tests of DTD: the absolute and relative drop rules, plans, the retention formula, the run loop |
 | `../vlmeval/avgpool.py` | Uniform K + average pooling: each frame's stock token grid pooled to s x s, on the GazeVLM backends |
 | `../tests/test_avgpool.py` | CPU tests of average pooling: the pooled size per budget, the pooling per model family, the run loop |
+| `../vlmeval/gazevlm2.py` | the two-view GazeVLM: gaze-centred crop, the authors' token selection, two views per frame, on the StreamingTOM backends |
+| `../tests/test_gazevlm2.py` | CPU tests of the two-view GazeVLM: the crop window, the authors' grid / nearest-token selection, Qwen positions, the run loop |
 
 No model code lives here: the foveation, the token assembly and each model's parity check are in
 `vlmeval/` and are shared with the per-model notebooks in `notebooks/colab_vlm_egoeverything*.ipynb`.
@@ -98,12 +101,12 @@ python -m pytest tests/test_accuracy_tables.py -q
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
 python -m accuracy_tables.run --config accuracy_tables/config.yaml --model phi --rows gazevlm
-python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows avgpool,streamingtom,dycoke,fastvid,prunevid,dtd
+python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows avgpool,gazevlm2,streamingtom,dycoke,fastvid,prunevid,dtd
 python -m accuracy_tables.summarize --config accuracy_tables/config.yaml
 ```
 
 Options of `run.py`: `--model` one key, a comma list or `all` (one model at a time is loaded and
-freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke,fastvid,prunevid,dtd,avgpool` (default all ten); `--videos test|all` overrides
+freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke,fastvid,prunevid,dtd,avgpool,gazevlm2` (default all eleven); `--videos test|all` overrides
 `run.videos`; `--no-parity` skips the parity check.
 
 What a run does, per model:
@@ -380,11 +383,40 @@ size whose tokens per frame come closest to budget x the model's stock tokens pe
 Pooling after the encoder saves LLM tokens but not encoder compute. The protocol's optional second row
 (resizing before the encoder) is not implemented here.
 
+## Two-view GazeVLM
+
+["GazeVLM: Gaze-Guided Vision-Language Models for Efficient and Robust Inference", anonymous ICLR 2026
+submission; not Chen & Qi's GazeVLM above]. Code: `vlmeval/gazevlm2.py`; settings: `gazevlm2` in the config.
+Image-only, so applied per frame to the Uniform K frames, with the same gaze point per frame as ours.
+
+As the authors' code (github.com/anonymous-zzz/GazeVLM: `divide_to_patches` in their LLaVA-NeXT image
+processor, `token_sampling_circle` / `token_sampling_grid` in their LLaVA-NeXT model; alpha = beta = 0.5
+from `single-inference-sample.py`):
+
+1. **Two views (GazeVLM-Pre).** The local view is the square of side alpha x the frame's side centred on
+   the gaze, shifted inside the frame near the edges (alpha = 0.5: a quarter of the area); the global view is
+   the whole frame. Each view is encoded on its own at the model's stock input: twice the stock encoder work
+   per frame (`n_encoder_images`). The local view is the crop of the cached frame saved losslessly (PNG), so
+   it goes through exactly the model's own frame path.
+2. **Token selection (GazeVLM-Post).** The frame's budget B = round(budget x stock tokens) is halved per view
+   (capped at both views' tokens). Per view: B_v - round(beta B_v) tokens on a uniform grid over the view's
+   token grid, then the tokens nearest the gaze (Euclidean distance on the grid, from the gaze's token) until
+   the view has B_v distinct tokens, in raster order.
+3. **Packing.** The local view's tokens, then the global view's, as one image per frame. With selection on, the
+   authors drop LLaVA-NeXT's row breaks, so there are none here (Phi-3.5 included). Qwen2.5-VL / Qwen3-VL get
+   each token at its true place in the frame (M-RoPE): global-view tokens at their cells, local-view tokens as
+   cells alpha times smaller over the crop; Qwen3-VL's DeepStack features follow the same tokens.
+
+Budgets: 13 and 26 tokens per frame on the 256-token models (5.1%, 10.2%), Phi-3.5 38 and 76 (of 757), SmolVLM2
+4 and 8 (of 81). These are far below the paper's tightest setting (300 of 2,295 tokens, 13%), so each view keeps
+only a handful of tokens; alpha and beta stay at the authors' values (no tuning on test videos). Where the
+released code leaves a choice: ties in distance are broken in raster order (theirs: numpy's default sort).
+
 ## Results
 
 `<out_dir>/<model>/`:
 
-- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`, `dycoke.jsonl`, `fastvid.jsonl`, `prunevid.jsonl`, `dtd.jsonl`, `avgpool.jsonl`: one
+- `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`, `dycoke.jsonl`, `fastvid.jsonl`, `prunevid.jsonl`, `dtd.jsonl`, `avgpool.jsonl`, `gazevlm2.jsonl`: one
   JSON object per (condition, question):
   `condition, qid, video, answer, pred, correct, p` (probabilities over A–E), `n_frames`,
   `n_image_tokens` (visual tokens entering the LLM, every token counted: Phi's row breaks and
@@ -396,7 +428,8 @@ Pooling after the encoder saves LLM tokens but not encoder compute. The protocol
   rows `kept_share` (share of the frames' tokens kept) and `dycoke`; FastVID rows `n_frames_dropped` (frames
   left without tokens), `n_segments` and `fastvid`; PruneVid rows `n_frames_dropped`, `n_segments`,
   `static_share` (share of the frames' tokens that were static) and `prunevid`; DTD rows
-  `n_frames_dropped`, `kept_share` and `dtd`; average-pooling rows `avgpool` (the pooled side).
+  `n_frames_dropped`, `kept_share` and `dtd`; average-pooling rows `avgpool` (the pooled side); two-view GazeVLM rows `n_encoder_images`, `n_gaze_missing`
+  and `gazevlm2`.
 - `run_info.json`: model id, versions, the config used, the frame cap, and the parity report.
 
 `<out_dir>/summary.csv` (from `summarize.py`): per model and condition `n, accuracy, ci_low,
@@ -442,6 +475,7 @@ ci_high` (95% interval from resampling whole videos), `frames_per_q, tokens_per_
   (the authors' Qwen2.5-VL run: `tau: 0.84`); all are in the condition name.
 - **Another PruneVid setting**: add a `{tau, beta}` pair to `prunevid.settings` (the authors' own:
   `{tau: 0.8, beta: 0.5}`) or change `gamma`, `knn`, `min_tokens`; all are in the condition name.
+- **Another two-view GazeVLM setting**: add a budget to `gazevlm2.budget` or change `alpha`, `beta` (in the name).
 - **Another pooled size**: add a budget to `avgpool.budget` (sizes are chosen per model; equal sizes run once).
 - **Another DTD setting**: add a `{threshold, absolute}` pair to `dtd.settings` (the authors' own:
   `{threshold: 0.5, absolute: true}`).

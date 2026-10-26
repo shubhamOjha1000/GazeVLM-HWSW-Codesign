@@ -30,6 +30,7 @@ DEFAULTS = {
                  "min_tokens": 14},
     "dtd": {"settings": [{"threshold": 0.96, "absolute": False}, {"threshold": 0.91, "absolute": False}]},
     "avgpool": {"budget": [0.05, 0.1]},
+    "gazevlm2": {"budget": [0.05, 0.1], "alpha": 0.5, "beta": 0.5},
 }
 GAZE_WINDOW = 1.0       # seconds of gaze before a frame: its fixation estimate and its raw trace
 REQUIRED_PATHS = ("folds_dir", "gate_ckpt_dir", "frames_cache_dir")
@@ -95,6 +96,9 @@ def load_config(path):
         lo = -1.0 if s["absolute"] else 0.0
         if not lo <= float(s["threshold"]) <= 1:
             raise ValueError(f"dtd.settings: threshold in [{lo:g}, 1] (absolute: cosine; relative: share dropped), got {s}")
+    g2 = cfg["gazevlm2"]
+    if not 0 < float(g2["alpha"]) <= 1 or not 0 <= float(g2["beta"]) <= 1:
+        raise ValueError(f"gazevlm2: 0 < alpha <= 1 and 0 <= beta <= 1, got alpha={g2['alpha']}, beta={g2['beta']}")
     return cfg
 
 

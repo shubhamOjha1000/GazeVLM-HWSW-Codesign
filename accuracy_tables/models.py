@@ -3,8 +3,8 @@
 Each adapter knows how to load its model, check parity on one frame, name the stock and the
 foveated conditions in its module's vocabulary, score items through the module's
 run_questions (Uniform K, ours), tokenize a text-only prompt (Blind), and hand its loaded model
-to its GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid, DTD and average-pooling backends
-(vlmeval/gazevlm.py, streamingtom.py, dycoke.py, fastvid.py, prunevid.py, dtd.py, avgpool.py). The model code itself lives in vlmeval/ and is not duplicated here.
+to its GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid, DTD, average-pooling and two-view GazeVLM backends
+(vlmeval/gazevlm.py, streamingtom.py, dycoke.py, fastvid.py, prunevid.py, dtd.py, avgpool.py, gazevlm2.py). The model code itself lives in vlmeval/ and is not duplicated here.
 
     key        module                      stock input per frame
     qwen2.5    vlmeval/qwen_fovea.py       256 tokens (448 px)
@@ -105,6 +105,11 @@ class Adapter:
         """This model's Uniform K + average pooling backend in vlmeval/avgpool.py (same class name)."""
         from vlmeval import avgpool as ap
         return getattr(ap, type(self).__name__)(self.model, self.proc, self.letter_ids)
+
+    def gazevlm2_backend(self):
+        """This model's two-view GazeVLM backend in vlmeval/gazevlm2.py (same class name)."""
+        from vlmeval import gazevlm2 as gv2
+        return getattr(gv2, type(self).__name__)(self.model, self.proc, self.letter_ids)
 
     # -- shared
     def load(self):
@@ -335,6 +340,10 @@ class Phi(Adapter):
     def avgpool_backend(self):
         from vlmeval import avgpool as ap
         return ap.Phi(self.img, self.llm, self.tok, self.letter_ids)
+
+    def gazevlm2_backend(self):
+        from vlmeval import gazevlm2 as gv2
+        return gv2.Phi(self.img, self.llm, self.tok, self.letter_ids)
 
 
 class SmolVLM(Adapter):

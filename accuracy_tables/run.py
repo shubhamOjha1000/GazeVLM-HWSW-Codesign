@@ -1,5 +1,5 @@
 """Score the accuracy-table rows (Uniform K, Blind, Ours, GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid, DTD,
-Uniform K + average pooling) for one or more VLMs.
+Uniform K + average pooling, the two-view GazeVLM) for one or more VLMs.
 
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model qwen2.5
     python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all --rows uniform,blind
@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from accuracy_tables import common  # noqa: E402
 from accuracy_tables.models import ADAPTERS, build_messages  # noqa: E402
 
-ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke", "fastvid", "prunevid", "dtd", "avgpool")
+ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke", "fastvid", "prunevid", "dtd", "avgpool", "gazevlm2")
 BLIND = "blind (question and options only)"
 
 
@@ -71,6 +71,12 @@ def dtd_name(s, k):
 
 def avgpool_name(side, k):
     return f"uniform K={k} + average pooling {side}x{side}"
+
+
+def gazevlm2_name(tokens, g, k):
+    """Every parameter in the name, so settings never mix in one result file."""
+    return (f"GazeVLM two-view B={int(tokens)} per frame (K={k}, alpha={float(g['alpha']):g}, "
+            f"beta={float(g['beta']):g}, fixation gaze)")
 
 
 def _done(path):
@@ -218,6 +224,17 @@ def run_model(key, cfg, data, rows, info_extra=None):
                   f"{[f'{s}x{s}' for s in sides]} tokens (budgets {list(cfg['avgpool']['budget'])} of "
                   f"{ad.stock_tokens} tokens per frame)")
             ap.run_questions(be, uniform_items, conds, os.path.join(out_dir, "avgpool.jsonl"), build_messages)
+
+        if "gazevlm2" in rows:
+            from vlmeval import gazevlm2 as gv2
+            g = cfg["gazevlm2"]
+            tokens = sorted({max(2, int(round(float(b) * ad.stock_tokens))) for b in g["budget"]})
+            conds = {gazevlm2_name(t, g, k): dict(tokens=t, alpha=float(g["alpha"]), beta=float(g["beta"]))
+                     for t in tokens}
+            print(f"\n--- GazeVLM (two-view): the {k} Uniform K frames, each a global and a gaze-centred view; "
+                  f"{tokens} tokens per frame (budgets {list(g['budget'])} of {ad.stock_tokens})")
+            gv2.run_questions(ad.gazevlm2_backend(), uniform_items, conds, os.path.join(out_dir, "gazevlm2.jsonl"),
+                              build_messages)
     finally:
         try:
             import transformers

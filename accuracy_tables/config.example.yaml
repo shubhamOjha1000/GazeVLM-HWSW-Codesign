@@ -103,3 +103,9 @@ avgpool:              # Uniform K + average pooling: each Uniform K frame encode
   budget: [0.05, 0.1] # per budget, s with tokens per frame closest to budget x stock tokens: Qwen / InternVL /
                       # Gemma 4x4 and 5x5 (6.3%, 9.8%), Phi 6x6 and 8x8 (+ row breaks: 5.5%, 9.5%), SmolVLM 2x2
                       # and 3x3 (4.9%, 11.1%)
+
+gazevlm2:             # the two-view GazeVLM (anonymous ICLR 2026 submission; not Chen & Qi's), on the Uniform K frames:
+                      # per frame a global view and a gaze-centred view, both encoded, then per view half the budget
+  budget: [0.05, 0.1] # tokens per frame B = round(budget x stock tokens), one condition each (256-token models: 13, 26)
+  alpha: 0.5          # gaze region ratio: the local view's side as a share of the frame's (the authors' 0.5)
+  beta: 0.5           # gaze token ratio: share of a view's tokens nearest the gaze, the rest a uniform grid (0.5)
