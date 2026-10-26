@@ -74,8 +74,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True)
     ap.add_argument("--videos", help="only these videos: test, all, or nothing for every result")
+    ap.add_argument("--out-dir", help="override paths.out_dir (the results to summarize)")
     a = ap.parse_args(argv)
     cfg = common.load_config(a.config)
+    if a.out_dir:
+        cfg["paths"]["out_dir"] = os.path.abspath(os.path.expanduser(a.out_dir))
     videos = None
     if a.videos:
         cfg["run"]["videos"] = a.videos
