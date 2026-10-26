@@ -111,6 +111,21 @@ freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke,fastvid,
 overrides `paths.out_dir`; `--keep-going` lets a failing row or model not stop the rest and prints a pass / fail
 table per model and row at the end; `--no-parity` skips the parity check.
 
+**Budget matching** (`calibrate.py`; notebook `colab_qwen25_matched.ipynb` for Qwen2.5-VL-3B): score
+`--rows uniform,blind,ours` first, then
+
+```bash
+python -m accuracy_tables.calibrate --config accuracy_tables/config.yaml --model qwen2.5 --points 2 \
+    --write accuracy_tables/config_qwen2.5_matched.yaml
+```
+
+measures ours' token budget per fovea setting (tokens per question / Uniform K's, as `summarize.py` does), and
+sets every baseline's knob to give the same budget on the same questions: exact from the frame counts
+(StreamingTOM G / N, DyCoke's K, DTD's drop share, average pooling's s, the two-view GazeVLM's B), from the gaze
+(GazeVLM's rho) or from the encoded frames (PruneVid's beta, FastVID's r: their own plans, encoder only). Only
+token counts are used, never answers. It writes a copy of the config with those knobs (run the baselines with it)
+and `<out_dir>/<model>/calibration.json`.
+
 **Smoke test** (does every method run on every model? a few minutes per model; the notebook's `SMOKE = True`):
 
 ```bash
