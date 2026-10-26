@@ -203,7 +203,7 @@ def test_run_questions_is_causal_cached_and_resumable(tmp_path):
     assert sorted(be.encoded) == sorted({(v, k) for v in "ab" for k in range(3)})   # once per frame and video
     r = next(r for r in rows if r["condition"] == "G=0.5N")
     assert r["n_image_tokens"] == 3 * 4 and r["n_tokens"] == 10 + 12
-    assert r["static_share"] == pytest.approx(1 / 3) and r["n_merged_tokens"] >= 1
+    assert r["static_share"] == pytest.approx(1 / 3, abs=1e-4) and r["n_merged_tokens"] >= 1   # recorded to 4 decimals
     assert r["streamingtom"] == dict(ratio=0.5, tau=stm.TAU, knn=stm.KNN, beta=stm.BETA, released_dpc=False)
     stm.run_questions(FakeBackend(), _items(), conds, out, build_messages=None)
     assert len(open(out).read().splitlines()) == 6
