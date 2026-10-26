@@ -59,14 +59,17 @@ def test_prefix_box_is_mass_box():
             assert cal.prefix_box(pre, rho) == gz.mass_box(G, rho)
 
 
-def test_gazevlm_tokens_grow_with_rho():
+def test_gazevlm_tokens_count_as_gazevlm_does():
     g = dict(gaze="fixation", sigma=0.1, r_min=0.125, thumb=2)
-    pres = [cal.heat_prefix(dict(gaze=(0.5, 0.5)), g)]
-    toks = [cal.gazevlm_tokens(pres, r, g, 16) for r in cal.GRID_RHO]
-    assert toks == sorted(toks) and 4 + 2 * 2 <= toks[0] <= 4 + 3 * 3            # r_min 0.125: 2-3 tokens a side
-    fr = dict(gaze=(0.5, 0.5))
-    r0, r1, c0, c1 = gz.box_on_grid(gz.roi_box([fr["gaze"]], 0.5, 0.1, 0.125), 16)
-    assert cal.gazevlm_tokens(pres, 0.5, g, 16) == 4 + (r1 - r0) * (c1 - c0)    # as gazevlm.run_questions counts
+    for gaze in ((0.5, 0.5), (0.13, 0.82)):
+        pres = [cal.heat_prefix(dict(gaze=gaze), g)]
+        for r in cal.GRID_RHO:                                                   # as gazevlm.run_questions counts
+            r0, r1, c0, c1 = gz.box_on_grid(gz.roi_box([gaze], r, 0.1, 0.125), 16)
+            assert cal.gazevlm_tokens(pres, r, g, 16) == 4 + (r1 - r0) * (c1 - c0)
+    toks = [cal.gazevlm_tokens([cal.heat_prefix(dict(gaze=(0.5, 0.5)), g)], r, g, 16) for r in cal.GRID_RHO]
+    # not monotone at small rho: the r_min box is grown about the mass box's centre, which moves by half a heatmap
+    # cell between rho values, so it covers 2 or 3 token rows (8 or 10 tokens with the 2 x 2 thumbnail)
+    assert 4 + 2 * 2 <= min(toks) and toks[-1] > 4 * toks[0]
 
 
 def _write(path, rows):
