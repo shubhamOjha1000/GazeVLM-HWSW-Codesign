@@ -107,7 +107,16 @@ python -m accuracy_tables.summarize --config accuracy_tables/config.yaml
 
 Options of `run.py`: `--model` one key, a comma list or `all` (one model at a time is loaded and
 freed); `--rows` any of `uniform,blind,ours,gazevlm,streamingtom,dycoke,fastvid,prunevid,dtd,avgpool,gazevlm2` (default all eleven); `--videos test|all` overrides
-`run.videos`; `--no-parity` skips the parity check.
+`run.videos` (or a comma list of video names); `--max-questions N` scores only the first N questions; `--out-dir`
+overrides `paths.out_dir`; `--keep-going` lets a failing row or model not stop the rest and prints a pass / fail
+table per model and row at the end; `--no-parity` skips the parity check.
+
+**Smoke test** (does every method run on every model? a few minutes per model; the notebook's `SMOKE = True`):
+
+```bash
+python -m accuracy_tables.run --config accuracy_tables/config.yaml --model all \
+    --videos loc2_script1_seq2_rec1 --max-questions 1 --out-dir /content/smoke --keep-going
+```
 
 What a run does, per model:
 
