@@ -332,10 +332,12 @@ def load_model(model_id):
     except ImportError:
         from transformers import AutoModelForImageTextToText as Model
     kw = dict(device_map="auto", attn_implementation="sdpa")
+    # bf16 (the accuracy runs); VLMEVAL_DTYPE=float16 for GPUs without bf16 (e.g. a T4, system_perf --dtype)
+    dtype = torch.float16 if os.environ.get("VLMEVAL_DTYPE") == "float16" else torch.bfloat16
     try:
-        model = Model.from_pretrained(model_id, dtype=torch.bfloat16, **kw)
+        model = Model.from_pretrained(model_id, dtype=dtype, **kw)
     except TypeError:
-        model = Model.from_pretrained(model_id, torch_dtype=torch.bfloat16, **kw)
+        model = Model.from_pretrained(model_id, torch_dtype=dtype, **kw)
     proc = AutoProcessor.from_pretrained(model_id)
     return model.eval(), proc, letter_token_ids(proc.tokenizer)
 

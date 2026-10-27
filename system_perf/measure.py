@@ -181,7 +181,16 @@ def main(argv=None):
     ap.add_argument("--no-flops", action="store_true", help="skip the FLOP counting pass")
     ap.add_argument("--out-dir", required=True, help="results: <out-dir>/<model>/{system,flops,batch}.jsonl, gate.json")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--dtype", default="auto", choices=("auto", "bfloat16", "float16"),
+                    help="weights' dtype: auto = bf16 on GPUs with bf16 (A100), fp16 otherwise (e.g. T4); fp16 is "
+                         "honoured by SmolVLM2 (VLMEVAL_DTYPE), the other models load bf16")
     a = ap.parse_args(argv)
+    dtype = a.dtype
+    if dtype == "auto":
+        dtype = "bfloat16" if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else "float16"
+    os.environ["VLMEVAL_DTYPE"] = dtype
+    if dtype == "float16" and a.model != "smolvlm":
+        print(f"note: {a.model} loads bf16 whatever --dtype says (only SmolVLM2 honours float16)")
 
     cfg = common.load_config(a.config)
     if a.videos:
@@ -227,7 +236,8 @@ def main(argv=None):
                     for q in qids:
                         rec, kw = measure_once(ad.model, decoder, job, cond, by_q[q], tmp, a.decode_tokens)
                         kwargs0 = kwargs0 if kwargs0 is not None else kw
-                        rec.update(model=a.model, device=torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu")
+                        rec.update(model=a.model, dtype=dtype,
+                                   device=torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu")
                         fs.write(json.dumps(rec) + "\n")
                         fs.flush()
                         print(f"   q{q}: ttft {rec['ttft_s']:.2f} s (vision {rec['ve_s']:.2f}), tps {rec.get('tps') or 0:.1f}, "
@@ -250,7 +260,7 @@ def main(argv=None):
                     torch.cuda.empty_cache()
     finally:
         info = dict(model=a.model, model_id=getattr(ad, "model_id", None), config=a.config, questions=qids,
-                    rows=rows, warmup=a.warmup, decode_tokens=a.decode_tokens,
+                    rows=rows, warmup=a.warmup, decode_tokens=a.decode_tokens, dtype=dtype,
                     device=torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu",
                     torch=torch.__version__)
         try:

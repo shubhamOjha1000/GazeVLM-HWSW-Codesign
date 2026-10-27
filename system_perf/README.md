@@ -12,6 +12,7 @@ methods is changed: the measurements come from hooks and counters around them.
 | `report.py` | the table: mean +- s.d. per (row, condition), speed-ups / savings vs Uniform K, overheads, accuracy joined from the accuracy run; writes `system_table.csv` and `system_table.tex` |
 | `probe.py` | the instrumentation: decoder hooks, KV-cache decoding, batch expansion, NVML energy, the in-memory frame cache |
 | `colab_system_perf.ipynb` | Colab (A100): tests, measure, report, for one model |
+| `colab_system_perf_t4.ipynb` | a small check on a T4: SmolVLM2-2.2B in fp16, one video with all its questions, 1 warm-up |
 | `../tests/test_system_perf.py` | CPU tests (sampling, hooks, decoding = recomputation on a tiny Llama, frame cache, report arithmetic) |
 
 ## Metrics (per question)
@@ -53,7 +54,8 @@ python -m system_perf.report --results /content/drive/MyDrive/GazeVLM/system_per
 ```
 
 Options of `measure.py`: `--rows` (default: every row), `--conditions` (substrings), `--videos`, `--decode-tokens`,
-`--no-flops`. Results append; `report.py` keeps the last record per (row, condition, question).
+`--no-flops`, `--dtype` (`auto`: bf16 where the GPU has it, fp16 otherwise, e.g. a T4; fp16 is honoured by SmolVLM2,
+the other models load bf16). Results append; `report.py` keeps the last record per (row, condition, question).
 
 ## Not covered yet
 
