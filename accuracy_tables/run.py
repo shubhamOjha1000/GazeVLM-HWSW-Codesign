@@ -148,6 +148,112 @@ def _row(name, status, keep_going, path=None):
         torch.cuda.empty_cache()
 
 
+def check_parity(ad, data, key):
+    """The model's parity report on the first question's keyframe (it also fixes how prompts are tokenized for this
+    transformers version, so run it before scoring) -> report; raises if it fails."""
+    q0 = data["qs"].sort_values(["video", "qid"]).iloc[0]
+    m0 = data["metas"][q0.video]
+    k0 = int(np.argmin(np.abs(np.asarray(m0["ts"]) - q0.t0))) if np.isfinite(q0.t0) else 0
+    from vlmeval.frames import frame_path
+    ok, rep = ad.parity(dict(path=frame_path(m0, k0)), q0.question, q0.options)
+    print("parity, our pipeline vs the model's own forward on one frame:")
+    for k, v in rep.items():
+        print(f"   {k:<44} {v}")
+    if not ok:
+        raise RuntimeError(f"{key}: parity failed; nothing scored (see the report above)")
+    print("parity OK")
+    return rep
+
+
+def row_jobs(ad, cfg, data, rows):
+    """One job per requested row: dict(row, msg, items, conds, score), score(items, conds, out_path) scoring any
+    subset of the row's conditions on any subset of its items (run_model passes all of them; system_perf/ one
+    condition and one question at a time)."""
+    run, key = cfg["run"], ad.key
+    cap = run["max_frames"].get(key)
+    k = min(run["K"], cap) if cap else run["K"]
+    uniform_items = common.make_items(data["qs"], {v: common.cap_frames(f, cap) for v, f in data["uniform"].items()})
+    jobs = []
+    add = lambda row, msg, items, conds, score: jobs.append(dict(row=row, msg=msg, items=items, conds=conds, score=score))
+    if "uniform" in rows:
+        add("uniform", f"--- Uniform K: {k} frames per video at stock input, {len(uniform_items)} questions",
+            uniform_items, {uniform_name(k): ad.stock_condition()}, ad.score)
+    if "blind" in rows:
+        add("blind", "--- Blind: question and options only", common.make_items(data["qs"], {}), {BLIND: None},
+            lambda items, conds, path: run_blind(ad, items, path))
+    if "ours" in rows:
+        frames = {v: common.cap_frames(f, cap) for v, f in data["gate"].items()}
+        items = common.make_items(data["qs"], frames)
+        conds = {ours_name(run["policy"], ad.setting_label(s)): ad.fovea_condition(s) for s in ad.fovea_settings(cfg["ours"])}
+        add("ours", f"--- Ours: {run['policy']} gate frames (mean {np.mean([len(it['frames']) for it in items]):.1f} per "
+            f"question) x {len(conds)} fovea settings", items, conds, ad.score)
+    if "gazevlm" in rows:
+        from vlmeval import gazevlm as gz
+        g = cfg["gazevlm"]
+        conds = {gazevlm_name(r, g, k): dict(rho=float(r), sigma=float(g["sigma"]), r_min=float(g["r_min"]),
+                                             thumb=int(g["thumb"]), gaze=g["gaze"]) for r in g["rho"]}
+        add("gazevlm", f"--- GazeVLM: the {k} Uniform K frames per video, ROI + {g['thumb']}x{g['thumb']} thumbnail tokens, "
+            f"rho in {list(g['rho'])}", uniform_items, conds,
+            lambda items, conds, path: gz.run_questions(ad.gazevlm_backend(), items, conds, path, build_messages))
+    if "streamingtom" in rows:
+        from vlmeval import streamingtom as stm
+        s = cfg["streamingtom"]
+        conds = {streamingtom_name(r, s, k): dict(ratio=float(r), tau=float(s["tau"]), knn=int(s["knn"]),
+                                                  beta=float(s["beta"]), released_dpc=bool(s["released_dpc"]))
+                 for r in s["ratio"]}
+        add("streamingtom", f"--- StreamingTOM (CTR): the {k} Uniform K frames per video in time order, G / N in "
+            f"{list(s['ratio'])}", uniform_items, conds,
+            lambda items, conds, path: stm.run_questions(ad.streamingtom_backend(), items, conds, path, build_messages))
+    if "dycoke" in rows:
+        from vlmeval import dycoke as dy
+        conds = {dycoke_name(s["window"], s["prune"], k): dict(window=int(s["window"]), prune=float(s["prune"]))
+                 for s in cfg["dycoke"]["settings"]}
+        add("dycoke", f"--- DyCoke (TTM): the {k} Uniform K frames per video in windows; settings "
+            f"{[(c['window'], c['prune']) for c in conds.values()]}", uniform_items, conds,
+            lambda items, conds, path: dy.run_questions(ad.dycoke_backend(), items, conds, path, build_messages))
+    if "fastvid" in rows:
+        from vlmeval import fastvid as fv
+        s = cfg["fastvid"]
+        conds = {fastvid_name(r, s, k): dict(r=float(r), c=int(s["c"]), tau=float(s["tau"]), ignore=float(s["ignore"]),
+                                             d=float(s["d"]), p=int(s["p"]), beta=float(s["beta"])) for r in s["r"]}
+        add("fastvid", f"--- FastVID: the {k} Uniform K frames per video (offline), r in {list(s['r'])}", uniform_items, conds,
+            lambda items, conds, path: fv.run_questions(ad.fastvid_backend(), items, conds, path, build_messages))
+    if "prunevid" in rows:
+        from vlmeval import prunevid as pv
+        s = cfg["prunevid"]
+        conds = {prunevid_name(c, s, k): dict(tau=float(c["tau"]), beta=float(c["beta"]), gamma=float(s["gamma"]),
+                                              knn=int(s["knn"]), min_tokens=int(s["min_tokens"])) for c in s["settings"]}
+        add("prunevid", f"--- PruneVid (token merging): the {k} Uniform K frames per video (offline); settings "
+            f"{[(c['tau'], c['beta']) for c in conds.values()]} (tau, beta)", uniform_items, conds,
+            lambda items, conds, path: pv.run_questions(ad.prunevid_backend(), items, conds, path, build_messages))
+    if "dtd" in rows:
+        from vlmeval import dtd
+        conds = {dtd_name(s, k): dict(threshold=float(s["threshold"]), absolute=bool(s["absolute"]))
+                 for s in cfg["dtd"]["settings"]}
+        add("dtd", f"--- DTD (TimeChat-Online): the {k} Uniform K frames per video in time order; settings "
+            f"{[(c['threshold'], 'absolute' if c['absolute'] else 'relative') for c in conds.values()]}", uniform_items, conds,
+            lambda items, conds, path: dtd.run_questions(ad.dtd_backend(), items, conds, path, build_messages))
+    if "avgpool" in rows:
+        from vlmeval import avgpool as ap
+        be = ad.avgpool_backend()
+        sides = sorted({ap.pool_side(float(b), ad.stock_tokens, be.side, getattr(be, "row_breaks", False))
+                        for b in cfg["avgpool"]["budget"]})
+        conds = {avgpool_name(s, k): dict(side=s) for s in sides}
+        add("avgpool", f"--- Uniform K + average pooling: the {k} Uniform K frames, each pooled to "
+            f"{[f'{s}x{s}' for s in sides]} tokens (budgets {list(cfg['avgpool']['budget'])} of {ad.stock_tokens} tokens "
+            f"per frame)", uniform_items, conds,
+            lambda items, conds, path: ap.run_questions(be, items, conds, path, build_messages))
+    if "gazevlm2" in rows:
+        from vlmeval import gazevlm2 as gv2
+        g = cfg["gazevlm2"]
+        tokens = sorted({max(2, int(round(float(b) * ad.stock_tokens))) for b in g["budget"]})
+        conds = {gazevlm2_name(t, g, k): dict(tokens=t, alpha=float(g["alpha"]), beta=float(g["beta"])) for t in tokens}
+        add("gazevlm2", f"--- GazeVLM (two-view): the {k} Uniform K frames, each a global and a gaze-centred view; "
+            f"{tokens} tokens per frame (budgets {list(g['budget'])} of {ad.stock_tokens})", uniform_items, conds,
+            lambda items, conds, path: gv2.run_questions(ad.gazevlm2_backend(), items, conds, path, build_messages))
+    return jobs
+
+
 def run_model(key, cfg, data, rows, info_extra=None, keep_going=False):
     """Scores the rows for one model -> {row: 'ok (...)' or 'FAILED: ...'}."""
     run, p = cfg["run"], cfg["paths"]
@@ -162,128 +268,11 @@ def run_model(key, cfg, data, rows, info_extra=None, keep_going=False):
     out = lambda name: os.path.join(out_dir, f"{name}.jsonl")
     try:
         if run["parity"]:
-            q0 = data["qs"].sort_values(["video", "qid"]).iloc[0]
-            m0 = data["metas"][q0.video]
-            k0 = int(np.argmin(np.abs(np.asarray(m0["ts"]) - q0.t0))) if np.isfinite(q0.t0) else 0
-            from vlmeval.frames import frame_path
-            ok, rep = ad.parity(dict(path=frame_path(m0, k0)), q0.question, q0.options)
-            print("parity, our pipeline vs the model's own forward on one frame:")
-            for k, v in rep.items():
-                print(f"   {k:<44} {v}")
-            info["parity"] = dict(ok=bool(ok), report=rep)
-            if not ok:
-                raise RuntimeError(f"{key}: parity failed; nothing scored (see the report above)")
-            print("parity OK")
-
-        k = min(run["K"], cap) if cap else run["K"]
-        uniform_items = common.make_items(data["qs"], {v: common.cap_frames(f, cap) for v, f in data["uniform"].items()})
-        if "uniform" in rows:
-            with _row("uniform", status, keep_going, out("uniform")):
-                print(f"\n--- Uniform K: {k} frames per video at stock input, {len(uniform_items)} questions")
-                ad.score(uniform_items, {uniform_name(k): ad.stock_condition()}, os.path.join(out_dir, "uniform.jsonl"))
-
-        if "blind" in rows:
-            with _row("blind", status, keep_going, out("blind")):
-                print(f"\n--- Blind: question and options only")
-                run_blind(ad, common.make_items(data["qs"], {}), os.path.join(out_dir, "blind.jsonl"))
-
-        if "ours" in rows:
-            with _row("ours", status, keep_going, out("ours")):
-                frames = {v: common.cap_frames(f, cap) for v, f in data["gate"].items()}
-                items = common.make_items(data["qs"], frames)
-                conds = {ours_name(run["policy"], ad.setting_label(s)): ad.fovea_condition(s)
-                         for s in ad.fovea_settings(cfg["ours"])}
-                print(f"\n--- Ours: {run['policy']} gate frames (mean "
-                      f"{np.mean([len(it['frames']) for it in items]):.1f} per question) x {len(conds)} fovea settings")
-                ad.score(items, conds, os.path.join(out_dir, "ours.jsonl"))
-
-        if "gazevlm" in rows:
-            with _row("gazevlm", status, keep_going, out("gazevlm")):
-                from vlmeval import gazevlm as gz
-                g = cfg["gazevlm"]
-                conds = {gazevlm_name(r, g, k): dict(rho=float(r), sigma=float(g["sigma"]), r_min=float(g["r_min"]),
-                                                     thumb=int(g["thumb"]), gaze=g["gaze"]) for r in g["rho"]}
-                print(f"\n--- GazeVLM: the {k} Uniform K frames per video, ROI + {g['thumb']}x{g['thumb']} thumbnail "
-                      f"tokens, rho in {list(g['rho'])}")
-                gz.run_questions(ad.gazevlm_backend(), uniform_items, conds, os.path.join(out_dir, "gazevlm.jsonl"),
-                                 build_messages)
-
-        if "streamingtom" in rows:
-            with _row("streamingtom", status, keep_going, out("streamingtom")):
-                from vlmeval import streamingtom as stm
-                s = cfg["streamingtom"]
-                conds = {streamingtom_name(r, s, k): dict(ratio=float(r), tau=float(s["tau"]), knn=int(s["knn"]),
-                                                          beta=float(s["beta"]), released_dpc=bool(s["released_dpc"]))
-                         for r in s["ratio"]}
-                print(f"\n--- StreamingTOM (CTR): the {k} Uniform K frames per video in time order, G / N in {list(s['ratio'])}")
-                stm.run_questions(ad.streamingtom_backend(), uniform_items, conds,
-                                  os.path.join(out_dir, "streamingtom.jsonl"), build_messages)
-
-        if "dycoke" in rows:
-            with _row("dycoke", status, keep_going, out("dycoke")):
-                from vlmeval import dycoke as dy
-                conds = {dycoke_name(s["window"], s["prune"], k): dict(window=int(s["window"]), prune=float(s["prune"]))
-                         for s in cfg["dycoke"]["settings"]}
-                print(f"\n--- DyCoke (TTM): the {k} Uniform K frames per video in windows; settings "
-                      f"{[(c['window'], c['prune']) for c in conds.values()]}")
-                dy.run_questions(ad.dycoke_backend(), uniform_items, conds, os.path.join(out_dir, "dycoke.jsonl"),
-                                 build_messages)
-
-        if "fastvid" in rows:
-            with _row("fastvid", status, keep_going, out("fastvid")):
-                from vlmeval import fastvid as fv
-                s = cfg["fastvid"]
-                conds = {fastvid_name(r, s, k): dict(r=float(r), c=int(s["c"]), tau=float(s["tau"]),
-                                                     ignore=float(s["ignore"]), d=float(s["d"]), p=int(s["p"]),
-                                                     beta=float(s["beta"])) for r in s["r"]}
-                print(f"\n--- FastVID: the {k} Uniform K frames per video (offline), r in {list(s['r'])}")
-                fv.run_questions(ad.fastvid_backend(), uniform_items, conds, os.path.join(out_dir, "fastvid.jsonl"),
-                                 build_messages)
-
-        if "prunevid" in rows:
-            with _row("prunevid", status, keep_going, out("prunevid")):
-                from vlmeval import prunevid as pv
-                s = cfg["prunevid"]
-                conds = {prunevid_name(c, s, k): dict(tau=float(c["tau"]), beta=float(c["beta"]), gamma=float(s["gamma"]),
-                                                      knn=int(s["knn"]), min_tokens=int(s["min_tokens"]))
-                         for c in s["settings"]}
-                print(f"\n--- PruneVid (token merging): the {k} Uniform K frames per video (offline); settings "
-                      f"{[(c['tau'], c['beta']) for c in conds.values()]} (tau, beta)")
-                pv.run_questions(ad.prunevid_backend(), uniform_items, conds, os.path.join(out_dir, "prunevid.jsonl"),
-                                 build_messages)
-
-        if "dtd" in rows:
-            with _row("dtd", status, keep_going, out("dtd")):
-                from vlmeval import dtd
-                conds = {dtd_name(s, k): dict(threshold=float(s["threshold"]), absolute=bool(s["absolute"]))
-                         for s in cfg["dtd"]["settings"]}
-                print(f"\n--- DTD (TimeChat-Online): the {k} Uniform K frames per video in time order; settings "
-                      f"{[(c['threshold'], 'absolute' if c['absolute'] else 'relative') for c in conds.values()]}")
-                dtd.run_questions(ad.dtd_backend(), uniform_items, conds, os.path.join(out_dir, "dtd.jsonl"), build_messages)
-
-        if "avgpool" in rows:
-            with _row("avgpool", status, keep_going, out("avgpool")):
-                from vlmeval import avgpool as ap
-                be = ad.avgpool_backend()
-                sides = sorted({ap.pool_side(float(b), ad.stock_tokens, be.side, getattr(be, "row_breaks", False))
-                                for b in cfg["avgpool"]["budget"]})
-                conds = {avgpool_name(s, k): dict(side=s) for s in sides}
-                print(f"\n--- Uniform K + average pooling: the {k} Uniform K frames, each pooled to "
-                      f"{[f'{s}x{s}' for s in sides]} tokens (budgets {list(cfg['avgpool']['budget'])} of "
-                      f"{ad.stock_tokens} tokens per frame)")
-                ap.run_questions(be, uniform_items, conds, os.path.join(out_dir, "avgpool.jsonl"), build_messages)
-
-        if "gazevlm2" in rows:
-            with _row("gazevlm2", status, keep_going, out("gazevlm2")):
-                from vlmeval import gazevlm2 as gv2
-                g = cfg["gazevlm2"]
-                tokens = sorted({max(2, int(round(float(b) * ad.stock_tokens))) for b in g["budget"]})
-                conds = {gazevlm2_name(t, g, k): dict(tokens=t, alpha=float(g["alpha"]), beta=float(g["beta"]))
-                         for t in tokens}
-                print(f"\n--- GazeVLM (two-view): the {k} Uniform K frames, each a global and a gaze-centred view; "
-                      f"{tokens} tokens per frame (budgets {list(g['budget'])} of {ad.stock_tokens})")
-                gv2.run_questions(ad.gazevlm2_backend(), uniform_items, conds, os.path.join(out_dir, "gazevlm2.jsonl"),
-                                  build_messages)
+            info["parity"] = dict(ok=True, report=check_parity(ad, data, key))
+        for job in row_jobs(ad, cfg, data, rows):
+            with _row(job["row"], status, keep_going, out(job["row"])):
+                print("\n" + job["msg"])
+                job["score"](job["items"], job["conds"], out(job["row"]))
     finally:
         try:
             import transformers

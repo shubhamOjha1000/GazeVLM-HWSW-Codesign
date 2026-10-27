@@ -420,7 +420,7 @@ from `single-inference-sample.py`):
 1. **Two views (GazeVLM-Pre).** The local view is the square of side alpha x the frame's side centred on
    the gaze, shifted inside the frame near the edges (alpha = 0.5: a quarter of the area); the global view is
    the whole frame. Each view is encoded on its own at the model's stock input: twice the stock encoder work
-   per frame (`n_encoder_images`). The local view is the crop of the cached frame saved losslessly (PNG), so
+   per frame (`n_encoder_images`). The local view is the crop of the cached frame saved losslessly (uncompressed BMP in RAM), so
    it goes through exactly the model's own frame path.
 2. **Token selection (GazeVLM-Post).** The frame's budget B = round(budget x stock tokens) is halved per view
    (capped at both views' tokens). Per view: B_v - round(beta B_v) tokens on a uniform grid over the view's

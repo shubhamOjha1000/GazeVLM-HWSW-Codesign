@@ -20,7 +20,7 @@ either (Phi-3.5 included).
 
 Per model, tokens come from the StreamingTOM backends (vlmeval/streamingtom.py, saliency off): each
 view through the model's own (parity-checked) encoder path; the local view is the crop of the cached
-frame saved losslessly (PNG), so it takes exactly the frame's path. Positions: the 1D-position LLMs take
+frame saved losslessly (an uncompressed BMP in /dev/shm), so it takes exactly the frame's path. Positions: the 1D-position LLMs take
 the tokens in that order; Qwen2.5-VL / Qwen3-VL (M-RoPE) get each token at its true place in the frame,
 local-view tokens as cells of the crop's finer size (alpha x a stock token), so both views sit in one
 image of the frame; Qwen3-VL's DeepStack features are selected with the same tokens. Both views cost the
@@ -182,7 +182,9 @@ def run_questions(backend, items, conditions, out_path, build_messages, log_ever
     todo = [(it, c) for it in items for c in conditions if (c, it["qid"]) not in done]
     print(f"{len(done)} already scored, {len(todo)} to go -> {out_path}")
 
-    tmp = tempfile.mkdtemp(prefix="gazevlm2_")
+    # the crop goes to the encoder through the frame path; an uncompressed BMP in RAM (/dev/shm where it exists)
+    # keeps that lossless and adds no PNG compression to the timings
+    tmp = tempfile.mkdtemp(prefix="gazevlm2_", dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
     states, video, t_start, n_new = {}, None, time.time(), 0
     try:
         with open(out_path, "a") as fh:
@@ -205,7 +207,7 @@ def run_questions(backend, items, conditions, out_path, build_messages, log_ever
                     window, frac_l = crop_window(pts[0], S, alpha)
                     if ("l", fr["key"], alpha) not in states:
                         r0, c0, side = window
-                        crop_path = os.path.join(tmp, "crop.png")
+                        crop_path = os.path.join(tmp, "crop.bmp")
                         _load_rgb(fr["path"]).crop((c0, r0, c0 + side, r0 + side)).save(crop_path)
                         states[("l", fr["key"], alpha)] = backend.frame_state(dict(fr, path=crop_path))
                     glob, local = states[("g", fr["key"])], states[("l", fr["key"], alpha)]
