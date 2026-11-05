@@ -7,9 +7,10 @@
 #SBATCH --time=04:00:00
 #SBATCH --output=/scratch/%u/GazeVLM/logs/%x_%j.log
 #
-# Downloads the six models. Needs internet on the node, and HF_TOKEN exported in the shell that runs sbatch (for Gemma).
+# Downloads the models in MODELS (common.sh). Needs internet on the node; only Gemma also needs HF_TOKEN exported in the
+# shell that runs sbatch.
 # Rerunning skips what is already there. Submit from the repository root.
 set -euo pipefail
 export HF_HUB_OFFLINE=0
 source "$SLURM_SUBMIT_DIR/accuracy_tables/hpc/common.sh"
-run_in_env "python -u -m accuracy_tables.hpc.download_models"
+run_in_env "python -u -m accuracy_tables.hpc.download_models ${MODELS[*]}"

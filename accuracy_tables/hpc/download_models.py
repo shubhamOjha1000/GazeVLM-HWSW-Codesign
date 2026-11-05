@@ -1,5 +1,6 @@
-"""Downloads the six models' weights into $HF_HOME, because the GPU jobs run offline. Gemma is gated: its licence must be
-accepted on the hub and HF_TOKEN set. A model that fails doesn't stop the others; the run ends with an error."""
+"""Downloads the named models' weights (default: all six) into $HF_HOME, because the GPU jobs run offline. Gemma is gated:
+its licence must be accepted on the hub and HF_TOKEN set. A model that fails doesn't stop the others; the run ends with an
+error."""
 import os
 import sys
 
@@ -10,8 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from accuracy_tables.models import ADAPTERS  # noqa: E402
 
 failed = []
-for key, adapter in ADAPTERS.items():
-    model_id = adapter.default_ids[0]
+for key in sys.argv[1:] or ADAPTERS:
+    model_id = ADAPTERS[key].default_ids[0]
     try:
         print(f"{key}: {model_id} -> {snapshot_download(model_id)}", flush=True)
     except Exception as ex:

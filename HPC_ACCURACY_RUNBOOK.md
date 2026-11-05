@@ -13,8 +13,12 @@ run as part of step 4. Expect to fix small problems, and report what you change.
 
 ## 1. The task
 
-Score 11 methods on 6 VLMs on the EgoEverything multiple-choice questions, with each baseline set to the same token
+Score 11 methods on 4 VLMs on the EgoEverything multiple-choice questions, with each baseline set to the same token
 budget as our method, then write one summary table. Accuracy only: latency, memory and energy are out of scope.
+
+**Models for now: `qwen2.5`, `qwen3`, `phi`, `smolvlm`.** The user asked to skip `internvl` and `gemma` for now. To bring them
+back, uncomment them in `MODELS` in `accuracy_tables/hpc/common.sh`: that one list drives the downloads, the smoke test and
+`submit_all.sh`.
 
 **Scope: the 12 videos below (834 questions).** The other 338 videos in `$EGO_ROOT` have no gate data, so the code skips
 them. Don't extend to them without asking the user.
@@ -39,13 +43,13 @@ them. Don't extend to them without asking the user.
 | Model key | Hugging Face id | Stock tokens per frame | Status in `accuracy_tables/` on Colab |
 |---|---|---|---|
 | `qwen2.5` | `Qwen/Qwen2.5-VL-3B-Instruct` | 256 | full run on `test` |
-| `internvl` | `OpenGVLab/InternVL3_5-4B-HF` | 256 | full run on `test` |
+| `internvl` | `OpenGVLab/InternVL3_5-4B-HF` | 256 | full run on `test`; **not run on Torch for now** |
 | `smolvlm` | `HuggingFaceTB/SmolVLM2-2.2B-Instruct` | 81 | full run on `test` |
 | `qwen3` | `Qwen/Qwen3-VL-4B-Instruct` | 256 | 1-question smoke test only |
-| `gemma` | `google/gemma-3-4b-it` (gated) | 256 | 1-question smoke test only |
+| `gemma` | `google/gemma-3-4b-it` (gated) | 256 | 1-question smoke test only; **not run on Torch for now** |
 | `phi` | `microsoft/Phi-3.5-vision-instruct` | 757 | 1-question smoke test only |
 
-New problems are most likely on `qwen3`, `gemma` and `phi`. No model has run on `all` through this pipeline yet.
+New problems are most likely on `qwen3` and `phi`. No model has run on `all` through this pipeline yet.
 
 | Row key | Method | What the model sees | Knob set by calibration |
 |---|---|---|---|
@@ -81,12 +85,12 @@ All are in `accuracy_tables/hpc/`. Submit every one **from the repository root**
 
 | File | What it does | GPU |
 |---|---|---|
-| `common.sh` | paths (`EGO_ROOT`, `GV_ROOT`, `HF_HOME`, overlay, image), `run_in_env`, `gpu_log`; sourced by the jobs | |
+| `common.sh` | paths (`EGO_ROOT`, `GV_ROOT`, `HF_HOME`, overlay, image), the `MODELS` list, `run_in_env`, `gpu_log`; sourced by the jobs | |
 | `config.torch.yaml` | data paths; everything else keeps the protocol defaults | |
 | `install_env.SBATCH` | installs the packages into the overlay (`:rw --fakeroot`) | no |
-| `download_models.SBATCH` | downloads the 6 models into `$HF_HOME` | no |
+| `download_models.SBATCH` | downloads the `MODELS` list into `$HF_HOME` | no |
 | `prepare_data.SBATCH` | unit tests, extracts the frames from `$EGO_ROOT`, checks the data against the Colab numbers | no |
-| `smoke.SBATCH` | every method on every model on 1 question | yes |
+| `smoke.SBATCH` | every method on every model in `MODELS` on 1 question | yes |
 | `run_model.SBATCH <model> <test\|all>` | one model: Uniform K, Blind, Ours; calibration; the 8 baselines | yes |
 | `submit_all.sh <test\|all> [models]` | one `run_model` job per model, then a summary job | no |
 | `summarize.SBATCH <test\|all>` | writes `summary.csv`; on `test` also compares with Colab | no |
@@ -105,7 +109,7 @@ The GPU jobs set `HF_HUB_OFFLINE=1`, so they never need internet. Nothing writes
 | Gate CSVs | Drive `GazeVLM/folds/` | which frames exist, and one gaze point per frame |
 | Gate predictions | Drive `GazeVLM/vlm/egoeverything/oof_preds_full.csv` | which frames the gate sends |
 | Gate weights | Drive `GazeVLM/runs/eyehead/fold1.pt` ... `fold5.pt` | recomputing the predictions if that CSV is missing |
-| Colab results | Drive `GazeVLM/accuracy_tables/{qwen25,internvl,smolvlm}_matched/summary.csv` | checking this cluster against Colab |
+| Colab results | Drive `GazeVLM/accuracy_tables/{qwen25,smolvlm}_matched/summary.csv` | checking this cluster against Colab |
 
 The accuracy run doesn't read the cluster's `general_eye_gaze.csv`, `imu.npz`, `calibration.json` or `timing.json`: the gaze
 and IMU inputs are already inside the gate CSVs and predictions. So the open questions in context section 9 (bounding
@@ -120,7 +124,7 @@ Layout on the cluster:
   data/folds/train_val_fold1.csv ... train_val_fold5.csv, test.csv
   data/runs/eyehead/fold1.pt ... fold5.pt
   data/vlm/egoeverything/oof_preds_full.csv
-  data/colab_reference/{qwen25,internvl,smolvlm}_matched/summary.csv
+  data/colab_reference/{qwen25,smolvlm}_matched/summary.csv
   frames_1344/<video>/frame_00000.jpg ..., meta.json      <- written by prepare_data
   results/smoke/   results/hpc_test/   results/hpc_all/
   logs/
@@ -163,7 +167,7 @@ D=/scratch/$USER/GazeVLM/data
 rclone copy <remote>:GazeVLM/folds "$D/folds"
 rclone copy <remote>:GazeVLM/runs/eyehead "$D/runs/eyehead" --include "fold*.pt"
 rclone copy <remote>:GazeVLM/vlm/egoeverything/oof_preds_full.csv "$D/vlm/egoeverything/"
-for r in qwen25 internvl smolvlm; do
+for r in qwen25 smolvlm; do      # internvl_matched too if InternVL comes back
     rclone copy <remote>:GazeVLM/accuracy_tables/${r}_matched/summary.csv "$D/colab_reference/${r}_matched/"
 done
 ```
@@ -177,12 +181,13 @@ something else, install it and report it.
 sbatch accuracy_tables/hpc/install_env.SBATCH       # log ends with "ok: python ... transformers 5.20.1"
 ```
 
-Then the models (about 60 GB, an estimate). The user must have accepted Gemma's licence on the hub. `read -rs` keeps the
-token out of the shell history; the user types it themselves.
+Then the models (about 40 GB, an estimate). None of the 4 is gated, so no token is needed. If Gemma comes back, the user must
+accept its licence on the hub and uncomment the `read` line, which keeps the token out of the shell history; the user types it
+themselves.
 
 ```bash
-read -rs HF_TOKEN && export HF_TOKEN
-sbatch accuracy_tables/hpc/download_models.SBATCH   # log lists all 6 models with no FAILED line
+# read -rs HF_TOKEN && export HF_TOKEN      # only for Gemma
+sbatch accuracy_tables/hpc/download_models.SBATCH   # log lists the 4 models with no FAILED line
 ```
 
 If these nodes have no internet, run the same steps where there is some (context section 10).
@@ -204,12 +209,12 @@ uniform frames per video: mean 86.8
 **Step 5: smoke test.**
 
 ```bash
-sbatch accuracy_tables/hpc/smoke.SBATCH             # log ends with "=== 0 failed of 66"
+sbatch accuracy_tables/hpc/smoke.SBATCH             # log ends with "=== 0 failed of 44" (11 methods x 4 models)
 ```
 
 On Colab this took a few minutes per model.
 
-**Step 6: the 4 test videos, on all 6 models.**
+**Step 6: the 4 test videos, on the 4 models.**
 
 ```bash
 bash accuracy_tables/hpc/submit_all.sh test
@@ -239,8 +244,8 @@ the slowest, at up to about 73,000 visual tokens per question at Uniform K. Othe
 
 ## 6. Check against Colab
 
-On `test`, `summarize.SBATCH` runs `compare_reference.py`, which joins on (model, condition) for `qwen2.5`, `internvl` and
-`smolvlm`. `qwen3`, `gemma` and `phi` have no reference.
+On `test`, `summarize.SBATCH` runs `compare_reference.py`, which joins on (model, condition) for `qwen2.5` and `smolvlm`.
+`qwen3` and `phi` have no reference. A reference model with no results yet is listed and not compared.
 
 - **Conditions and counts must match exactly.** The condition names hold the calibrated knobs, and question, frame and token
   counts don't depend on the GPU. A missing condition or a different count means the frames, gaze or gate data differ, and
@@ -254,7 +259,7 @@ Expected counts per question on `test`:
 
 | Model | Uniform frames | Uniform tokens | Ours frames | Ours tokens, smallest to largest setting |
 |---|---|---|---|---|
-| `qwen2.5`, `internvl` | 89.83 | 22997.33 | 47.31 | 2272.80, 4530.09, 7117.55, 9639.64 |
+| `qwen2.5` (and `internvl` if it comes back) | 89.83 | 22997.33 | 47.31 | 2272.80, 4530.09, 7117.55, 9639.64 |
 | `smolvlm` | 63.17 | 5116.50 | 47.31 | 804.33, 1561.35, 2318.37, 3075.39 |
 
 The 95% intervals span roughly 20 points on 204 questions, so differences between methods aren't significant. Don't claim a

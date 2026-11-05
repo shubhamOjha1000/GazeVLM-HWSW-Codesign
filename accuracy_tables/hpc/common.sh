@@ -8,6 +8,16 @@ OVERLAY=${OVERLAY:-/scratch/$USER/pytorch-example/my_pytorch.ext3}
 IMAGE=${IMAGE:-/share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif}
 CONFIG=accuracy_tables/hpc/config.torch.yaml
 
+# The models run on Torch: this one list drives the downloads, the smoke test and submit_all.sh.
+MODELS=(
+    qwen2.5
+    qwen3
+    # internvl      # not run for now
+    # gemma         # not run for now
+    phi
+    smolvlm
+)
+
 # run_in_env "<command line>": runs it from the repository root in the container's base environment. GPU jobs set NV=--nv.
 run_in_env() {
     singularity exec ${NV:-} --overlay "$OVERLAY:ro" "$IMAGE" /bin/bash -c \

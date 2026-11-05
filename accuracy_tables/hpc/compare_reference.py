@@ -32,7 +32,11 @@ def main(summary, folder):
     files = sorted(glob.glob(os.path.join(folder, "*", "summary.csv")))
     if not files:
         sys.exit(f"no */summary.csv under {folder}")
-    m = compare(pd.read_csv(summary), pd.concat([pd.read_csv(f) for f in files], ignore_index=True))
+    new, ref = pd.read_csv(summary), pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+    skipped = sorted(set(ref["model"]) - set(new["model"]))
+    if skipped:
+        print(f"no results for {skipped}: not compared")
+    m = compare(new, ref[ref["model"].isin(new["model"])])
     pd.set_option("display.width", 200, "display.max_colwidth", 70)
     print(m[KEYS + ["n_new", "counts_match", "accuracy_colab", "accuracy_new", "accuracy_diff"]].round(2).to_string(index=False))
     done = m[~m["missing"]]

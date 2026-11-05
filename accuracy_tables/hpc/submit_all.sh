@@ -6,9 +6,9 @@
 set -euo pipefail
 V=${1:?usage: submit_all.sh <test|all> [models...]}
 shift
-MODELS=("$@")
-if [ ${#MODELS[@]} -eq 0 ]; then
-    MODELS=(qwen2.5 qwen3 internvl gemma phi smolvlm)
+source accuracy_tables/hpc/common.sh
+if [ $# -gt 0 ]; then
+    MODELS=("$@")          # else the MODELS list in common.sh
 fi
 IDS=()
 for M in "${MODELS[@]}"; do

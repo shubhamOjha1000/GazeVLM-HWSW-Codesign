@@ -10,13 +10,14 @@
 #SBATCH --open-mode=append
 #SBATCH --output=/scratch/%u/GazeVLM/logs/%x_%j.log
 #
-# Every method on every model on one question; the log must end with "=== 0 failed of 66". Uses default budgets, in its
-# own folder, so it never mixes with real results. Submit from the repository root.
+# Every method on every model in MODELS (common.sh) on one question; the log must end with "=== 0 failed of 44" (11 methods
+# x 4 models). Uses default budgets, in its own folder, so it never mixes with real results. Submit from the repository root.
 set -euo pipefail
 source "$SLURM_SUBMIT_DIR/accuracy_tables/hpc/common.sh"
 NV=--nv
 gpu_log
 rm -rf "$GV_ROOT/results/smoke"
+MODEL_LIST=$(IFS=,; echo "${MODELS[*]}")
 run_in_env "python -u -m accuracy_tables.hpc.check_gpu \
-    && python -u -m accuracy_tables.run --config $CONFIG --model all --videos loc2_script1_seq2_rec1 --max-questions 1 \
+    && python -u -m accuracy_tables.run --config $CONFIG --model $MODEL_LIST --videos loc2_script1_seq2_rec1 --max-questions 1 \
         --out-dir $GV_ROOT/results/smoke --keep-going"
