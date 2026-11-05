@@ -84,9 +84,9 @@ def pair_rows(video, f_ts, g_ts, g_yaw, g_pit, project, imu_ts, imu_arr, imu_hz=
     return rows
 
 
-def build_video(video):
+def build_video(video, force=False):
     out = paths.rows_csv(video)
-    if os.path.exists(out):
+    if os.path.exists(out) and not force:
         print(f"   {video}: rows already built", flush=True)
         return
     meta = paths.frame_meta(video)
@@ -113,9 +113,10 @@ def build_video(video):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     paths.add_video_args(ap)
+    ap.add_argument("--force", action="store_true", help="build again even if the video's result exists")
     a = ap.parse_args()
     for v in paths.chosen_videos(a):
-        build_video(v)
+        build_video(v, a.force)
 
 
 if __name__ == "__main__":

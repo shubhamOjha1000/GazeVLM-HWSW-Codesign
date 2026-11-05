@@ -446,8 +446,13 @@ Rerunning continues where it stopped.
 
 ## 9. Next task: gate data for Nymeria, then the budget rule on SmolVLM
 
-**Nothing here has run. Don't submit any job until the user approves it, one step at a time.** Three checks must pass before any
-VLM job on Nymeria. Where this section differs from context section 13, this section is right: 13 came partly from web summaries of
+**Don't submit any job until the user approves it, one step at a time.** Three checks must pass before any VLM job on Nymeria.
+
+**Status:** step 1 ran once at commit `6682978` and stopped at `REBUILD DIFFERS`, on `gaze_xy_window` only. The cause was a missing
+crop of the calibration, now fixed (see "How the gate data is built"). The fix was tested on Torch with a read-only script, and the
+job itself must still pass, so rerun step 1. Nothing after step 1 has run.
+
+Where this section differs from context section 13, this section is right: 13 came partly from web summaries of
 the code, and this was checked against the code.
 
 ### Why this exists
@@ -473,8 +478,13 @@ checks it, and then scores SmolVLM.
 - **Each stream is rebased to its own first sample,** and frames sit at i / native fps, because the gate trained on that alignment.
   `timing.json` isn't used. The streams start within about 0.07 s of each other (context section 7).
 - **Projection needs the `aria` environment,** so `project_gaze.py` runs there and saves the result, and `build_rows.py` reads it in the
-  base environment. Depth is a fixed 1 m and coordinates are divided by the calibration's own size, as in the builder, so context section
-  8's per-sample depth and rescaling don't apply.
+  base environment. Depth is a fixed 1 m, as in the builder, so context section 8's per-sample depth doesn't apply.
+- **The calibration needs Aria's crop rule.** `calibration.json` describes the 2880 px sensor and the videos are 1408 px. Aria's VRS loader
+  matches them before the builder ever sees the camera, so `project_gaze.py` does the same with `rescale([1408, 1408], 0.5, [32, 32])`, and
+  stops on any other sizes. Skipping it puts gaze about 2.3% too close to the image centre, which changed SmolVLM's fovea cell on 39 of
+  1,738 frames. With it, all 1,738 windows matched the original text on the 12 videos. Context section 8's `rescale(..., 1408 / 2880)` has no
+  offset, so it wouldn't fix this. **Limit:** this is proven on those 12 AEA videos only. No Nymeria VRS is on the cluster to compare with,
+  so Nymeria relies on its 1408 px MP4s using the same crop, and a 2% scale can't be seen on the gaze sheets.
 - **Nymeria's yaw:** its CSV comes from a newer gaze model with a left and a right yaw and no single yaw. The combined yaw comes from
   `mps.read_eyegaze(...).yaw`, and the plain mean is saved only to compare. AEA's single yaw is read straight from the CSV.
 - **All 6 IMU columns are written.** With only the 3 gyro columns, `_gyro_at_steps` returns `None` and head speed silently becomes 0.
@@ -513,7 +523,7 @@ checks it, and then scores SmolVLM.
 | `.../score_gate.py`, `.../check_gate.py` | new: gate predictions, and check 3 |
 | `.../compare_records.py` | new: are two runs' answers the same? |
 | `accuracy_tables/hpc/config.newvideos.yaml`, 6 `newvideos_*.SBATCH` files | new: Nymeria paths and the jobs |
-| `src/common/gaze_geometry.py` | `calibration_projector` split out of `make_gaze_projector`, so a calibration JSON can use the same code |
+| `src/common/gaze_geometry.py` | `calibration_projector` split out of `make_gaze_projector`, so a calibration JSON can use the same code, with the camera matched to the video |
 | `accuracy_tables/hpc/common.sh` | new `run_in_aria` |
 | `vlmeval/smolvlm_fovea.py`, `accuracy_tables/models.py`, `run.py`, `common.py` | loading frames on threads, off by default |
 | `accuracy_tables/run.py`, `summarize.py`, `compare_budget.py` | report frames with no gaze |
@@ -555,7 +565,8 @@ myquota                                         # the frames need about 70 to 80
 sbatch accuracy_tables/hpc/newvideos_rebuild.SBATCH
 ```
 
-The log should show the group sizes, the tests passing, and end with `REBUILD MATCHES`. Each video is compared on pairs, the 4 count
+This job always rebuilds the 12 videos, so it replaces the rows from the failed run. The log should show the group sizes, the tests passing,
+and end with `REBUILD MATCHES`. Each video is compared on pairs, the 4 count
 columns, `gaze_rates_window`, `imu_window`, `gaze_xy_window` and predicted classes, using the same model as its existing predictions. Show the
 user `compare_rows.csv`'s table either way. **On `REBUILD DIFFERS`, stop and tell the user. Don't adjust a tolerance to make it pass.**
 

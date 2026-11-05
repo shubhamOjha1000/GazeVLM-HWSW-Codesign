@@ -3,6 +3,8 @@ projectaria-tools. The rows go through the real label, gaze and gate code, with 
 import csv
 import json
 import os
+import sys
+import types
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -19,6 +21,7 @@ from accuracy_tables.hpc.newvideos import (build_rows, check_gate, compare_recor
 from eyehead import features
 from eyehead import policy as pol
 from eyehead.infer import load_ckpt
+from src.common import gaze_geometry as gg
 from src.loss1.dataset import parse_rates
 from vlmeval import budget_rule as br
 from vlmeval import egoev
@@ -95,6 +98,67 @@ def test_align_yaw_matches_by_time_and_marks_missing_rows():
 def test_project_all_skips_samples_without_angles():
     x, y, oof = project_gaze.project_all(np.array([0.1, np.nan]), np.array([0.2, 0.2]), lambda a, b: (a + 1, b + 1, True))
     assert x[0] == 1.1 and y[0] == 1.2 and oof.tolist() == [True, False] and np.isnan(x[1]) and np.isnan(y[1])
+
+
+# ---------------------------------------------------------------------------- matching the camera to the video
+class RecordingCamera:
+    def __init__(self, size):
+        self.size, self.calls = size, []
+
+    def get_image_size(self):
+        return np.array(self.size)
+
+    def rescale(self, new_resolution, scale, origin_offset):
+        self.calls.append((list(new_resolution), scale, list(origin_offset)))
+        return "rescaled"
+
+
+def test_a_sensor_calibration_gets_arias_crop_rule_for_a_1408_video():
+    cam = RecordingCamera((2880, 2880))
+    assert project_gaze.video_calibration(cam, 1408) == "rescaled"
+    assert cam.calls == [([1408, 1408], 0.5, [32.0, 32.0])]                        # a scale alone would not match the VRS
+
+
+def test_a_calibration_already_at_the_video_size_is_left_alone():
+    cam = RecordingCamera((1408, 1408))
+    assert project_gaze.video_calibration(cam, 1408) is cam and cam.calls == []
+
+
+@pytest.mark.parametrize("size,video", [((2880, 2880), 704), ((1000, 1000), 1408), ((2880, 1408), 1408)])
+def test_any_other_size_pair_stops(size, video):
+    with pytest.raises(ValueError, match="no crop rule"):
+        project_gaze.video_calibration(RecordingCamera(size), video)
+
+
+def test_video_size_reads_a_square_video_and_stops_otherwise():
+    assert project_gaze.video_size(dict(orig_w=1408, orig_h=1408)) == 1408
+    for meta in (dict(orig_w=1408, orig_h=704), dict(orig_w=None, orig_h=None), {}):
+        with pytest.raises(ValueError, match="square"):
+            project_gaze.video_size(meta)
+
+
+class Identity:
+    """Stands in for a transform: its inverse is itself, and applying it changes nothing."""
+
+    def inverse(self):
+        return self
+
+    def __matmul__(self, other):
+        return other
+
+
+def test_the_projector_uses_the_camera_it_is_given_and_its_size(monkeypatch):
+    mps = types.ModuleType("projectaria_tools.core.mps")
+    mps.get_eyegaze_point_at_depth = lambda yaw, pitch, depth: np.zeros(3)
+    monkeypatch.setitem(sys.modules, "projectaria_tools", types.ModuleType("projectaria_tools"))
+    monkeypatch.setitem(sys.modules, "projectaria_tools.core", types.ModuleType("projectaria_tools.core"))
+    monkeypatch.setitem(sys.modules, "projectaria_tools.core.mps", mps)
+    cam = SimpleNamespace(get_transform_device_camera=Identity, get_image_size=lambda: np.array([1408, 1408]),
+                          project=lambda point: np.array([352.0, 704.0]))
+    device = SimpleNamespace(get_camera_calib=lambda label: pytest.fail("used the device's camera, not the one given"),
+                             get_transform_device_cpf=Identity)
+    project = gg.calibration_projector(device, cam_calib=cam)
+    assert project(0.0, 0.0) == (0.5, 0.25, False)                                 # (352, 704) / 1408, then upright
 
 
 def test_lookup_returns_what_was_saved_for_numpy_scalars():

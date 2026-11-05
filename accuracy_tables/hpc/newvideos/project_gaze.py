@@ -6,6 +6,10 @@ Writes newvideos/gaze/<video>.npz, which build_rows.py reads in the base environ
 (src.dataprep.build_feature_csv and src.common.aria_io.load_gaze_raw): depth 1 m, the upright frame, coordinates in [0, 1],
 times rebased to the stream's first sample. No VRS was kept, so the calibration comes from calibration.json.
 
+calibration.json describes the full 2880 px sensor, while the videos are 1408 px. The builder never saw this, because Aria's VRS
+loader crops and scales the camera to the stream's resolution before returning it. The JSON loader doesn't, so video_calibration
+applies the same rule. Skipping it leaves gaze about 2.3% too close to the image centre.
+
 AEA's general_eye_gaze.csv has one yaw. Nymeria's comes from a newer gaze model with a left and a right yaw, so its combined
 yaw is taken from Aria's own reader. The plain mean is saved next to it, only so that the two can be compared.
 """
@@ -19,6 +23,28 @@ from accuracy_tables.hpc.newvideos import paths
 from src.common import gaze_geometry as gg
 
 DEPTH_M, ROTATE_CW90 = 1.0, True          # configs/temporal_analysis.yaml, which a test checks
+SENSOR_SIZE, VIDEO_SIZE = 2880, 1408      # Aria's only rule to 1408 px on these glasses, from 2880 px:
+CROP_SCALE, CROP_OFFSET = 0.5, 32.0       # core/calibration/loader/AriaCalibRescaleAndCrop.cpp in projectaria_tools
+
+
+def video_size(meta):
+    """The source video's side in px, from its frames' meta.json. Only square videos exist in this data."""
+    w, h = meta.get("orig_w"), meta.get("orig_h")
+    if not w or w != h:
+        raise ValueError(f"expected a square video in meta.json, got orig_w={w}, orig_h={h}")
+    return int(w)
+
+
+def video_calibration(cam, size):
+    """The RGB camera matched to a video of this size, as Aria's VRS loader returns it. Stops on any other size pair,
+    because a wrong rule would move the gaze with no error. Aria's rescale also applies its half-pixel convention, so
+    this calls it rather than repeating the arithmetic."""
+    have = tuple(int(v) for v in cam.get_image_size())
+    if have == (size, size):
+        return cam
+    if have != (SENSOR_SIZE, SENSOR_SIZE) or size != VIDEO_SIZE:
+        raise ValueError(f"no crop rule from a {have} calibration to a {size} px video")
+    return cam.rescale(np.array([VIDEO_SIZE, VIDEO_SIZE], dtype=int), CROP_SCALE, np.array([CROP_OFFSET, CROP_OFFSET]))
 
 
 def read_gaze_csv(path):
@@ -57,10 +83,10 @@ def project_all(yaw, pitch, project):
     return x, y, oof
 
 
-def project_video(video):
+def project_video(video, force=False):
     from projectaria_tools.core import calibration, mps
     out = paths.gaze_npz(video)
-    if os.path.exists(out):
+    if os.path.exists(out) and not force:
         print(f"   {video}: gaze already projected", flush=True)
         return
     d = paths.video_dir(video)
@@ -75,7 +101,8 @@ def project_video(video):
         device_calib = calibration.device_calibration_from_json_string(f.read())
     if device_calib is None:
         raise ValueError(f"{video}: calibration.json did not parse")
-    project = gg.calibration_projector(device_calib, depth_m=DEPTH_M, rotate_cw90=ROTATE_CW90)
+    cam = video_calibration(device_calib.get_camera_calib("camera-rgb"), video_size(paths.frame_meta(video)))
+    project = gg.calibration_projector(device_calib, depth_m=DEPTH_M, rotate_cw90=ROTATE_CW90, cam_calib=cam)
     x, y, oof = project_all(yaw, g["pitch"], project)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     tmp = out + ".tmp.npz"
@@ -90,9 +117,10 @@ def project_video(video):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     paths.add_video_args(ap)
+    ap.add_argument("--force", action="store_true", help="project again even if the video's result exists")
     a = ap.parse_args()
     for v in paths.chosen_videos(a):
-        project_video(v)
+        project_video(v, a.force)
 
 
 if __name__ == "__main__":

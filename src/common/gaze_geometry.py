@@ -146,9 +146,10 @@ def native_to_upright_cw90(x, y):
     return 1.0 - y, x
 
 
-def calibration_projector(device_calib, stream_label="camera-rgb", depth_m=1.0, rotate_cw90=True):
+def calibration_projector(device_calib, stream_label="camera-rgb", depth_m=1.0, rotate_cw90=True, cam_calib=None):
     """fn(yaw, pitch) -> (x_norm, y_norm, oof) from a device calibration, however it was loaded (from a VRS, or from
-    the JSON saved out of one).
+    the JSON saved out of one). The VRS loader has already matched the camera to the stream's resolution, but the JSON
+    hasn't, so a caller using the JSON passes the matched camera as cam_calib.
 
     Transform chain copied from Meta's own AEA quickstart tutorial (`draw_eye_gaze`), which is the reference
     implementation:
@@ -161,7 +162,8 @@ def calibration_projector(device_calib, stream_label="camera-rgb", depth_m=1.0, 
     get_transform_cpf_sensor() shortcut, which can return nominal CAD values instead.
     """
     from projectaria_tools.core.mps import get_eyegaze_point_at_depth
-    cam_calib = device_calib.get_camera_calib(stream_label)
+    if cam_calib is None:
+        cam_calib = device_calib.get_camera_calib(stream_label)
     T_device_cpf = device_calib.get_transform_device_cpf()
     T_device_cam = cam_calib.get_transform_device_camera()
     W, H = cam_calib.get_image_size()
