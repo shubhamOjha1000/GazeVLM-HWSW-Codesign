@@ -196,6 +196,51 @@ def test_pair_rows_counts_and_formats():
     assert np.isfinite(r["imu_gyro_mag_mean"]) and r["quad"] == build_rows.PLACEHOLDER_QUAD
 
 
+# ---------------------------------------------------------------------------- 30 Hz gaze
+@pytest.mark.parametrize("t_us,hz,step", [(np.arange(100) * 1e5, 10, 1), (np.arange(300) * 1e6 / 30, 30, 3),
+                                          (np.r_[np.arange(100) * 1e5, 5e7], 10, 1)])       # one long gap changes nothing
+def test_gate_gaze_step_from_the_timestamps(t_us, hz, step):
+    got_hz, got_step = build_rows.gate_gaze_step(t_us)
+    assert got_hz == pytest.approx(hz) and got_step == step
+
+
+@pytest.mark.parametrize("hz", [20, 60, 5])
+def test_a_gaze_rate_with_no_step_to_10_hz_stops(hz):
+    with pytest.raises(ValueError, match="no step"):
+        build_rows.gate_gaze_step(np.arange(100) * 1e6 / hz)
+
+
+def test_30_hz_gaze_shows_the_gate_the_whole_window():
+    """The eyes move only in the second half of the first window. With every sample, the gate's 9 steps end at 0.3 s and
+    miss it. With every third, they span the window at the 10 Hz step the gate trained on."""
+    f_ts, g_ts = np.arange(3) * 1e6, np.arange(60) * 1e6 / 30
+    yaw, pitch = np.where(g_ts < 0.5e6, 0.0, (g_ts - 0.5e6) / 1e6), np.zeros(60)
+    imu_ts, imu_arr = np.arange(2000) * 1e3, np.zeros((2000, 6), dtype=np.float32)
+    project = lambda y, p: (0.5, 0.5, False)
+    every = build_rows.pair_rows("v", f_ts, g_ts, yaw, pitch, project, imu_ts, imu_arr)
+    third = build_rows.pair_rows("v", f_ts, g_ts, yaw, pitch, project, imu_ts, imu_arr, gate_step=3)
+    assert every[0]["n_velocities"] == 29 and third[0]["n_velocities"] == 9
+    assert third[0]["n_gaze_in_gap"] == 30 and third[0]["gaze_xy_window"] == every[0]["gaze_xy_window"]    # the fovea's input
+    E_every = features.raw_signals(pd.DataFrame(every))[0]
+    E_third = features.raw_signals(pd.DataFrame(third))[0]
+    assert not E_every[0].any() and E_third[0, 8, 0] == pytest.approx(1.0, abs=1e-3)
+
+
+def test_only_a_video_whose_step_changed_is_built_again(tmp_path, monkeypatch):
+    monkeypatch.setenv("GV_ROOT", str(tmp_path))
+    os.makedirs(os.path.dirname(paths.rows_csv("v")))
+    assert not build_rows.already_built("v", 1)                                    # nothing there yet
+    with open(paths.rows_csv("v"), "w") as f:
+        f.write("x\n")
+    assert not build_rows.already_built("v", 1)                                    # rows without their stats: interrupted
+    with open(paths.rows_stats("v"), "w") as f:
+        json.dump(dict(frames=2), f)                                               # built before the step was recorded
+    assert build_rows.already_built("v", 1) and not build_rows.already_built("v", 3)
+    with open(paths.rows_stats("v"), "w") as f:
+        json.dump(dict(gate_gaze_step=3), f)
+    assert build_rows.already_built("v", 3) and not build_rows.already_built("v", 1)
+
+
 @pytest.fixture
 def merged(tmp_path, monkeypatch):
     """Two videos' rows merged into a group's fold files -> the test.csv path."""

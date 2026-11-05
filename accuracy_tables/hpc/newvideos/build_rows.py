@@ -11,6 +11,11 @@ It follows src.dataprep.build_feature_csv and calls the same window functions. W
 
 Each stream is rebased to its own first sample and frames sit at i / native fps, as the gate's training data was built.
 timing.json isn't used.
+
+The gate trained on 10 Hz gaze and reads only the first 9 steps of a window (eyehead.features.raw_signals), while its gyro is
+spread over the whole window. Some Nymeria videos have 30 Hz gaze, which would show it only the first 0.3 s of each second,
+misaligned with the gyro. So gaze_rates_window uses every third sample on those videos, with no averaging, so that each sample
+stays an ordinary gaze estimate. gaze_xy_window, which only the fovea reads, keeps every sample.
 """
 import argparse
 import json
@@ -25,6 +30,26 @@ from src.common import gaze_geometry as gg
 
 IMU_HZ = 10.0
 PLACEHOLDER_QUAD = 3
+GATE_GAZE_HZ = 10
+GATE_GAZE_STEPS = (1, 3)      # the gaze rates in this data are 10 and 30 Hz; any other stops the build
+
+
+def gate_gaze_step(t_us):
+    """(gaze rate in Hz, every how many samples the gate's rates use). Stops on a rate with no whole step to 10 Hz."""
+    hz = 1e6 / float(np.median(np.diff(t_us)))
+    for step in GATE_GAZE_STEPS:
+        if abs(hz / step - GATE_GAZE_HZ) <= 1:
+            return hz, step
+    raise ValueError(f"gaze at {hz:.1f} Hz: no step in {GATE_GAZE_STEPS} gives {GATE_GAZE_HZ} Hz")
+
+
+def already_built(video, step):
+    """The rows exist and used this step. Rows from before the step was recorded count as step 1, so a 30 Hz video
+    built then is built again, and a 10 Hz one isn't."""
+    if not os.path.exists(paths.rows_csv(video)) or not os.path.exists(paths.rows_stats(video)):
+        return False
+    with open(paths.rows_stats(video)) as f:
+        return json.load(f).get("gate_gaze_step", 1) == step
 
 
 def feature_name(video, k):
@@ -49,12 +74,14 @@ def load_imu(path):
     return ts - ts[0], np.concatenate([accel, gyro], axis=1).astype(np.float32)
 
 
-def pair_rows(video, f_ts, g_ts, g_yaw, g_pit, project, imu_ts, imu_arr, imu_hz=IMU_HZ):
-    """One dict per consecutive frame pair, formatted as in src.dataprep.build_feature_csv."""
+def pair_rows(video, f_ts, g_ts, g_yaw, g_pit, project, imu_ts, imu_arr, imu_hz=IMU_HZ, gate_step=1):
+    """One dict per consecutive frame pair, formatted as in src.dataprep.build_feature_csv. The gate's rates use every
+    gate_step-th gaze sample; gaze_xy_window uses all of them."""
+    rate_ts, rate_yaw, rate_pit = g_ts[::gate_step], g_yaw[::gate_step], g_pit[::gate_step]
     rows = []
     for i in range(1, len(f_ts)):
         t0, t1 = f_ts[i - 1], f_ts[i]
-        rat = gg.window_gaze_rates(g_ts, g_yaw, g_pit, t0, t1)
+        rat = gg.window_gaze_rates(rate_ts, rate_yaw, rate_pit, t0, t1)
         win = gg.window_gaze_samples(g_ts, g_yaw, g_pit, t0, t1, project=project)
         n_bins = int(round(imu_hz * (t1 - t0) / 1e6))
         iw = io.window_imu_binned(imu_ts, imu_arr, t0, t1, n_bins)
@@ -86,27 +113,28 @@ def pair_rows(video, f_ts, g_ts, g_yaw, g_pit, project, imu_ts, imu_arr, imu_hz=
 
 def build_video(video, force=False):
     out = paths.rows_csv(video)
-    if os.path.exists(out) and not force:
+    with np.load(paths.gaze_npz(video)) as z:
+        g = {k: z[k] for k in ("t_us", "yaw", "pitch", "x", "y", "oof")}
+    gaze_hz, step = gate_gaze_step(g["t_us"])
+    if already_built(video, step) and not force:
         print(f"   {video}: rows already built", flush=True)
         return
     meta = paths.frame_meta(video)
     f_ts = np.asarray(meta["ts"], dtype=np.float64) * 1e6
     if len(f_ts) < 2:
         raise ValueError(f"{video}: {len(f_ts)} frames, so no pairs")
-    with np.load(paths.gaze_npz(video)) as z:
-        g = {k: z[k] for k in ("t_us", "yaw", "pitch", "x", "y", "oof")}
     imu_ts, imu_arr = load_imu(os.path.join(paths.video_dir(video), "imu.npz"))
     project = lookup_projector(g["yaw"], g["pitch"], g["x"], g["y"], g["oof"])
-    rows = pair_rows(video, f_ts, g["t_us"], g["yaw"], g["pitch"], project, imu_ts, imu_arr)
+    rows = pair_rows(video, f_ts, g["t_us"], g["yaw"], g["pitch"], project, imu_ts, imu_arr, gate_step=step)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     tmp = out + ".tmp"
     pd.DataFrame(rows).to_csv(tmp, index=False)
     os.replace(tmp, out)
     stats = dict(video=video, frames=len(f_ts), frames_span_s=float(f_ts[-1] / 1e6), gaze_span_s=float(g["t_us"][-1] / 1e6),
-                 imu_span_s=float(imu_ts[-1] / 1e6) if imu_ts is not None else None)
+                 imu_span_s=float(imu_ts[-1] / 1e6) if imu_ts is not None else None, gaze_hz=gaze_hz, gate_gaze_step=step)
     with open(paths.rows_stats(video), "w") as f:
         json.dump(stats, f)
-    print(f"   {video}: {len(rows)} pairs; spans in s: frames {stats['frames_span_s']:.0f}, gaze {stats['gaze_span_s']:.0f}, "
+    print(f"   {video}: {len(rows)} pairs; gaze {gaze_hz:.1f} Hz, gate uses every {step}; spans in s: frames {stats['frames_span_s']:.0f}, gaze {stats['gaze_span_s']:.0f}, "
           f"IMU {stats['imu_span_s'] if stats['imu_span_s'] is None else round(stats['imu_span_s'])}", flush=True)
 
 

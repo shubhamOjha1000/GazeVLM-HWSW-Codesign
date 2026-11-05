@@ -448,9 +448,9 @@ Rerunning continues where it stopped.
 
 **Don't submit any job until the user approves it, one step at a time.** Three checks must pass before any VLM job on Nymeria.
 
-**Status:** step 1 ran once at commit `6682978` and stopped at `REBUILD DIFFERS`, on `gaze_xy_window` only. The cause was a missing
-crop of the calibration, now fixed (see "How the gate data is built"). The fix was tested on Torch with a read-only script, and the
-job itself must still pass, so rerun step 1. Nothing after step 1 has run.
+**Status:** step 1 first stopped at `REBUILD DIFFERS`, from a missing crop of the calibration, now fixed. Step 2 then ran at commit
+`539b854` and found a 30 Hz gaze problem, also fixed (see "How the gate data is built"). Its `check_gate` table isn't valid, because one
+pilot video's predictions came from misread gaze. Rerun step 1, then step 2, before step 3.
 
 Where this section differs from context section 13, this section is right: 13 came partly from web summaries of
 the code, and this was checked against the code.
@@ -485,6 +485,10 @@ checks it, and then scores SmolVLM.
   1,738 frames. With it, all 1,738 windows matched the original text on the 12 videos. Context section 8's `rescale(..., 1408 / 2880)` has no
   offset, so it wouldn't fix this. **Limit:** this is proven on those 12 AEA videos only. No Nymeria VRS is on the cluster to compare with,
   so Nymeria relies on its 1408 px MP4s using the same crop, and a 2% scale can't be seen on the gaze sheets.
+- **30 Hz gaze:** 34 of the 325 Nymeria videos have 30 Hz gaze, and everything else has 10 Hz. The gate trained on 10 Hz and reads only the
+  first 9 steps of a window, while its gyro is spread over the whole window, so at 30 Hz it would see only the first 0.3 s of each second,
+  misaligned with the gyro. On those videos `gaze_rates_window` uses every third sample, with no averaging. Any other rate stops the build.
+  `gaze_xy_window`, which only the fovea reads, keeps every sample, so `n_gaze_in_gap` is about 30 there while `n_velocities` is about 9.
 - **Nymeria's yaw:** its CSV comes from a newer gaze model with a left and a right yaw and no single yaw. The combined yaw comes from
   `mps.read_eyegaze(...).yaw`, and the plain mean is saved only to compare. AEA's single yaw is read straight from the CSV.
 - **All 6 IMU columns are written.** With only the 3 gyro columns, `_gyro_at_steps` returns `None` and head speed silently becomes 0.
@@ -576,6 +580,8 @@ user `compare_rows.csv`'s table either way. **On `REBUILD DIFFERS`, stop and tel
 sbatch accuracy_tables/hpc/newvideos_pilot.SBATCH
 ```
 
+A rerun skips finished frames and gaze, and rebuilds rows only for a video whose gaze step changed, which on the pilot is the one 30 Hz
+video. Each build line in the log gives the gaze rate and step. It rescores all 5 pilot videos, because their predictions share one file.
 Show the user the yaw lines, the `check_gate` table and the sheet paths in `newvideos/check_gaze/`. **The user looks at the sheets by eye
 and must approve them before step 3:** the red circle is where the fovea goes, and it should sit where the person is plausibly looking
 in every video, with the control video as the reference. If a large yaw difference appears, tell the user.
