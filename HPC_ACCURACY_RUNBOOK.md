@@ -40,7 +40,7 @@ them. Don't extend to them without asking the user.
 
 `test` = the 4 locked test videos (204 questions). `all` = all 12 (834 questions).
 
-| Model key | Hugging Face id | Stock tokens per frame | Status in `accuracy_tables/` on Colab |
+| Model key | Hugging Face id | Stock tokens per frame | Earlier runs |
 |---|---|---|---|
 | `qwen2.5` | `Qwen/Qwen2.5-VL-3B-Instruct` | 256 | full run on `test` |
 | `internvl` | `OpenGVLab/InternVL3_5-4B-HF` | 256 | full run on `test`; **not run on Torch for now** |
@@ -90,11 +90,11 @@ All are in `accuracy_tables/hpc/`. Submit every one **from the repository root**
 | `config.torch.yaml` | data paths; everything else keeps the protocol defaults | |
 | `install_env.SBATCH` | installs the packages into the overlay (`:rw --fakeroot`) | no |
 | `download_models.SBATCH` | downloads the `MODELS` list into `$HF_HOME` | no |
-| `prepare_data.SBATCH` | unit tests, extracts the frames from `$EGO_ROOT`, checks the data against the Colab numbers | no |
+| `prepare_data.SBATCH` | unit tests, extracts the frames from `$EGO_ROOT`, checks the question counts | no |
 | `smoke.SBATCH` | every method on every model in `MODELS` on 1 question | yes |
 | `run_model.SBATCH <model> <test\|all>` | one model: Uniform K, Blind, Ours; calibration; the 8 baselines | yes |
 | `submit_all.sh <test\|all> [models]` | one `run_model` job per model, then a summary job | no |
-| `summarize.SBATCH <test\|all>` | writes `summary.csv`; on `test` also compares with Colab | no |
+| `summarize.SBATCH <test\|all>` | writes `summary.csv` | no |
 
 Paths default to `/scratch/$USER/...`. Set `EGO_ROOT`, `GV_ROOT`, `HF_HOME`, `OVERLAY` or `IMAGE` before `sbatch` to
 override them. The `#SBATCH --output` lines assume `/scratch/<user>/GazeVLM/logs`.
@@ -110,7 +110,6 @@ The GPU jobs set `HF_HUB_OFFLINE=1`, so they never need internet. Nothing writes
 | Gate CSVs | Drive `GazeVLM/folds/` | which frames exist, and one gaze point per frame |
 | Gate predictions | Drive `GazeVLM/vlm/egoeverything/oof_preds_full.csv` | which frames the gate sends |
 | Gate weights | this repo: `accuracy_tables/hpc/eyehead_weights/fold1.pt` ... `fold5.pt`, copied to scratch in step 2 | recomputing the predictions if that CSV is missing |
-| Colab results | Drive `GazeVLM/accuracy_tables/{qwen25,smolvlm}_matched/summary.csv` | checking this cluster against Colab |
 
 The accuracy run doesn't read the cluster's `general_eye_gaze.csv`, `imu.npz`, `calibration.json` or `timing.json`: the gaze
 and IMU inputs are already inside the gate CSVs and predictions. So the open questions in context section 9 (bounding
@@ -125,7 +124,6 @@ Layout on the cluster:
   data/folds/train_val_fold1.csv ... train_val_fold5.csv, test.csv
   data/runs/eyehead/fold1.pt ... fold5.pt
   data/vlm/egoeverything/oof_preds_full.csv
-  data/colab_reference/{qwen25,smolvlm}_matched/summary.csv
   frames_1344/<video>/frame_00000.jpg ..., meta.json      <- written by prepare_data
   results/smoke/   results/hpc_test/   results/hpc_all/
   logs/
@@ -139,12 +137,8 @@ Layout on the cluster:
 - **The questions file.** A question's `qid` is its position in the file, and resuming and comparing depend on it.
 
 **How frames are made.** `prepare_data` calls `vlmeval.frames.extract_1fps`: every 20th frame of the 20 fps mp4, long side
-1344 px, JPEG quality 92, `frame_%05d.jpg` plus `meta.json`. That is the same rule as the Colab frames. The code doesn't
+1344 px, JPEG quality 92, `frame_%05d.jpg` plus `meta.json`. The code doesn't
 look for an mp4 or tar once `<video>/meta.json` exists.
-
-**Fallback:** if step 6 shows these frames differ from Colab's, copy Drive's `vlm/egoeverything/frames_tar/*_px1344.tar` to
-`$GV_ROOT/frames_tar/`, delete `$GV_ROOT/frames_1344/`, and rerun `prepare_data.SBATCH`. It unpacks a video's tar when there
-is one, instead of extracting from the mp4.
 
 ## 5. Steps
 
@@ -170,12 +164,10 @@ ls -l /scratch/$USER/GazeVLM/data/runs/eyehead/      # 5 files, fold1.pt ... fol
 
 **The user places the Drive files by hand, so don't copy them yourself.** The run needs `data/folds/` and
 `data/vlm/egoeverything/oof_preds_full.csv` at the paths in section 4, and step 4 stops with a clear message if they are
-missing. `data/colab_reference/` is optional: without it the Colab comparison is skipped, and the user checks the results by
-hand.
+missing.
 
 **Step 3: install and download.** No other job may have the overlay open during the install. The install keeps the overlay's
-torch 2.15 and pins `transformers==5.20.1`. Colab used torch 2.11 on Python 3.13, so this version difference is a deviation
-to report. The package list comes from reading the imports and is untested in a clean environment: if an `ImportError` names
+torch 2.15 and pins `transformers==5.20.1`. The package list comes from reading the imports and is untested in a clean environment: if an `ImportError` names
 something else, install it and report it.
 
 ```bash
@@ -199,13 +191,7 @@ If these nodes have no internet, run the same steps where there is some (context
 sbatch accuracy_tables/hpc/prepare_data.SBATCH      # log ends with "data check OK"
 ```
 
-It stops unless the `test` block matches the Colab runs exactly:
-
-```
-204 questions on 4 videos (4 test videos)
-gate frames per video: mean 41.8, gaze missing on 4 of 167
-uniform frames per video: mean 86.8
-```
+It stops if the question counts are wrong: 834 on `all`, 204 on `test`.
 
 **Step 5: smoke test.**
 
@@ -213,7 +199,7 @@ uniform frames per video: mean 86.8
 sbatch accuracy_tables/hpc/smoke.SBATCH             # log ends with "=== 0 failed of 44" (11 methods x 4 models)
 ```
 
-On Colab this took a few minutes per model.
+Expect a few minutes per model.
 
 **Step 6: the 4 test videos, on the 4 models.**
 
@@ -222,8 +208,8 @@ bash accuracy_tables/hpc/submit_all.sh test
 squeue -u $USER
 ```
 
-Models run in parallel. When they end, the summary job writes `results/hpc_test/summary.csv` and compares it with Colab.
-Check section 6 before going on.
+Models run in parallel. When they end, the summary job writes `results/hpc_test/summary.csv`. Check `n` for every condition
+(section 6) and show the user the table before going on.
 
 **Step 7: all 12 videos.** Ask the user first, then:
 
@@ -239,35 +225,11 @@ questions aren't scored again for those rows.
 Use it after a timeout or a preemption that didn't requeue, naming the models if only some are unfinished. To redo a row,
 delete its `.jsonl`.
 
-**Time.** `run_model` asks for 8 hours. The only measured full run: Qwen2.5 took about 35 min on Colab's A100, all rows, 4 test
+**Time.** `run_model` asks for 8 hours. The only measured full run: Qwen2.5 took about 35 min on an A100, all rows, 4 test
 videos. Scaling by question count, Qwen-class models should take about 2 to 3 hours on all 12 videos (an estimate). Phi will be
 the slowest, at up to about 73,000 visual tokens per question at Uniform K. Other durations haven't been measured.
 
-## 6. Check against Colab
-
-On `test`, if `data/colab_reference/` exists, `summarize.SBATCH` runs `compare_reference.py`, which joins on (model, condition)
-for `qwen2.5` and `smolvlm`. Otherwise it is skipped and the user compares by hand, using the same criteria.
-`qwen3` and `phi` have no reference. A reference model with no results yet is listed and not compared.
-
-- **Conditions and counts must match exactly.** The condition names hold the calibrated knobs, and question, frame and token
-  counts don't depend on the GPU. A missing condition or a different count means the frames, gaze or gate data differ, and
-  the job exits with `DIFFERS`.
-- **PruneVid and FastVID are shown but don't fail the check.** Their plans come from the encoder's output, so a different GPU
-  or torch can move them a little.
-- **Accuracy may move by a question or two** (0.49 points per question). Report anything larger. If several rows move a lot
-  while the counts match, suspect the frames and try the fallback in section 4.
-
-Expected counts per question on `test`:
-
-| Model | Uniform frames | Uniform tokens | Ours frames | Ours tokens, smallest to largest setting |
-|---|---|---|---|---|
-| `qwen2.5` (and `internvl` if it comes back) | 89.83 | 22997.33 | 47.31 | 2272.80, 4530.09, 7117.55, 9639.64 |
-| `smolvlm` | 63.17 | 5116.50 | 47.31 | 804.33, 1561.35, 2318.37, 3075.39 |
-
-The 95% intervals span roughly 20 points on 204 questions, so differences between methods aren't significant. Don't claim a
-winner from the `test` table.
-
-## 7. Known behaviour and pitfalls
+## 6. Known behaviour and pitfalls
 
 **Cluster**
 
@@ -288,6 +250,8 @@ winner from the `test` table.
 - **Two jobs must never write the same files.** `run_model` uses `--dependency=singleton` on the job name, which
   `submit_all.sh` sets per model and video set. Keep that naming if you submit by hand.
 - **Back up** `results/` to long-term storage. `/scratch` has no backups (context section 10).
+- **Don't claim a winner from the `test` table.** The 95% intervals span roughly 20 points on 204 questions, so differences
+  between methods aren't significant.
 
 **Parity**
 
@@ -309,11 +273,10 @@ winner from the `test` table.
 - A job stuck on a `[y/N] trust_remote_code` prompt means something other than the repo's loader is loading a Phi tokenizer. Keep
   `run.phi_remote_parity: false`.
 
-## 8. What to report back
+## 7. What to report back
 
 Keep it short:
 
 1. GPU model, Python, torch and transformers versions, and any deviation from this file.
 2. The smoke test's last line, and each model's parity result.
 3. The `summary.csv` path, any condition with `n` below 204 or 834, and any `oom` or `nan` records.
-4. The last line of the Colab comparison if it ran, and any accuracy that differs by more than a question or two.

@@ -7,7 +7,7 @@ paths:
   oof_cache: ${data_root}/vlm/egoeverything/oof_preds_full.csv
   questions_json: ${EGO_ROOT}/Egoeverything_VQA.json
   links_json: null
-  frames_cache_dir: ${GV_ROOT}/frames_tar                        # only if the Colab tars are used instead of the cluster's mp4s
+  frames_cache_dir: ${GV_ROOT}/frames_tar                        # only if frame tars are used instead of the cluster's mp4s
   frames_local_dir: ${GV_ROOT}/frames_1344
   raw_download_dir: ${GV_ROOT}/raw
   out_dir: ${GV_ROOT}/results/default                            # the jobs pass --out-dir

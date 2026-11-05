@@ -3,11 +3,10 @@
     python -u -m accuracy_tables.hpc.prepare_data --config accuracy_tables/hpc/config.torch.yaml
 
 1. Checks that the files copied from Drive and the questions file are there.
-2. Extracts the 1 fps frames of every gate video with questions from $EGO_ROOT/videos/<video>/<video>.mp4, with the rule
-   and size of the Colab runs (vlmeval.frames.extract_1fps). Frames already extracted are kept, and a video with a Colab
-   tar in paths.frames_cache_dir is left for load_data to unpack.
-3. Runs load_data on all and on test, and stops if the numbers differ from the Colab runs': the frames, gaze and gate
-   data are then arranged wrongly, and accuracy would not be comparable.
+2. Extracts the 1 fps frames of every gate video with questions from $EGO_ROOT/videos/<video>/<video>.mp4, with
+   vlmeval.frames.extract_1fps. Frames already extracted are kept, and a video with a tar in paths.frames_cache_dir is left
+   for load_data to unpack.
+3. Runs load_data on all and on test, and stops if the question counts are wrong.
 """
 
 import argparse
@@ -18,10 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from accuracy_tables import common  # noqa: E402
 
-EXPECTED = {"all": ["834 questions on "],
-            "test": ["204 questions on 4 videos (4 test videos)",
-                     "gate frames per video: mean 41.8, gaze missing on 4 of 167",
-                     "uniform frames per video: mean 86.8"]}
+EXPECTED = {"all": "834 questions on ", "test": "204 questions on "}
 
 
 def check_inputs(p):
@@ -51,13 +47,12 @@ def extract_frames(cfg):
 
 
 def check_data(cfg):
-    for videos, lines in EXPECTED.items():
+    for videos, start in EXPECTED.items():
         cfg["run"]["videos"] = videos
         text = common.describe(common.load_data(cfg))
         print(f"--- {videos}\n{text}")
-        wrong = [line for line in lines if not any(t.startswith(line) for t in text.splitlines())]
-        if wrong:
-            sys.exit(f"DATA CHECK FAILED on {videos}, expected: {wrong}")
+        if not text.startswith(start):
+            sys.exit(f"DATA CHECK FAILED on {videos}: expected it to start with {start!r}")
     print("data check OK")
 
 

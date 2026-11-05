@@ -1,4 +1,4 @@
-"""Stops a job on a GPU the models can't run on: hardware bf16 and at least 40 GB, as on Colab's A100."""
+"""Stops a job on a GPU the models can't run on: hardware bf16 and at least 40 GB."""
 import sys
 
 import torch

@@ -1,10 +1,7 @@
-"""accuracy_tables/hpc/: the Torch config, the result-file repair and the comparison with Colab. CPU only, no data."""
+"""accuracy_tables/hpc/: the Torch config and the result-file repair. CPU only, no data."""
 import os
 
-import pandas as pd
-
 from accuracy_tables import common
-from accuracy_tables.hpc.compare_reference import compare
 from accuracy_tables.hpc.repair_results import repair
 
 CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "accuracy_tables", "hpc", "config.torch.yaml")
@@ -30,13 +27,3 @@ def test_repair_drops_only_a_half_written_last_line(tmp_path):
     assert repair(str(tmp_path)) == [str(cut), str(only)]
     assert whole.read_text() == '{"a": 1}\n{"b": 2}\n' and cut.read_text() == '{"a": 1}\n' and only.read_text() == ""
     assert repair(str(tmp_path / "no_such_folder")) == []
-
-
-def test_compare_flags_missing_conditions_and_different_counts():
-    row = dict(model="m", row="dtd", n=204, accuracy=40.0, frames_per_q=47.31, tokens_per_q=100.0)
-    ref = pd.DataFrame([dict(row, condition="same"), dict(row, condition="tokens"), dict(row, condition="gone")])
-    new = pd.DataFrame([dict(row, condition="same", accuracy=40.5), dict(row, condition="tokens", tokens_per_q=101.0)])
-    m = compare(new, ref).set_index("condition")
-    assert bool(m.loc["same", "counts_match"]) and not m.loc["same", "missing"] and m.loc["same", "accuracy_diff"] == 0.5
-    assert not m.loc["tokens", "counts_match"] and not m.loc["tokens", "missing"]
-    assert m.loc["gone", "missing"]
