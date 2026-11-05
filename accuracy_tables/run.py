@@ -270,7 +270,7 @@ def row_jobs(ad, cfg, data, rows):
             name = budget_name(b, run["policy"], label) if row == "budget" else nogate_name(b, label)
             items = common.make_items(data["qs"], frames)
             add(row, f"--- {name}: mean {np.mean([len(it['frames']) for it in items]):.1f} frames per question; frames "
-                f"per video kept, by reason: {why}", items, {name: ad.fovea_condition(setting)}, ad.score)
+                f"kept over all videos, by reason: {why}", items, {name: ad.fovea_condition(setting)}, ad.score)
             jobs[-1]["name"] = f"{row} {100 * float(b):g}%"
     return jobs
 
