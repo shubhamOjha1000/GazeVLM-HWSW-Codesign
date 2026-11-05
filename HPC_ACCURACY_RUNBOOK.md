@@ -144,6 +144,24 @@ look for an mp4 or tar once `<video>/meta.json` exists.
 
 Run in order, and wait for each job to finish and pass before the next. Logs are in `/scratch/$USER/GazeVLM/logs/`.
 
+**Job count: 14 `sbatch` jobs, 9 on GPU and 5 on CPU,** with the 4 models in `MODELS`. A job that times out or fails is
+submitted again on top of these.
+
+| Step | Job | Jobs | Runs on |
+|---|---|---|---|
+| 1. Set up | none, login node | 0 | |
+| 2. Weights on scratch | none, login node | 0 | |
+| 3. Install | `install_env.SBATCH` | 1 | CPU |
+| 3. Download the models | `download_models.SBATCH` | 1 | CPU |
+| 4. Prepare the data | `prepare_data.SBATCH` | 1 | CPU |
+| 5. Smoke test | `smoke.SBATCH` | 1 | GPU |
+| 6. The 4 test videos | `run_model.SBATCH`, one per model | 4 | GPU |
+| | `summarize.SBATCH` | 1 | CPU |
+| 7. All 12 videos | `run_model.SBATCH`, one per model | 4 | GPU |
+| | `summarize.SBATCH` | 1 | CPU |
+
+Steps 6 and 7 are one `submit_all.sh` command each, run on the login node, which submits those 5 jobs.
+
 **Step 1: set up, on the login node.**
 
 ```bash
