@@ -160,7 +160,7 @@ cd repo
 export SBATCH_ACCOUNT=<account>      # context section 10; ask the user which tier. Needed in every new login session.
 ```
 
-**Step 2: put the gate weights on scratch and copy the Drive files.** The weights are in the repo, so from the repo root:
+**Step 2: put the gate weights on scratch.** They are in the repo, so from the repo root:
 
 ```bash
 mkdir -p /scratch/$USER/GazeVLM/data/runs/eyehead
@@ -168,17 +168,10 @@ cp accuracy_tables/hpc/eyehead_weights/fold*.pt /scratch/$USER/GazeVLM/data/runs
 ls -l /scratch/$USER/GazeVLM/data/runs/eyehead/      # 5 files, fold1.pt ... fold5.pt
 ```
 
-The Drive files are small. Google authorization has to come from the user, so ask them to set up the remote, or to move the
-files another way. With an rclone remote called `<remote>`:
-
-```bash
-D=/scratch/$USER/GazeVLM/data
-rclone copy <remote>:GazeVLM/folds "$D/folds"
-rclone copy <remote>:GazeVLM/vlm/egoeverything/oof_preds_full.csv "$D/vlm/egoeverything/"
-for r in qwen25 smolvlm; do      # internvl_matched too if InternVL comes back
-    rclone copy <remote>:GazeVLM/accuracy_tables/${r}_matched/summary.csv "$D/colab_reference/${r}_matched/"
-done
-```
+**The user places the Drive files by hand, so don't copy them yourself.** The run needs `data/folds/` and
+`data/vlm/egoeverything/oof_preds_full.csv` at the paths in section 4, and step 4 stops with a clear message if they are
+missing. `data/colab_reference/` is optional: without it the Colab comparison is skipped, and the user checks the results by
+hand.
 
 **Step 3: install and download.** No other job may have the overlay open during the install. The install keeps the overlay's
 torch 2.15 and pins `transformers==5.20.1`. Colab used torch 2.11 on Python 3.13, so this version difference is a deviation
@@ -252,7 +245,8 @@ the slowest, at up to about 73,000 visual tokens per question at Uniform K. Othe
 
 ## 6. Check against Colab
 
-On `test`, `summarize.SBATCH` runs `compare_reference.py`, which joins on (model, condition) for `qwen2.5` and `smolvlm`.
+On `test`, if `data/colab_reference/` exists, `summarize.SBATCH` runs `compare_reference.py`, which joins on (model, condition)
+for `qwen2.5` and `smolvlm`. Otherwise it is skipped and the user compares by hand, using the same criteria.
 `qwen3` and `phi` have no reference. A reference model with no results yet is listed and not compared.
 
 - **Conditions and counts must match exactly.** The condition names hold the calibrated knobs, and question, frame and token
@@ -322,4 +316,4 @@ Keep it short:
 1. GPU model, Python, torch and transformers versions, and any deviation from this file.
 2. The smoke test's last line, and each model's parity result.
 3. The `summary.csv` path, any condition with `n` below 204 or 834, and any `oom` or `nan` records.
-4. The last line of the Colab comparison, and any accuracy that differs by more than a question or two.
+4. The last line of the Colab comparison if it ran, and any accuracy that differs by more than a question or two.
