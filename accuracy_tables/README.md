@@ -42,9 +42,12 @@ The models (keys used everywhere in this folder):
 | `models.py` | one adapter per VLM over its `vlmeval/*_fovea.py` module: load, parity check, stock / fovea condition, scoring, text-only prompt for Blind, its GazeVLM, StreamingTOM, DyCoke, FastVID and PruneVid backends |
 | `run.py` | command line: scores the chosen rows for the chosen models, resumably |
 | `summarize.py` | command line: accuracy, 95% interval, frames, visual tokens and token budget per row and model → `summary.csv` |
+| `compare_budget.py` | command line: the budget rule minus the no-gate control per budget, on the same questions, with a 95% interval from resampling videos |
 | `colab_accuracy_tables.ipynb` | the same steps on Colab (Google Drive paths) |
 | `hpc/` | the same steps as Slurm jobs on NYU Torch; see `../HPC_ACCURACY_RUNBOOK.md` |
 | `../tests/test_accuracy_tables.py` | CPU tests of the config, frame selection and budget code |
+| `../vlmeval/budget_rule.py` | the frame budget: the frame limit, the send reasons, the slots and the frame kept per slot |
+| `../tests/test_budget_rule.py` | CPU tests of the frame budget: the rule, the slots, the two rows, the comparison |
 | `../vlmeval/gazevlm.py` | GazeVLM: the method (heatmap, rho-mass box, token-grid mapping, thumbnail) and one backend per VLM |
 | `../tests/test_gazevlm.py` | CPU tests of GazeVLM: the box, the token layouts per model family, positions, the run loop |
 | `../vlmeval/streamingtom.py` | StreamingTOM's causal temporal reduction: saliency from the encoder's attention, the static / dynamic split, DPC-KNN merging, one backend per VLM |
@@ -437,9 +440,24 @@ Budgets: 13 and 26 tokens per frame on the 256-token models (5.1%, 10.2%), Phi-3
 only a handful of tokens; alpha and beta stay at the authors' values (no tuning on test videos). Where the
 released code leaves a choice: ties in distance are broken in raster order (theirs: numpy's default sort).
 
+## Frame budget
+
+Rows `budget` and `nogate` hold the gate's frames to a token budget, for videos long enough that the gate marks more
+frames than a low budget pays for. They run only when named in `--rows`, and `budget.fractions` sets the budgets
+(default 5%, 10%, 20%). `vlmeval/budget_rule.py` has the rule, and `../HPC_ACCURACY_RUNBOOK.md` section 8 has the reasoning.
+
+- **`budget`:** the limit is the budget x that video's Uniform K tokens / tokens per frame. If the gate's marks fit, they are
+  all sent. If not, the video is cut into that many equal slots, and each keeps one frame: settle, else refixation, else
+  pursuit, else frame 0, else the still frame nearest the slot's middle.
+- **`nogate`:** the same slots and foveation, the middle frame of each slot, always the full limit.
+
+Both use the model's smallest fovea setting, and `budget.tokens_per_frame` must give its token count (only SmolVLM2 is set).
+
 ## Results
 
 `<out_dir>/<model>/`:
+
+- `budget.jsonl`, `nogate.jsonl`: the frame budget rows, same fields as `ours.jsonl`, one condition per budget.
 
 - `uniform.jsonl`, `blind.jsonl`, `ours.jsonl`, `gazevlm.jsonl`, `streamingtom.jsonl`, `dycoke.jsonl`, `fastvid.jsonl`, `prunevid.jsonl`, `dtd.jsonl`, `avgpool.jsonl`, `gazevlm2.jsonl`: one
   JSON object per (condition, question):

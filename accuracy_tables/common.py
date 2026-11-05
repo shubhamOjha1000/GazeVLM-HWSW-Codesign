@@ -31,6 +31,9 @@ DEFAULTS = {
     "dtd": {"settings": [{"threshold": 0.96, "absolute": False}, {"threshold": 0.91, "absolute": False}]},
     "avgpool": {"budget": [0.05, 0.1]},
     "gazevlm2": {"budget": [0.05, 0.1], "alpha": 0.5, "beta": 0.5},
+    # The budget and nogate rows: token budgets, and the tokens per frame of the model's smallest fovea setting.
+    # A model that isn't listed stops with a clear error rather than using a guess.
+    "budget": {"fractions": [0.05, 0.1, 0.2], "tokens_per_frame": {"smolvlm": 17}},
 }
 GAZE_WINDOW = 1.0       # seconds of gaze before a frame: its fixation estimate and its raw trace
 REQUIRED_PATHS = ("folds_dir", "gate_ckpt_dir", "frames_cache_dir")
@@ -148,9 +151,9 @@ def _questions_and_clips(cfg):
     return qs, clips, test_videos
 
 
-def _gate_selection(cfg, clips):
-    """{video: frame numbers} sent by the gate under run.policy (held-out fold predictions for
-    training videos, the 5-fold ensemble for test videos; cached in paths.oof_cache)."""
+def _gate_labels(cfg, clips):
+    """{video: predicted label per frame pair} (held-out fold predictions for training videos, the
+    5-fold ensemble for test videos; cached in paths.oof_cache)."""
     import pandas as pd
     from vlmeval import egoev
     p = cfg["paths"]
@@ -162,7 +165,13 @@ def _gate_selection(cfg, clips):
         if p["oof_cache"]:
             os.makedirs(os.path.dirname(p["oof_cache"]), exist_ok=True)
             oof.to_csv(p["oof_cache"], index=False)
-    sel = egoev.select_conditions(clips, {"full": egoev.video_labels(clips, oof)}, main="full")
+    return egoev.video_labels(clips, oof)
+
+
+def _gate_selection(cfg, clips, labels):
+    """{video: frame numbers} sent by the gate under run.policy."""
+    from vlmeval import egoev
+    sel = egoev.select_conditions(clips, {"full": labels}, main="full")
     return sel[f"{cfg['run']['policy']}: full"]
 
 
@@ -185,14 +194,16 @@ def _frame_metas(cfg, videos):
 
 
 def load_data(cfg):
-    """dict(qs, videos, test_videos, metas, gate = {video: [frame]}, uniform = {video: [frame]})
+    """dict(qs, videos, test_videos, metas, gate = {video: [frame]}, uniform = {video: [frame]},
+    clips, labels = {video: predicted label per pair}, frame = (video, frame number) -> frame)
     with frame = dict(key=(video, frame number), path, t seconds, gaze=(u, v) or None,
     gaze_trace=[(u, v), ...] the raw gaze samples of the GAZE_WINDOW seconds before t)."""
     from vlmeval import spatial as sp
     from vlmeval.frames import frame_path
     qs, clips, test_videos = _questions_and_clips(cfg)
     videos = [c["sequence"] for c in clips]
-    sent = _gate_selection(cfg, clips)
+    labels = _gate_labels(cfg, clips)
+    sent = _gate_selection(cfg, clips, labels)
     metas = _frame_metas(cfg, videos)
 
     def frame_time(v, k):
@@ -212,7 +223,36 @@ def load_data(cfg):
 
     gate = {v: [frame(v, f) for f in sent[v] if f < metas[v]["n"]] for v in videos}
     uniform = {v: [frame(v, f) for f in uniform_indices(metas[v]["n"], cfg["run"]["K"])] for v in videos}
-    return dict(qs=qs, videos=videos, test_videos=test_videos, metas=metas, gate=gate, uniform=uniform)
+    return dict(qs=qs, videos=videos, test_videos=test_videos, metas=metas, gate=gate, uniform=uniform,
+                clips=clips, labels=labels, frame=frame)
+
+
+def budget_frames(cfg, data, key, stock_tokens, fraction, use_gate):
+    """The budget rule (use_gate) or the no-gate control at one token budget -> ({video: [frame]}, {why: frames}).
+    The budget is a share of that video's Uniform K tokens, at the model's frame cap."""
+    from vlmeval import budget_rule as br
+    per_frame = cfg["budget"]["tokens_per_frame"].get(key)
+    if not per_frame:
+        raise KeyError(f"{key}: set budget.tokens_per_frame.{key} to the measured tokens per frame of its smallest "
+                       "fovea setting")
+    cap = cfg["run"]["max_frames"].get(key)
+    frames_of, why = {}, {}
+    for c in data["clips"]:
+        v = c["sequence"]
+        if v in frames_of:
+            raise ValueError(f"{v}: more than one clip (its frame pairs don't chain), which would lose frames here")
+        fn = c["frame_no"]
+        n = int((fn < data["metas"][v]["n"]).sum())
+        full = len(cap_frames(data["uniform"][v], cap)) * stock_tokens
+        limit = br.frame_limit(fraction, full, per_frame, n, cap)
+        if use_gate:
+            kept, reasons = br.keep_frames(data["labels"][v][:n - 1], limit)
+        else:
+            kept, reasons = br.slot_middles(n, limit), [br.MIDDLE] * limit
+        frames_of[v] = [data["frame"](v, int(fn[t])) for t in kept]
+        for r in reasons:
+            why[r] = why.get(r, 0) + 1
+    return frames_of, why
 
 
 def describe(data):

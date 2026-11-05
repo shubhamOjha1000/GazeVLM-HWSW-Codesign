@@ -32,6 +32,7 @@ from accuracy_tables import common  # noqa: E402
 from accuracy_tables.models import ADAPTERS, build_messages  # noqa: E402
 
 ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke", "fastvid", "prunevid", "dtd", "avgpool", "gazevlm2")
+EXTRA_ROWS = ("budget", "nogate")      # the frame budget (vlmeval/budget_rule.py): run only when named in --rows
 BLIND = "blind (question and options only)"
 
 
@@ -85,6 +86,14 @@ def gazevlm2_name(tokens, g, k):
     """Every parameter in the name, so settings never mix in one result file."""
     return (f"GazeVLM two-view B={int(tokens)} per frame (K={k}, alpha={float(g['alpha']):g}, "
             f"beta={float(g['beta']):g}, fixation gaze)")
+
+
+def budget_name(fraction, policy, label):
+    return f"budget rule {100 * float(fraction):g}% ({policy} gate, fovea {label})"
+
+
+def nogate_name(fraction, label):
+    return f"no gate {100 * float(fraction):g}% (slot middles, fovea {label})"
 
 
 def _done(path):
@@ -251,6 +260,18 @@ def row_jobs(ad, cfg, data, rows):
         add("gazevlm2", f"--- GazeVLM (two-view): the {k} Uniform K frames, each a global and a gaze-centred view; "
             f"{tokens} tokens per frame (budgets {list(g['budget'])} of {ad.stock_tokens})", uniform_items, conds,
             lambda items, conds, path: gv2.run_questions(ad.gazevlm2_backend(), items, conds, path, build_messages))
+    for row in EXTRA_ROWS:
+        if row not in rows:
+            continue
+        setting = ad.fovea_settings(cfg["ours"])[0]          # the smallest fovea, so the budget goes to frames
+        label = ad.setting_label(setting)
+        for b in cfg["budget"]["fractions"]:
+            frames, why = common.budget_frames(cfg, data, key, ad.stock_tokens, float(b), use_gate=row == "budget")
+            name = budget_name(b, run["policy"], label) if row == "budget" else nogate_name(b, label)
+            items = common.make_items(data["qs"], frames)
+            add(row, f"--- {name}: mean {np.mean([len(it['frames']) for it in items]):.1f} frames per question; frames "
+                f"per video kept, by reason: {why}", items, {name: ad.fovea_condition(setting)}, ad.score)
+            jobs[-1]["name"] = f"{row} {100 * float(b):g}%"
     return jobs
 
 
@@ -270,7 +291,7 @@ def run_model(key, cfg, data, rows, info_extra=None, keep_going=False):
         if run["parity"]:
             info["parity"] = dict(ok=True, report=check_parity(ad, data, key))
         for job in row_jobs(ad, cfg, data, rows):
-            with _row(job["row"], status, keep_going, out(job["row"])):
+            with _row(job.get("name", job["row"]), status, keep_going, out(job["row"])):
                 print("\n" + job["msg"])
                 job["score"](job["items"], job["conds"], out(job["row"]))
     finally:
@@ -290,7 +311,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True, help="YAML config (copy config.example.yaml)")
     ap.add_argument("--model", required=True, help=f"one of {', '.join(ADAPTERS)}, a comma list, or all")
-    ap.add_argument("--rows", default=",".join(ROWS), help=f"comma list of {', '.join(ROWS)} (default: all)")
+    ap.add_argument("--rows", default=",".join(ROWS),
+                    help=f"comma list of {', '.join(ROWS + EXTRA_ROWS)} (default: all but {', '.join(EXTRA_ROWS)})")
     ap.add_argument("--videos", help="override run.videos: test, all, or a comma list of video names")
     ap.add_argument("--max-questions", type=int, help="score only the first N questions (by video, then qid)")
     ap.add_argument("--out-dir", help="override paths.out_dir (e.g. a scratch folder for a smoke test)")
@@ -308,7 +330,7 @@ def main(argv=None):
         cfg["run"]["parity"] = False
     keys = list(ADAPTERS) if a.model == "all" else [k.strip() for k in a.model.split(",")]
     rows = [r.strip() for r in a.rows.split(",")]
-    bad = [k for k in keys if k not in ADAPTERS] + [r for r in rows if r not in ROWS]
+    bad = [k for k in keys if k not in ADAPTERS] + [r for r in rows if r not in ROWS + EXTRA_ROWS]
     if bad:
         ap.error(f"unknown model(s) / row(s): {bad}")
 

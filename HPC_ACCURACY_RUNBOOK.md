@@ -7,9 +7,9 @@ the project.
 **Everything runs as Slurm jobs, not notebooks.** The Python is already command-line scripts. The job files are in
 `accuracy_tables/hpc/`, and the method detail is in `accuracy_tables/README.md`.
 
-**Nothing here has run on Torch yet.** The job files have only had a bash syntax check, and the new Python and its tests
-(`tests/test_hpc.py`) have never been executed, because Python isn't run on the machine they were written on. The tests
-run as part of step 4. Expect to fix small problems, and report what you change.
+**New task: section 8, the frame budget on SmolVLM.** Sections 1 to 7 cover the 12-video run. Section 8 hasn't run: its job
+file has only had a bash syntax check, and its Python and tests have never been executed, because Python isn't run on the
+machine they were written on. Expect to fix small problems, and report what you change.
 
 ## 1. The task
 
@@ -95,6 +95,7 @@ All are in `accuracy_tables/hpc/`. Submit every one **from the repository root**
 | `run_model.SBATCH <model> <test\|all>` | one model: Uniform K, Blind, Ours; calibration; the 8 baselines | yes |
 | `submit_all.sh <test\|all> [models]` | one `run_model` job per model, then a summary job | no |
 | `summarize.SBATCH <test\|all>` | writes `summary.csv` | no |
+| `run_budget.SBATCH <model> [questions]` | the frame budget, section 8: the budget rule and the no-gate control | yes |
 
 Paths default to `/scratch/$USER/...`. Set `EGO_ROOT`, `GV_ROOT`, `HF_HOME`, `OVERLAY` or `IMAGE` before `sbatch` to
 override them. The `#SBATCH --output` lines assume `/scratch/<user>/GazeVLM/logs`.
@@ -126,6 +127,7 @@ Layout on the cluster:
   data/vlm/egoeverything/oof_preds_full.csv
   frames_1344/<video>/frame_00000.jpg ..., meta.json      <- written by prepare_data
   results/smoke/   results/hpc_test/   results/hpc_all/
+  results/smoke_budget/   results/hpc_budget/       <- section 8
   logs/
 ```
 
@@ -298,3 +300,137 @@ Keep it short:
 1. GPU model, Python, torch and transformers versions, and any deviation from this file.
 2. The smoke test's last line, and each model's parity result.
 3. The `summary.csv` path, any condition with `n` below 204 or 834, and any `oom` or `nan` records.
+
+## 8. Next task: the frame budget on SmolVLM
+
+**Don't submit anything until the user approves it.** Don't pull this into `repo/` until the Phi job and its summary job have
+ended, because running jobs load Python from the checkout.
+
+### Why this exists
+
+Uniform K stops at K frames however long the video is, and every baseline works on those frames, so their cost doesn't grow
+with the video. The gate marks a frame every few seconds whatever the length, so its cost does. That barely matters on AEA
+videos of a few minutes. On an 18-minute Nymeria video the gate may mark several hundred frames (an estimate from AEA, not
+measured on Nymeria), while a 10% budget pays for about 51 on a 256-token model. To compare fairly at a low budget, Ours needs
+a limit like every other method. This task tests that limit on data we already have, before any Nymeria work.
+
+### The rule
+
+The gate is unchanged. It labels each frame pair TRANSITION, PURSUIT, REFIXATION or STABLE, and policy D+P marks frames from
+those labels:
+
+- **Settle:** the first REFIXATION or STABLE frame after a TRANSITION or PURSUIT stretch.
+- **Refixation:** a REFIXATION frame inside an already settled stretch.
+- **Pursuit:** the first frame of a PURSUIT run.
+- **Frame 0:** always marked.
+
+Then, per video, in `vlmeval/budget_rule.py`:
+
+1. **Limit** = budget x that video's Uniform K tokens / tokens per frame, rounded down.
+2. **At most that many marks:** send them all and add nothing.
+3. **More marks than that:** cut the video into that many equal slots and keep one frame per slot, the first that applies:
+   - a settle frame (the longest moving stretch before it wins, then the earliest)
+   - a refixation frame (earliest)
+   - a pursuit frame (earliest)
+   - frame 0
+   - if the slot has no mark, the frame predicted not moving nearest the slot's middle
+   - if every frame in the slot is predicted moving, the middle frame
+4. **Foveate each kept frame** at its gaze point with the model's smallest fovea setting, and send the frames with the question.
+
+The **no-gate control** (row `nogate`) uses the same slots and foveation, takes each slot's middle frame, never reads the
+labels, and always sends the full limit.
+
+### Why it is built this way
+
+- **The limit is a ceiling, not a target.** When the gate stays quiet, that is its decision, so a quiet video isn't padded.
+- **Equal slots** spread the frames over the whole video, because a question can ask about any moment.
+- **Settle comes first** because it should give a new, steady view. The user chose this order in advance. It isn't tuned, and
+  nothing yet shows that it helps accuracy. That is what this run starts to test.
+- **One fovea setting at every budget,** so the budget changes how many frames are sent, not their resolution. Only the frame
+  choice differs between the two rows.
+- **The no-gate row is the real test.** Uniform K differs from the rule in frames, tokens and resolution all at once, so
+  beating it wouldn't show that the gate helped. The no-gate row differs only in which frame each slot keeps.
+- **SmolVLM first:** it is the fastest model, and in earlier runs frames helped on it, while on Qwen2.5 Blind beat Uniform K.
+- **The 12 AEA videos first:** they are the only videos with gate predictions, and they need no new data.
+
+**This run checks the code. It can't judge the rule.** On SmolVLM, Uniform K is 64 x 81 = 5,184 tokens and the smallest fovea is
+17 tokens, so the limits are 15, 30 and 60 frames on all 12 videos. These videos are 67 to 259 s, so slots last 4 to 17 s at 5%
+and only 1 to 4 s at 20%, far shorter than the roughly 21 s slots a long video would get at 51 frames. The real test is
+Nymeria, which needs its gate data first. See context section 13, and ask the user before starting it.
+
+### What changed in the code
+
+| File | Change |
+|---|---|
+| `vlmeval/budget_rule.py` | new: the limit, the send reasons, the slots and the pick per slot |
+| `accuracy_tables/common.py` | new `budget_frames` and a `budget` config section; `load_data` also returns `clips`, `labels`, `frame`; `_gate_labels` split out of `_gate_selection` |
+| `accuracy_tables/run.py` | new rows `budget` and `nogate`, one condition per budget, run only when named in `--rows` |
+| `accuracy_tables/summarize.py` | reads the two new result files |
+| `accuracy_tables/compare_budget.py` | new: rule minus no gate per budget, on the same questions, with a video-level 95% interval |
+| `accuracy_tables/hpc/run_budget.SBATCH` | new: the job |
+| `tests/test_budget_rule.py` | new: CPU tests |
+
+**The 11 existing rows don't change.** `ROWS` is the same, so `smoke.SBATCH` still expects 44 and `run_model.SBATCH` runs what it
+ran before. `smoke.SBATCH` and `run_model.SBATCH` aren't touched, so your local `--comment` lines stay.
+
+**The existing results stay untouched.** The real run writes only to `results/hpc_budget/`. It reads `uniform.jsonl`,
+`blind.jsonl` and `ours.jsonl` from `results/hpc_all/smolvlm/` and copies them there, because the token budgets are measured
+against Uniform K. No Uniform K, Blind or Ours question is scored again.
+
+### Steps
+
+Set `SBATCH_ACCOUNT` as in step 1, and submit from `repo/`.
+
+**1. Check that nothing is running, then pull.**
+
+```bash
+squeue -u $USER                                 # the Phi job and its summary must be gone
+git status --short                              # expect only your 2 local --comment edits
+git pull --ff-only origin eyehead-gate
+```
+
+**2. Quick check: tests, parity, and 6 questions in `results/smoke_budget/`.** Wait for the user's OK first.
+
+```bash
+sbatch --job-name=acc-budget-check-smolvlm accuracy_tables/hpc/run_budget.SBATCH smolvlm 6
+```
+
+The log should show the tests passing and `parity OK`, and end with `=== 0 failed of 6`. Show the user the `--- budget rule` and
+`--- no gate` lines: they give the frames per question and the frames kept by reason.
+
+**3. The real run on all 12 videos.** Ask the user first.
+
+```bash
+sbatch --job-name=acc-budget-smolvlm accuracy_tables/hpc/run_budget.SBATCH smolvlm
+```
+
+That is 6 conditions x 834 questions. Expect about 15 to 30 minutes (an estimate from the earlier SmolVLM run, not a measurement);
+the job asks for 2 hours. It ends by writing `results/hpc_budget/summary.csv` and `results/hpc_budget/smolvlm/budget_compare.csv`.
+Rerunning continues where it stopped.
+
+**Job count: 2 `sbatch` jobs, both on GPU.**
+
+### Expected, not bugs
+
+- **The rule can send fewer frames than no gate,** because its limit is a ceiling and no gate always sends the full limit. Its
+  measured budget can therefore be lower, and more so at 20%, where more videos fit. Per-video matching was rejected earlier as
+  biased, so leave this as it is and report both budgets.
+- **`fill` in the log:** frames from slots with no mark. These aren't gate frames.
+- **A video just over its limit can lose many marks,** because each slot keeps one frame even if a neighbouring slot is empty, and
+  that empty slot then gets a filler frame. The user chose the rule as written. Report the `fill` counts, and don't change it.
+
+### Rules for this task
+
+- **Don't change anything after seeing accuracy:** not the budgets, the limit, the preference order, the fovea setting or the slots.
+- **Don't add other controls without asking.** The user decided against a head-speed control.
+- **Don't claim a winner.** `outcome` in `budget_compare.csv` only says whether the interval excludes 0, and this run checks the code.
+- **Never write to `results/hpc_all/`.** Never commit results.
+- **`more than one clip`:** a video's frame pairs don't chain. Stop and tell the user.
+- **`set budget.tokens_per_frame.<model>`:** only SmolVLM has a token count. Another model needs a measured value and the user's OK.
+
+### What to report back
+
+1. Any code you changed, and the quick check's last line.
+2. The `--- budget rule` and `--- no gate` log lines.
+3. For the 6 new conditions: `n` (should be 834), measured budget, frames per question, and any `oom` or `nan` records.
+4. The `budget_compare.csv` table and the GPU use log.
