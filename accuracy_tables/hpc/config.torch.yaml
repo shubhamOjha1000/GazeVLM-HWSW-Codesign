@@ -1,0 +1,13 @@
+# accuracy_tables on NYU Torch. GV_ROOT and EGO_ROOT come from common.sh. Everything not set here keeps the defaults in
+# accuracy_tables/common.py, which are the protocol (K, policy, fovea settings, baseline parameters): don't change them.
+paths:
+  data_root: ${GV_ROOT}/data                                     # copied from Drive, see the runbook
+  folds_dir: ${data_root}/folds
+  gate_ckpt_dir: ${data_root}/runs/eyehead
+  oof_cache: ${data_root}/vlm/egoeverything/oof_preds_full.csv
+  questions_json: ${EGO_ROOT}/Egoeverything_VQA.json
+  links_json: null
+  frames_cache_dir: ${GV_ROOT}/frames_tar                        # only if the Colab tars are used instead of the cluster's mp4s
+  frames_local_dir: ${GV_ROOT}/frames_1344
+  raw_download_dir: ${GV_ROOT}/raw
+  out_dir: ${GV_ROOT}/results/default                            # the jobs pass --out-dir

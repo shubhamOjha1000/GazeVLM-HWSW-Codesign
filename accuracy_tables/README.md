@@ -43,6 +43,7 @@ The models (keys used everywhere in this folder):
 | `run.py` | command line: scores the chosen rows for the chosen models, resumably |
 | `summarize.py` | command line: accuracy, 95% interval, frames, visual tokens and token budget per row and model → `summary.csv` |
 | `colab_accuracy_tables.ipynb` | the same steps on Colab (Google Drive paths) |
+| `hpc/` | the same steps as Slurm jobs on NYU Torch; see `../HPC_ACCURACY_RUNBOOK.md` |
 | `../tests/test_accuracy_tables.py` | CPU tests of the config, frame selection and budget code |
 | `../vlmeval/gazevlm.py` | GazeVLM: the method (heatmap, rho-mass box, token-grid mapping, thumbnail) and one backend per VLM |
 | `../tests/test_gazevlm.py` | CPU tests of GazeVLM: the box, the token layouts per model family, positions, the run loop |
