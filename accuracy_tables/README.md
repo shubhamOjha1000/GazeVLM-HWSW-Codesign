@@ -45,6 +45,8 @@ The models (keys used everywhere in this folder):
 | `compare_budget.py` | command line: the budget rule minus the no-gate control per budget, on the same questions, with a 95% interval from resampling videos |
 | `colab_accuracy_tables.ipynb` | the same steps on Colab (Google Drive paths) |
 | `hpc/` | the same steps as Slurm jobs on NYU Torch; see `../HPC_ACCURACY_RUNBOOK.md` |
+| `hpc/newvideos/` | gate data for videos outside the gate's 70, built from the cluster's files with no VRS or DINOv2; see section 9 of the runbook |
+| `../tests/test_newvideos.py` | CPU tests of `hpc/newvideos/` and of loading frames on threads |
 | `../tests/test_accuracy_tables.py` | CPU tests of the config, frame selection and budget code |
 | `../vlmeval/budget_rule.py` | the frame budget: the frame limit, the send reasons, the slots and the frame kept per slot |
 | `../tests/test_budget_rule.py` | CPU tests of the frame budget: the rule, the slots, the two rows, the comparison |

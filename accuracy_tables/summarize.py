@@ -48,6 +48,15 @@ def budgets(res):
     return out
 
 
+def gaze_missing_pct(g):
+    """Share (%) of a condition's frames, over its questions, with no gaze estimate, whose fovea therefore sits at the
+    image centre. NaN where the records don't hold the count, or the condition has no frames."""
+    if "n_gaze_missing" not in g or "n_frames" not in g or g["n_gaze_missing"].isna().all():
+        return np.nan
+    frames = g["n_frames"].sum()
+    return 100 * g["n_gaze_missing"].sum() / frames if frames else np.nan
+
+
 def summarize(cfg, videos=None):
     from vlmeval import egoev
     out_dir = cfg["paths"]["out_dir"]
@@ -67,7 +76,7 @@ def summarize(cfg, videos=None):
             rows.append(dict(model=key, row=g.row.iloc[0], condition=cond, n=int(r.n), accuracy=r.accuracy,
                              ci_low=r.ci_low, ci_high=r.ci_high, frames_per_q=r.frames_per_q,
                              tokens_per_q=g.n_image_tokens.mean(), budget_pct=bud.get(cond, np.nan),
-                             videos=g.video.nunique()))
+                             gaze_missing_pct=gaze_missing_pct(g), videos=g.video.nunique()))
     return pd.DataFrame(rows)
 
 

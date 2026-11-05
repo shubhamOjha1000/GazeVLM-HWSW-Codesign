@@ -269,8 +269,11 @@ def row_jobs(ad, cfg, data, rows):
             frames, why = common.budget_frames(cfg, data, key, ad.stock_tokens, float(b), use_gate=row == "budget")
             name = budget_name(b, run["policy"], label) if row == "budget" else nogate_name(b, label)
             items = common.make_items(data["qs"], frames)
+            all_frames = [fr for frs in frames.values() for fr in frs]
+            no_gaze = sum(fr.get("gaze") is None for fr in all_frames)
             add(row, f"--- {name}: mean {np.mean([len(it['frames']) for it in items]):.1f} frames per question; frames "
-                f"kept over all videos, by reason: {why}", items, {name: ad.fovea_condition(setting)}, ad.score)
+                f"kept over all videos, by reason: {why}; no gaze, so the fovea is at the image centre, on {no_gaze} of "
+                f"{len(all_frames)}", items, {name: ad.fovea_condition(setting)}, ad.score)
             jobs[-1]["name"] = f"{row} {100 * float(b):g}%"
     return jobs
 
@@ -319,6 +322,8 @@ def main(argv=None):
     ap.add_argument("--keep-going", action="store_true",
                     help="a failing row or model does not stop the rest; a pass / fail table is printed at the end")
     ap.add_argument("--no-parity", action="store_true", help="skip the parity check (not recommended)")
+    ap.add_argument("--prefetch-workers", type=int,
+                    help="override run.prefetch_workers: threads loading a video's frames ahead (SmolVLM2 only)")
     a = ap.parse_args(argv)
 
     cfg = common.load_config(a.config)
@@ -328,6 +333,8 @@ def main(argv=None):
         cfg["paths"]["out_dir"] = os.path.abspath(os.path.expanduser(a.out_dir))
     if a.no_parity:
         cfg["run"]["parity"] = False
+    if a.prefetch_workers is not None:
+        cfg["run"]["prefetch_workers"] = a.prefetch_workers
     keys = list(ADAPTERS) if a.model == "all" else [k.strip() for k in a.model.split(",")]
     rows = [r.strip() for r in a.rows.split(",")]
     bad = [k for k in keys if k not in ADAPTERS] + [r for r in rows if r not in ROWS + EXTRA_ROWS]

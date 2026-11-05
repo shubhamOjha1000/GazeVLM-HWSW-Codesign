@@ -17,7 +17,8 @@ DEFAULTS = {
     "paths": {"questions_json": None, "links_json": None, "oof_cache": None,
               "frames_local_dir": "frames_1344", "raw_download_dir": "raw", "out_dir": "results"},
     "run": {"videos": "test", "policy": "D+P", "K": 96, "max_frames": {"smolvlm": 64},
-            "parity": True, "phi_remote_parity": False},
+            "parity": True, "phi_remote_parity": False,
+            "prefetch_workers": 0},   # SmolVLM2: threads loading a video's frames ahead (0 = one at a time, as scored so far)
     "models": {},
     "ours": {"rings": [{"R": 70, "a": 160}, {"R": 180, "a": 40}, {"R": 180, "a": 160}, {"R": 240, "a": 160}],
              "smolvlm_k": [1, 3, 5, 7]},

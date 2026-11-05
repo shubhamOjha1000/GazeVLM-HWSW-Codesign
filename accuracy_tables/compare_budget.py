@@ -3,8 +3,8 @@
     python -m accuracy_tables.compare_budget --model smolvlm --out-dir <results folder>
 
 Prints and writes <out_dir>/<model>/budget_compare.csv: accuracy difference (rule - no gate) in points, its 95% interval
-from resampling whole videos, and both rows' frames per question and measured token budgets. `outcome` says "rule ahead"
-or "no gate ahead" only if the interval excludes 0. This is only the comparison: it doesn't judge the rule on its own,
+from resampling whole videos, and both rows' frames per question, measured token budgets and share of frames without gaze.
+`outcome` says "rule ahead" or "no gate ahead" only if the interval excludes 0. This is only the comparison: it doesn't judge the rule on its own,
 and on the 12 AEA videos it only checks the code, because those videos are too short for the limit to thin them much.
 """
 
@@ -44,6 +44,8 @@ def compare(res, B=2000):
                         rule_only_right=t["a_only_right"], nogate_only_right=t["b_only_right"],
                         rule_frames=frames[rule], nogate_frames=frames[nogate],
                         rule_budget_pct=bud.get(rule, np.nan), nogate_budget_pct=bud.get(nogate, np.nan),
+                        rule_gaze_missing_pct=summarize.gaze_missing_pct(res[res.condition == rule]),
+                        nogate_gaze_missing_pct=summarize.gaze_missing_pct(res[res.condition == nogate]),
                         outcome=outcome))
     return pd.DataFrame(out)
 

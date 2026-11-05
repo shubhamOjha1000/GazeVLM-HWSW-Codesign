@@ -1,0 +1,13 @@
+# The Nymeria videos on NYU Torch, from the gate data built by accuracy_tables/hpc/newvideos/. GV_ROOT and EGO_ROOT come from
+# common.sh. Everything not set here keeps the defaults in accuracy_tables/common.py, which are the protocol: don't change them.
+paths:
+  data_root: ${GV_ROOT}/newvideos
+  folds_dir: ${data_root}/nymeria/folds
+  gate_ckpt_dir: ${GV_ROOT}/data/runs/eyehead
+  oof_cache: ${data_root}/nymeria/preds.csv                      # written by score_gate.py, so oof_predictions is never called
+  questions_json: ${EGO_ROOT}/Egoeverything_VQA.json
+  links_json: null
+  frames_cache_dir: ${data_root}/frames_tar                      # never used: every video has its frames and meta.json
+  frames_local_dir: ${data_root}/frames
+  raw_download_dir: ${data_root}/raw
+  out_dir: ${GV_ROOT}/results/default                            # the jobs pass --out-dir

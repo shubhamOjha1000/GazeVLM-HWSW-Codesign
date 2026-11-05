@@ -378,7 +378,8 @@ class SmolVLM(Adapter):
 
     def score(self, items, conditions, out_path):
         from vlmeval import smolvlm_fovea as sm
-        sm.run_questions(self.model, self.proc, self.letter_ids, items, conditions, out_path, build_messages)
+        sm.run_questions(self.model, self.proc, self.letter_ids, items, conditions, out_path, build_messages,
+                         prefetch_workers=int(self.cfg.get("run", {}).get("prefetch_workers", 0)))
 
     def blind_ids(self, messages):
         from vlmeval import smolvlm_fovea as sm

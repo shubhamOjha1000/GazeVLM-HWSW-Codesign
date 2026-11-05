@@ -146,6 +146,40 @@ def native_to_upright_cw90(x, y):
     return 1.0 - y, x
 
 
+def calibration_projector(device_calib, stream_label="camera-rgb", depth_m=1.0, rotate_cw90=True):
+    """fn(yaw, pitch) -> (x_norm, y_norm, oof) from a device calibration, however it was loaded (from a VRS, or from
+    the JSON saved out of one).
+
+    Transform chain copied from Meta's own AEA quickstart tutorial (`draw_eye_gaze`), which is the reference
+    implementation:
+        gaze_cpf = get_eyegaze_point_at_depth(yaw, pitch, depth_m)
+        gaze_cam = T_device_camera.inverse() @ T_device_cpf @ gaze_cpf
+        px       = camera_calib.project(gaze_cam)
+    CPF (Central Pupil Frame) is anchored between the eyes, ~6 cm from the RGB camera and rotated relative to it;
+    project() expects a point already in the camera's own frame. Feeding it a CPF point offsets every gaze dot by that
+    baseline. Note this uses the factory-calibrated device<->cpf and device<->camera extrinsics rather than the
+    get_transform_cpf_sensor() shortcut, which can return nominal CAD values instead.
+    """
+    from projectaria_tools.core.mps import get_eyegaze_point_at_depth
+    cam_calib = device_calib.get_camera_calib(stream_label)
+    T_device_cpf = device_calib.get_transform_device_cpf()
+    T_device_cam = cam_calib.get_transform_device_camera()
+    W, H = cam_calib.get_image_size()
+
+    def _proj(yaw, pitch, depth=depth_m):
+        gaze_cpf = get_eyegaze_point_at_depth(yaw, pitch, depth)
+        gaze_cam = T_device_cam.inverse() @ T_device_cpf @ gaze_cpf
+        px = cam_calib.project(gaze_cam)
+        if px is None:
+            return 0.5, 0.5, True                          # out-of-FOV fallback (flagged)
+        u, v = np.asarray(px, dtype=np.float64).flatten()[:2]
+        x, y = u / W, v / H                                # native sensor orientation
+        if rotate_cw90:
+            x, y = native_to_upright_cw90(x, y)
+        return float(np.clip(x, 0, 1)), float(np.clip(y, 0, 1)), False
+    return _proj
+
+
 def make_gaze_projector(projection="pinhole", vrs_path=None,
                         fov_x=None, fov_y=None, yaw_sign=1, pitch_sign=-1,
                         stream_label="camera-rgb", depth_m=1.0, rotate_cw90=True):
@@ -159,37 +193,9 @@ def make_gaze_projector(projection="pinhole", vrs_path=None,
             return yawpitch_to_norm_xy(yaw, pitch, fov_x, fov_y, yaw_sign, pitch_sign)
         return _proj
     if projection == "calibration":
-        # Transform chain copied from Meta's own AEA quickstart tutorial
-        # (`draw_eye_gaze`), which is the reference implementation:
-        #     gaze_cpf = get_eyegaze_point_at_depth(yaw, pitch, depth_m)
-        #     gaze_cam = T_device_camera.inverse() @ T_device_cpf @ gaze_cpf
-        #     px       = camera_calib.project(gaze_cam)
-        # CPF (Central Pupil Frame) is anchored between the eyes, ~6 cm from the RGB
-        # camera and rotated relative to it; project() expects a point already in the
-        # camera's own frame. Feeding it a CPF point offsets every gaze dot by that
-        # baseline. Note this uses the factory-calibrated device<->cpf and
-        # device<->camera extrinsics rather than the get_transform_cpf_sensor()
-        # shortcut, which can return nominal CAD values instead.
         from projectaria_tools.core import data_provider
-        from projectaria_tools.core.mps import get_eyegaze_point_at_depth
         provider = data_provider.create_vrs_data_provider(vrs_path)
-        device_calib = provider.get_device_calibration()
-        cam_calib = device_calib.get_camera_calib(stream_label)
-        T_device_cpf = device_calib.get_transform_device_cpf()
-        T_device_cam = cam_calib.get_transform_device_camera()
-        W, H = cam_calib.get_image_size()
-        def _proj(yaw, pitch, depth=depth_m):
-            gaze_cpf = get_eyegaze_point_at_depth(yaw, pitch, depth)
-            gaze_cam = T_device_cam.inverse() @ T_device_cpf @ gaze_cpf
-            px = cam_calib.project(gaze_cam)
-            if px is None:
-                return 0.5, 0.5, True                          # out-of-FOV fallback (flagged)
-            u, v = np.asarray(px, dtype=np.float64).flatten()[:2]
-            x, y = u / W, v / H                                # native sensor orientation
-            if rotate_cw90:
-                x, y = native_to_upright_cw90(x, y)
-            return float(np.clip(x, 0, 1)), float(np.clip(y, 0, 1)), False
-        return _proj
+        return calibration_projector(provider.get_device_calibration(), stream_label, depth_m, rotate_cw90)
     raise ValueError(f"unknown projection: {projection}")
 
 

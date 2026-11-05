@@ -24,6 +24,12 @@ run_in_env() {
         "source /ext3/env.sh; unset PYTHONPATH; export PYTHONNOUSERSITE=True; cd '$SLURM_SUBMIT_DIR'; $1"
 }
 
+# run_in_aria "<command line>": the same in the container's `aria` environment, which has projectaria-tools and no torch.
+run_in_aria() {
+    singularity exec --overlay "$OVERLAY:ro" "$IMAGE" /bin/bash -c \
+        "source /ext3/env.sh; conda activate aria; unset PYTHONPATH; export PYTHONNOUSERSITE=True; cd '$SLURM_SUBMIT_DIR'; $1"
+}
+
 # gpu_log: GPU use once a minute in logs/, because the cluster cancels jobs with low GPU use.
 gpu_log() {
     nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,power.draw --format=csv,noheader -l 60 \

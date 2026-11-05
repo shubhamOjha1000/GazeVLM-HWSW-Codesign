@@ -7,9 +7,10 @@ the project.
 **Everything runs as Slurm jobs, not notebooks.** The Python is already command-line scripts. The job files are in
 `accuracy_tables/hpc/`, and the method detail is in `accuracy_tables/README.md`.
 
-**New task: section 8, the frame budget on SmolVLM.** Sections 1 to 7 cover the 12-video run. Section 8 hasn't run: its job
-file has only had a bash syntax check, and its Python and tests have never been executed, because Python isn't run on the
-machine they were written on. Expect to fix small problems, and report what you change.
+**New task: section 9, gate data for Nymeria and the budget rule on it.** Sections 1 to 7 cover the 12-video run, and section 8
+the budget rule on those videos. Both have run. Section 9 hasn't: its job files have only had a bash syntax check, and its
+Python and tests have never been executed, because Python isn't run on the machine they were written on. Expect to fix small
+problems, and report what you change.
 
 ## 1. The task
 
@@ -96,6 +97,12 @@ All are in `accuracy_tables/hpc/`. Submit every one **from the repository root**
 | `submit_all.sh <test\|all> [models]` | one `run_model` job per model, then a summary job | no |
 | `summarize.SBATCH <test\|all>` | writes `summary.csv` | no |
 | `run_budget.SBATCH <model> [questions]` | the frame budget, section 8: the budget rule and the no-gate control | yes |
+| `newvideos_rebuild.SBATCH` | section 9, check 1: rebuild the 12 known videos and compare | no |
+| `newvideos_pilot.SBATCH` | section 9, check 2: the 5 pilot Nymeria videos and the gaze sheets | no |
+| `newvideos_build.SBATCH` | section 9: one array task per remaining video | no |
+| `newvideos_gate.SBATCH` | section 9, check 3: gate predictions and the comparison with AEA | no |
+| `newvideos_vlm.SBATCH <check\|pilot\|full>` | section 9: SmolVLM on Nymeria | yes |
+| `newvideos_summary.SBATCH <pilot\|full>` | section 9: `summary.csv` and `budget_compare.csv` | no |
 
 Paths default to `/scratch/$USER/...`. Set `EGO_ROOT`, `GV_ROOT`, `HF_HOME`, `OVERLAY` or `IMAGE` before `sbatch` to
 override them. The `#SBATCH --output` lines assume `/scratch/<user>/GazeVLM/logs`.
@@ -128,6 +135,8 @@ Layout on the cluster:
   frames_1344/<video>/frame_00000.jpg ..., meta.json      <- written by prepare_data
   results/smoke/   results/hpc_test/   results/hpc_all/
   results/smoke_budget/   results/hpc_budget/       <- section 8
+  newvideos/                                        <- section 9: lists, gaze, rows, frames, one folder per group
+  results/prefetch_check/   results/smoke_nymeria/   results/nymeria_pilot/   results/nymeria_smolvlm/    <- section 9
   logs/
 ```
 
@@ -301,10 +310,10 @@ Keep it short:
 2. The smoke test's last line, and each model's parity result.
 3. The `summary.csv` path, any condition with `n` below 204 or 834, and any `oom` or `nan` records.
 
-## 8. Next task: the frame budget on SmolVLM
+## 8. The frame budget on SmolVLM, on the 12 videos
 
-**Don't submit anything until the user approves it.** Don't pull this into `repo/` until the Phi job and its summary job have
-ended, because running jobs load Python from the checkout.
+**This has run.** It passed with 0 failed of 6, all `n` = 834, no `oom` or `nan`, and parity OK. It took about 4.5 minutes, well
+under the estimate below. Tokens were exactly 17 per frame in all 6 conditions. Section 9 builds on it.
 
 ### Why this exists
 
@@ -353,10 +362,10 @@ labels, and always sends the full limit.
 - **SmolVLM first:** it is the fastest model, and in earlier runs frames helped on it, while on Qwen2.5 Blind beat Uniform K.
 - **The 12 AEA videos first:** they are the only videos with gate predictions, and they need no new data.
 
-**This run checks the code. It can't judge the rule.** On SmolVLM, Uniform K is 64 x 81 = 5,184 tokens and the smallest fovea is
-17 tokens, so the limits are 15, 30 and 60 frames on all 12 videos. These videos are 67 to 259 s, so slots last 4 to 17 s at 5%
-and only 1 to 4 s at 20%, far shorter than the roughly 21 s slots a long video would get at 51 frames. The real test is
-Nymeria, which needs its gate data first. See context section 13, and ask the user before starting it.
+**This run checks the code. It can't judge the rule.** On SmolVLM, Uniform K is up to 64 x 81 = 5,184 tokens and the smallest
+fovea is 17 tokens, so the limits are 15, 30 and 60 frames. The exception is `loc4_script3_seq2_rec2`, which has 59 frames, so
+Uniform K is 59 frames there and its limits are 14, 28 and 56. These videos are short, so their slots are far shorter than a long
+video's. The real test is Nymeria, in section 9.
 
 ### What changed in the code
 
@@ -384,7 +393,7 @@ Set `SBATCH_ACCOUNT` as in step 1, and submit from `repo/`.
 **1. Check that nothing is running, then pull.**
 
 ```bash
-squeue -u $USER                                 # the Phi job and its summary must be gone
+squeue -u $USER                                 # no job of yours may be using the checkout
 git status --short                              # expect only your 2 local --comment edits
 git pull --ff-only origin eyehead-gate
 ```
@@ -434,3 +443,211 @@ Rerunning continues where it stopped.
 2. The `--- budget rule` and `--- no gate` log lines.
 3. For the 6 new conditions: `n` (should be 834), measured budget, frames per question, and any `oom` or `nan` records.
 4. The `budget_compare.csv` table and the GPU use log.
+
+## 9. Next task: gate data for Nymeria, then the budget rule on SmolVLM
+
+**Nothing here has run. Don't submit any job until the user approves it, one step at a time.** Three checks must pass before any
+VLM job on Nymeria. Where this section differs from context section 13, this section is right: 13 came partly from web summaries of
+the code, and this was checked against the code.
+
+### Why this exists
+
+Section 8 only checked the code, because AEA videos are too short for the limit to matter. Nymeria is the real test of the budget
+rule, but the gate has no data for those videos, so the code skips them. This task builds that data from the files on the cluster,
+checks it, and then scores SmolVLM.
+
+### Scope, set by the user
+
+- **Model:** SmolVLM only.
+- **Rows:** `uniform`, `blind`, `budget`, `nogate`. Ask before adding Ours or other baselines.
+- **Videos:** a pilot of 5 Nymeria videos, then all 325.
+- **The 13 other AEA videos:** built and put through check 3, not scored on the VLM. No gate model trained on them, and they are the
+  same kind of video as the training data, so they can separate a builder bug from a real Nymeria difference.
+- **Unchanged:** the budgets, the limit, the preference order, the fovea setting and the slots.
+- **No AUC check:** the user decided against it, so DINOv2 isn't used anywhere here.
+
+### How the gate data is built, and why
+
+- **It follows the existing builder.** `src/dataprep/build_feature_csv.py` can't run because it needs VRS files and DINOv2, so
+  `build_rows.py` calls the same window functions and writes the same formats.
+- **Each stream is rebased to its own first sample,** and frames sit at i / native fps, because the gate trained on that alignment.
+  `timing.json` isn't used. The streams start within about 0.07 s of each other (context section 7).
+- **Projection needs the `aria` environment,** so `project_gaze.py` runs there and saves the result, and `build_rows.py` reads it in the
+  base environment. Depth is a fixed 1 m and coordinates are divided by the calibration's own size, as in the builder, so context section
+  8's per-sample depth and rescaling don't apply.
+- **Nymeria's yaw:** its CSV comes from a newer gaze model with a left and a right yaw and no single yaw. The combined yaw comes from
+  `mps.read_eyegaze(...).yaw`, and the plain mean is saved only to compare. AEA's single yaw is read straight from the CSV.
+- **All 6 IMU columns are written.** With only the 3 gyro columns, `_gyro_at_steps` returns `None` and head speed silently becomes 0.
+- **Placeholders:** `load_rows` needs `frame_similarity`, `gaze_patch_token_sim` and `quad`, so the first two are empty and `quad` is 3.
+  Nothing may score against them, including the `D: ground truth` condition that `select_conditions` computes.
+- **Feature names hold the video,** as in `<video>/feat_00012.npz`. No such file exists, but predictions are matched by this exact
+  string, so it must be unique across videos.
+- **A separate data folder:** `newvideos/nymeria/folds/` has an empty `train_val_fold1.csv` and the rows in `test.csv`, and `paths.oof_cache`
+  points at its own `preds.csv`. So `oof_predictions` is never called and `common.py` needs no new data path.
+- **Full 1 fps frames,** with `extract_1fps` unchanged. Decoding is most of the cost either way, and the parity check needs a frame
+  near the keyframe.
+
+### What the code does with no gaze, GPU use and batching
+
+- **A kept frame with no gaze:** `_fovea_layout` places the fovea at the image centre, with the same 17 tokens. Frame 0 never has gaze.
+  Any other frame loses it if the second before it has one sample out of view, or no gaze at all. Records already hold `n_gaze_missing`;
+  the log, `summary.csv` and `budget_compare.csv` now report it.
+- **Low GPU use:** from reading the code, most likely CPU image loading. Each frame is decoded and processed once per budget and row, and
+  startup and summaries also hold the GPU idle. Nymeria needs about 89,000 image loads (210 for the two rows' budgets plus 64 for
+  Uniform K, per video) with few questions per video, so GPU use could be lower than on AEA.
+- **Cancellation:** Torch's documented limits are 50% on `ga*`, `gl*` and `gr*` nodes and 60% on `gh*`. Its page gives no time window and
+  says "Enforcement will be very aggressive", so treat a long run at low GPU use as at risk.
+- **Two fixes are in:** frames load on 8 threads (`--prefetch-workers 8`, off by default, step 5 checks that answers don't change), and
+  summaries run in a CPU job.
+- **Batching:** questions run one at a time, and encoded frames are reused within a video and condition. Batching isn't part of this
+  task, because the GPU is mostly waiting on the CPU.
+
+### What changed in the code
+
+| File | Change |
+|---|---|
+| `accuracy_tables/hpc/newvideos/plan.py` | new: the video lists, and a stop if the groups aren't 12, 13 and 325 |
+| `.../extract_frames.py`, `.../project_gaze.py`, `.../build_rows.py` | new: frames, gaze and rows per video |
+| `.../compare_rows.py` | new: check 1 |
+| `.../draw_gaze.py` | new: check 2 |
+| `.../score_gate.py`, `.../check_gate.py` | new: gate predictions, and check 3 |
+| `.../compare_records.py` | new: are two runs' answers the same? |
+| `accuracy_tables/hpc/config.newvideos.yaml`, 6 `newvideos_*.SBATCH` files | new: Nymeria paths and the jobs |
+| `src/common/gaze_geometry.py` | `calibration_projector` split out of `make_gaze_projector`, so a calibration JSON can use the same code |
+| `accuracy_tables/hpc/common.sh` | new `run_in_aria` |
+| `vlmeval/smolvlm_fovea.py`, `accuracy_tables/models.py`, `run.py`, `common.py` | loading frames on threads, off by default |
+| `accuracy_tables/run.py`, `summarize.py`, `compare_budget.py` | report frames with no gaze |
+| `tests/test_newvideos.py` | new: CPU tests |
+
+**The existing rows and jobs don't change.** `smoke.SBATCH` and `run_model.SBATCH` aren't touched, so your local `--comment` lines stay.
+`summary.csv` gains one column, `gaze_missing_pct`.
+
+**Existing data stays untouched.** Everything is written under `$GV_ROOT/newvideos/` and the new `results/` folders. `data/folds/`,
+`oof_preds_full.csv`, `frames_1344/`, `results/hpc_all/` and `results/hpc_budget/` are only read.
+
+### Steps
+
+**Job count: 9 `sbatch` jobs, 3 on GPU and 6 on CPU,** one of them an array of 333 tasks. A job that times out or fails is submitted again
+on top of these. All times are estimates.
+
+| Step | Job | Runs on |
+|---|---|---|
+| 1. Rebuild and compare the 12 videos | `newvideos_rebuild.SBATCH` | CPU |
+| 2. 5 pilot videos and gaze sheets | `newvideos_pilot.SBATCH` | CPU |
+| 3. The other 320 Nymeria and 13 AEA videos | `newvideos_build.SBATCH`, an array | CPU |
+| 4. Gate predictions and the comparison | `newvideos_gate.SBATCH` | CPU |
+| 5. Thread check and 6 Nymeria questions | `newvideos_vlm.SBATCH check` | GPU |
+| 6. VLM on the 5 pilot videos | `newvideos_vlm.SBATCH pilot`, `newvideos_summary.SBATCH pilot` | GPU, CPU |
+| 7. VLM on all 325 videos | `newvideos_vlm.SBATCH full`, `newvideos_summary.SBATCH full` | GPU, CPU |
+
+Set `SBATCH_ACCOUNT` as in section 5, and submit from `repo/`. **Before step 1,** on the login node:
+
+```bash
+squeue -u $USER                                 # no job of yours may be using the checkout
+git status --short                              # expect only your 2 local --comment edits
+git pull --ff-only origin eyehead-gate
+myquota                                         # the frames need about 70 to 80 GB and 360,000 files
+```
+
+**Step 1: check 1, the rebuild.** Mostly minutes.
+
+```bash
+sbatch accuracy_tables/hpc/newvideos_rebuild.SBATCH
+```
+
+The log should show the group sizes, the tests passing, and end with `REBUILD MATCHES`. Each video is compared on pairs, the 4 count
+columns, `gaze_rates_window`, `imu_window`, `gaze_xy_window` and predicted classes, using the same model as its existing predictions. Show the
+user `compare_rows.csv`'s table either way. **On `REBUILD DIFFERS`, stop and tell the user. Don't adjust a tolerance to make it pass.**
+
+**Step 2: check 2, the pilot.** Roughly 3 to 5 minutes per video for the frames, which also measures the real cost of step 3.
+
+```bash
+sbatch accuracy_tables/hpc/newvideos_pilot.SBATCH
+```
+
+Show the user the yaw lines, the `check_gate` table and the sheet paths in `newvideos/check_gaze/`. **The user looks at the sheets by eye
+and must approve them before step 3:** the red circle is where the fovea goes, and it should sit where the person is plausibly looking
+in every video, with the control video as the reference. If a large yaw difference appears, tell the user.
+
+**Step 3: build the rest.** Use the range `plan.py` printed.
+
+```bash
+sbatch --array=0-332%20 accuracy_tables/hpc/newvideos_build.SBATCH
+```
+
+About 20 to 30 task-hours, so about 1.5 hours with 20 running at once. Then count the results: `ls /scratch/$USER/GazeVLM/newvideos/rows/*.csv
+| wc -l` should print 350. To retry failures, resubmit with `--array=<their task ids>`; finished steps are skipped.
+
+**Step 4: check 3, Nymeria against AEA.**
+
+```bash
+sbatch accuracy_tables/hpc/newvideos_gate.SBATCH
+```
+
+Show the user the whole table, with `aea12`, `aea13` and `nymeria` side by side: class mix, marks per minute, real marks per video, frames with
+no gaze, input speeds and `vor_*`. **The gate trained only on AEA, so an odd pattern means stop and tell the user.** Examples:
+a class nearly vanishing, marks per minute far off, many frames with no gaze, much higher or lower eye speed, or `vor_median_cos` no longer
+clearly negative, which would mean the head rotation fitted on AEA doesn't hold. `aea13` far from `aea12` points at the builder. `marks_*.csv` has
+the real marks per video, replacing section 8's estimate.
+
+**Step 5: thread check, then 6 Nymeria questions.** Ask the user first, because this is the first VLM job. Use the GPU type of `results/hpc_budget/`
+if the cluster allows it.
+
+```bash
+sbatch --job-name=new-vlm-check accuracy_tables/hpc/newvideos_vlm.SBATCH check
+```
+
+The log should show `parity OK`, `=== 0 failed of 6`, `SAME ANSWERS`, and end with `=== 0 failed of 8`. Tiny probability differences are possible on
+another GPU type, so report `max_prob_diff`. **On `ANSWERS DIFFER`, stop and tell the user.**
+
+**Step 6: the pilot.** Ask the user first.
+
+```bash
+ID=$(sbatch --parsable --job-name=new-vlm-pilot accuracy_tables/hpc/newvideos_vlm.SBATCH pilot)
+sbatch --dependency=afterok:${ID%%;*} accuracy_tables/hpc/newvideos_summary.SBATCH pilot
+```
+
+Then check GPU use, with the job's id:
+
+```bash
+awk -F', ' '{s+=$2; n++} END {print s/n "% over " n " minutes"}' /scratch/$USER/GazeVLM/logs/gpu_new-vlm-pilot_<id>.csv
+squeue -u $USER --format="%N" | head -3         # while a job runs: its node, which sets the limit
+```
+
+**If the mean is under the node's limit, stop and tell the user before step 7.** The next option is caching preprocessed frames in a CPU job,
+at about 30 to 115 GB. It isn't built.
+
+**Step 7: all 325 videos.** Ask the user first.
+
+```bash
+ID=$(sbatch --parsable --job-name=new-vlm-full accuracy_tables/hpc/newvideos_vlm.SBATCH full)
+sbatch --dependency=afterok:${ID%%;*} accuracy_tables/hpc/newvideos_summary.SBATCH full
+```
+
+About 1 to 2 hours. The job asks for 8, and rerunning continues where it stopped. If the job has to be resubmitted, submit the summary again too.
+
+### Expected, not bugs
+
+- **Long slots:** at about 1,100 s, the limits of 15, 30 and 60 frames mean slots of about 73, 37 and 18 s.
+- **The rule can send fewer frames than no gate,** as in section 8. Report both measured budgets.
+- **`D: ground truth` and the other conditions in `select_conditions`** are computed and never used. On these videos they mean nothing.
+- **A `FutureWarning` about concatenating empty frames,** from the empty `train_val_fold1.csv`, is harmless.
+- **With threads on, a block's first `sec`** no longer includes loading its frames.
+- **A 5-minute `load_data` at 0% GPU** at the start of the full job, and again after a requeue, is expected.
+
+### Rules for this task
+
+- **Don't change anything after seeing accuracy:** not the budgets, the limit, the preference order, the fovea setting or the slots.
+- **Don't add rows, controls, models or videos without asking,** and keep any batching as a separate change.
+- **Don't claim a winner.** Report AEA (`results/hpc_budget/`) and Nymeria (`results/nymeria_smolvlm/`) separately, with both rows' measured budgets.
+- **Never write to `results/hpc_all/`, `results/hpc_budget/` or `data/folds/`.** Never commit results, and keep the gaze sheets out of the repo.
+- **Commit only when the user asks.** Never commit accuracy numbers, NetIDs, account names, tokens or `*CONTEXT*.md`.
+- **Nothing runs on the user's Mac.** Give one read-only command at a time when you need them to look at something.
+
+### What to report back
+
+1. Any code you changed, and each step's last log line.
+2. Check 1's table, check 2's yaw lines and sheet paths, and check 3's table.
+3. The `--- budget rule` and `--- no gate` log lines, including frames with no gaze.
+4. For each condition: `n`, measured budget, frames per question, `gaze_missing_pct`, and any `oom` or `nan` records.
+5. The `budget_compare.csv` table, the GPU type, and mean GPU use with the job's length.

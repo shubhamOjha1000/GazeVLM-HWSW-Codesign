@@ -449,10 +449,29 @@ def fovea_feature_drift(model, rec, cells, mean, std):
 
 # ---------------------------------------------------------------------------- evaluation
 @torch.no_grad()
-def run_questions(model, proc, letter_ids, items, conditions, out_path, build_messages, log_every=25):
+def load_stock_inputs(ip, frames, recs, workers):
+    """Makes the SmolVLM input of each frame not yet in recs, on `workers` threads, so the GPU doesn't wait for frames
+    decoded one at a time. Each frame gets exactly what stock_input gives it; only the timing changes."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from PIL import Image
+    todo = [fr for fr in frames if fr["key"] not in recs]
+
+    def load(fr):
+        with Image.open(fr["path"]) as im:
+            return stock_input(ip, im.convert("RGB"))
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for fr, rec in zip(todo, pool.map(load, todo)):
+            recs[fr["key"]] = rec
+
+
+def run_questions(model, proc, letter_ids, items, conditions, out_path, build_messages, log_every=25,
+                  prefetch_workers=0):
     """Score questions on their frames under each condition; resumable. Work runs video by video
     and, within a video, condition by condition; each frame's SmolVLM input is made once per video
-    and its tokens once per (video, condition)."""
+    and its tokens once per (video, condition). With prefetch_workers, a block's frames are loaded
+    on threads when the block starts, which that block's first `sec` then doesn't include."""
     from PIL import Image
     ip = proc.image_processor
     mean, std = ip.image_mean, ip.image_std
@@ -476,6 +495,8 @@ def run_questions(model, proc, letter_ids, items, conditions, out_path, build_me
                 toks.clear()
                 torch.cuda.empty_cache()
                 block = (video, c)
+                if prefetch_workers:
+                    load_stock_inputs(ip, it["frames"], recs, prefetch_workers)
             t0 = time.time()
             per = []
             for fr in it["frames"]:

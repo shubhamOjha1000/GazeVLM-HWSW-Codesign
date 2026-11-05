@@ -197,9 +197,9 @@ def test_compare_pairs_each_budget_and_only_calls_a_clear_difference():
         common_fields = dict(qid=i, video=v, n_frames=30)
         rows.append(dict(common_fields, row="uniform", condition="uniform K=64", correct=1, n_image_tokens=5184))
         rows.append(dict(common_fields, row="budget", condition="budget rule 10% (D+P gate, fovea k=1)", correct=1,
-                         n_image_tokens=510))
+                         n_image_tokens=510, n_gaze_missing=3))
         rows.append(dict(common_fields, row="nogate", condition="no gate 10% (slot middles, fovea k=1)", correct=0,
-                         n_image_tokens=510))
+                         n_image_tokens=510, n_gaze_missing=0))
         rows.append(dict(common_fields, row="budget", condition="budget rule 20% (D+P gate, fovea k=1)", correct=i % 2,
                          n_image_tokens=1020))
         rows.append(dict(common_fields, row="nogate", condition="no gate 20% (slot middles, fovea k=1)", correct=i % 2,
@@ -209,3 +209,4 @@ def test_compare_pairs_each_budget_and_only_calls_a_clear_difference():
     assert t.loc[10.0, "rule_minus_nogate"] == pytest.approx(100) and t.loc[10.0, "outcome"] == "rule ahead"
     assert t.loc[20.0, "rule_minus_nogate"] == 0 and t.loc[20.0, "outcome"] == "no clear difference"
     assert t.loc[10.0, "rule_budget_pct"] == pytest.approx(100 * 510 / 5184)
+    assert t.loc[10.0, "rule_gaze_missing_pct"] == pytest.approx(10) and t.loc[10.0, "nogate_gaze_missing_pct"] == 0
