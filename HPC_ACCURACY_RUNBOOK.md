@@ -75,7 +75,8 @@ New problems are most likely on `qwen3` and `phi`. No model has run on `all` thr
 - **Secrets.** `HF_TOKEN` stays in the environment: never print it, write it to a file, or ask for it in chat. Never open
   `urls/` or any links JSON.
 - **This repo is public.** Commit only when the user asks, only to `eyehead-gate`. Never commit results or accuracy
-  numbers, NetIDs or account names, tokens, or `*CONTEXT*.md`.
+  numbers, NetIDs or account names, tokens, or `*CONTEXT*.md`. The one exception, at the user's request, is the gate's
+  training output in `accuracy_tables/hpc/eyehead_weights/`.
 - **Replies.** The user is new to HPC: give short copy-paste commands, one step at a time, and one-line answers by default.
   Longer analysis only when they ask ("do the analysis").
 
@@ -108,7 +109,7 @@ The GPU jobs set `HF_HUB_OFFLINE=1`, so they never need internet. Nothing writes
 | Videos | `$EGO_ROOT/videos/<video>/<video>.mp4` | 1 fps frames, extracted once by `prepare_data` |
 | Gate CSVs | Drive `GazeVLM/folds/` | which frames exist, and one gaze point per frame |
 | Gate predictions | Drive `GazeVLM/vlm/egoeverything/oof_preds_full.csv` | which frames the gate sends |
-| Gate weights | Drive `GazeVLM/runs/eyehead/fold1.pt` ... `fold5.pt` | recomputing the predictions if that CSV is missing |
+| Gate weights | this repo: `accuracy_tables/hpc/eyehead_weights/fold1.pt` ... `fold5.pt`, copied to scratch in step 2 | recomputing the predictions if that CSV is missing |
 | Colab results | Drive `GazeVLM/accuracy_tables/{qwen25,smolvlm}_matched/summary.csv` | checking this cluster against Colab |
 
 The accuracy run doesn't read the cluster's `general_eye_gaze.csv`, `imu.npz`, `calibration.json` or `timing.json`: the gaze
@@ -159,13 +160,20 @@ cd repo
 export SBATCH_ACCOUNT=<account>      # context section 10; ask the user which tier. Needed in every new login session.
 ```
 
-**Step 2: copy the Drive files.** They are small. Google authorization has to come from the user, so ask them to set up the
-remote, or to move the files another way. With an rclone remote called `<remote>`:
+**Step 2: put the gate weights on scratch and copy the Drive files.** The weights are in the repo, so from the repo root:
+
+```bash
+mkdir -p /scratch/$USER/GazeVLM/data/runs/eyehead
+cp accuracy_tables/hpc/eyehead_weights/fold*.pt /scratch/$USER/GazeVLM/data/runs/eyehead/
+ls -l /scratch/$USER/GazeVLM/data/runs/eyehead/      # 5 files, fold1.pt ... fold5.pt
+```
+
+The Drive files are small. Google authorization has to come from the user, so ask them to set up the remote, or to move the
+files another way. With an rclone remote called `<remote>`:
 
 ```bash
 D=/scratch/$USER/GazeVLM/data
 rclone copy <remote>:GazeVLM/folds "$D/folds"
-rclone copy <remote>:GazeVLM/runs/eyehead "$D/runs/eyehead" --include "fold*.pt"
 rclone copy <remote>:GazeVLM/vlm/egoeverything/oof_preds_full.csv "$D/vlm/egoeverything/"
 for r in qwen25 smolvlm; do      # internvl_matched too if InternVL comes back
     rclone copy <remote>:GazeVLM/accuracy_tables/${r}_matched/summary.csv "$D/colab_reference/${r}_matched/"
