@@ -99,7 +99,7 @@ class SmolVLM(stm.SmolVLM):
 
 # ---------------------------------------------------------------------------- evaluation
 @torch.no_grad()
-def run_questions(backend, items, conditions, out_path, build_messages, log_every=25):
+def run_questions(backend, items, conditions, out_path, build_messages, log_every=25, prefetch_workers=0):
     """Score questions on their frames with TTM-reduced tokens; resumable.
 
     conditions: {name: dict(window=W, prune=K)}.
@@ -122,6 +122,8 @@ def run_questions(backend, items, conditions, out_path, build_messages, log_ever
                 toks.clear()
                 torch.cuda.empty_cache()
                 video = it["video"]
+                if prefetch_workers:                         # its first `sec` then doesn't include loading
+                    backend.prefetch(it["frames"], prefetch_workers)
             arg = {**DEFAULTS, **conditions[c]}
             t0 = time.time()
             keys = tuple(fr["key"] for fr in it["frames"])

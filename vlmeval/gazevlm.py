@@ -159,6 +159,11 @@ class Backend:
     side = 16
     max_pixels = 448 * 448
 
+    def prefetch(self, frames, workers):
+        """Loads a video's frames on threads ahead of encoding them. Only SmolVLM has this so far, and run.py stops
+        before a model that doesn't."""
+        raise NotImplementedError(f"{type(self).__name__}: frame loading threads aren't built for this model")
+
     def _messages(self, it, build_messages):
         return build_messages(it["question"], it["options"], [(fr["path"], fr["t"]) for fr in it["frames"]],
                               self.max_pixels)
@@ -287,11 +292,26 @@ class SmolVLM(Backend):
         self.ip = proc.image_processor
         self.mean, self.std = self.ip.image_mean, self.ip.image_std
         self.side, self.max_pixels = sm.GRID, sm.IMG * sm.IMG
+        self.ready = {}                                  # frame path -> its SmolVLM input, made ahead on threads
+
+    def prefetch(self, frames, workers):
+        """A video's SmolVLM inputs made on threads, so the GPU doesn't wait for frames decoded one at a time. Each frame
+        gets exactly what frame_input would make; only the timing changes."""
+        self.ready.clear()
+        self.sm.load_stock_inputs(self.ip, [dict(fr, key=fr["path"]) for fr in frames], self.ready, workers)
+
+    def frame_input(self, fr):
+        """The frame's SmolVLM input, from the threads if they made it. Looked up by path, because the two-view GazeVLM's
+        views of a frame share its key."""
+        rec = self.ready.pop(fr["path"], None)
+        if rec is None:
+            from PIL import Image
+            rec = self.sm.stock_input(self.ip, Image.open(fr["path"]).convert("RGB"))
+        return rec
 
     def frame_grid(self, fr):
-        from PIL import Image
-        rec = self.sm.stock_input(self.ip, Image.open(fr["path"]).convert("RGB"))
-        return self.sm.encode_uniform(self.model, rec, self.sm.IMG, self.mean, self.std).view(self.side, self.side, -1)
+        return self.sm.encode_uniform(self.model, self.frame_input(fr), self.sm.IMG, self.mean, self.std
+                                      ).view(self.side, self.side, -1)
 
     def frame_tokens(self, grid, rc, t=THUMB):
         return (pick(grid, rc, t),)
@@ -303,13 +323,14 @@ class SmolVLM(Backend):
 
 # ---------------------------------------------------------------------------- evaluation
 @torch.no_grad()
-def run_questions(backend, items, conditions, out_path, build_messages, log_every=25):
+def run_questions(backend, items, conditions, out_path, build_messages, log_every=25, prefetch_workers=0):
     """Score questions on their frames with GazeVLM tokens; resumable.
 
     conditions: {name: dict(rho=..., and optionally sigma, r_min, thumb, gaze='fixation' | 'trace')}.
     items: dicts with qid, video, question, options, answer, frames (key, path, t, gaze, and
     gaze_trace for gaze='trace'), sorted by video: each frame is encoded once per video and its
-    tokens made once per (condition, frame)."""
+    tokens made once per (condition, frame). With prefetch_workers, a video's frames are loaded on
+    threads when it starts, which its first `sec` then doesn't include."""
     done = set()
     if os.path.exists(out_path):
         for line in open(out_path):
@@ -327,6 +348,8 @@ def run_questions(backend, items, conditions, out_path, build_messages, log_ever
                 toks.clear()
                 torch.cuda.empty_cache()
                 video = it["video"]
+                if prefetch_workers:
+                    backend.prefetch(it["frames"], prefetch_workers)
             arg = {**DEFAULTS, **conditions[c]}
             t0 = time.time()
             per = []

@@ -78,6 +78,7 @@ def summarize(cfg, videos=None):
             rows.append(dict(model=key, row=g.row.iloc[0], condition=cond, n=int(r.n), accuracy=r.accuracy,
                              ci_low=r.ci_low, ci_high=r.ci_high, frames_per_q=r.frames_per_q,
                              tokens_per_q=g.n_image_tokens.mean(), budget_pct=bud.get(cond, np.nan),
+                             prompt_tokens_per_q=g.n_tokens.mean() if "n_tokens" in g else np.nan,
                              gaze_missing_pct=gaze_missing_pct(g), videos=g.video.nunique()))
     return pd.DataFrame(rows)
 

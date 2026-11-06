@@ -33,6 +33,7 @@ class Adapter:
     stock_tokens = 0
     default_ids = ()
     loads_on_threads = False                         # its score() honours run.prefetch_workers
+    baselines_load_on_threads = False                # its baseline backends do too (gazevlm.Backend.prefetch)
 
     def __init__(self, model_id=None, cfg=None):
         ids = model_id if model_id else self.default_ids
@@ -359,6 +360,7 @@ class Phi(Adapter):
 class SmolVLM(Adapter):
     key, stock_tokens, default_ids = "smolvlm", 81, ("HuggingFaceTB/SmolVLM2-2.2B-Instruct",)
     loads_on_threads = True
+    baselines_load_on_threads = True
 
     def _load(self, model_id):
         from vlmeval import smolvlm_fovea as sm

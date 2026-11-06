@@ -7,10 +7,11 @@ the project.
 **Everything runs as Slurm jobs, not notebooks.** The Python is already command-line scripts. The job files are in
 `accuracy_tables/hpc/`, and the method detail is in `accuracy_tables/README.md`.
 
-**New task: section 10, the budget rule on all 350 videos and 4 models.** Sections 1 to 7 cover the 12-video run, section 8 the
-budget rule on those videos, and section 9 gate data for the other 338 videos and SmolVLM on Nymeria. All of those have run.
-Section 10 hasn't: its job files have only had a bash syntax check, and its Python and tests have never been executed, because
-Python isn't run on the machine they were written on. Expect to fix small problems, and report what you change.
+**New task: section 11, SmolVLM on all 350 videos with every row at 5, 10 and 20%.** Sections 1 to 7 cover the 12-video run, section 8 the
+budget rule on those videos, and section 9 gate data for the other 338 videos and SmolVLM on Nymeria. All of those have run. Section 10, the
+budget rule on 4 models, has run up to its pilot, and its step 4 waits for the user. Section 11 hasn't run: its job files have only had a bash
+syntax check, and its Python and tests have never been executed, because Python isn't run on the machine they were written on. Expect to fix
+small problems, and report what you change.
 
 ## 1. The task
 
@@ -106,6 +107,9 @@ All are in `accuracy_tables/hpc/`. Submit every one **from the repository root**
 | `all350_prepare.SBATCH` | section 10: tests, the joined data and its checks, the pilot list, the token count | no |
 | `all350_vlm.SBATCH <model> <check\|pilot\|full>` | section 10: one model, rows `uniform`, `blind`, `budget` | yes |
 | `all350_summary.SBATCH <pilot\|full>` | section 10: GPU use and the results table | no |
+| `smolvlm350_tests.SBATCH` | section 11: the CPU tests | no |
+| `smolvlm350.SBATCH <calibrate\|check\|pilot\|full>` | section 11: SmolVLM with every row, on B200 only | yes |
+| `smolvlm350_summary.SBATCH <pilot\|full>` | section 11: GPU use and the results table | no |
 
 Paths default to `/scratch/$USER/...`. Set `EGO_ROOT`, `GV_ROOT`, `HF_HOME`, `OVERLAY` or `IMAGE` before `sbatch` to
 override them. The `#SBATCH --output` lines assume `/scratch/<user>/GazeVLM/logs`.
@@ -142,6 +146,7 @@ Layout on the cluster:
   results/prefetch_check/   results/smoke_nymeria/   results/nymeria_pilot/   results/nymeria_smolvlm/    <- section 9
   newvideos/all350/                                 <- section 10: the joined fold files, predictions and frame links
   results/hpc350_check/   results/hpc350_pilot/   results/hpc_350/                                       <- section 10
+  results/smolvlm_350_check/   results/smolvlm_350_pilot/   results/smolvlm_350/                         <- section 11
   logs/
 ```
 
@@ -901,3 +906,197 @@ The log should end with `EVERY n IS COMPLETE`. It writes `results/hpc_350/summar
 3. For each new model: parity, `SAME ANSWERS` with its `max_prob_diff`, and how many reused answers changed.
 4. For each job: the GPU type and node, its length, its mean and lowest 30-minute GPU use, and any `oom` or `nan` records.
 5. Per model, for all 350 videos, AEA and Nymeria: `n`, accuracy, measured budget, frames per question and `gaze_missing_pct`, with the note that the results can't show whether the gate itself helps.
+
+## 11. Next task: SmolVLM on all 350 videos, with every row at 5, 10 and 20%
+
+**Don't submit any job until the user approves it, one step at a time.** Nothing here has been run.
+
+### Why this exists
+
+SmolVLM is the smallest of the 4 models, so the user wants its whole table first: the budget rule, its references and all 8 baselines at the same
+budgets, on every EgoEverything video, with AEA and Nymeria apart. The other 3 models come later, if the user asks.
+
+### Scope, set by the user
+
+- **Model:** `smolvlm` only.
+- **Videos:** all 350, 5,985 questions, on the joined data from section 10's step 1.
+- **Rows at 5, 10 and 20%:** the budget rule (`budget`), Uniform K + average pooling (`avgpool`), GazeVLM (`gazevlm`), GAZEVLM_EFFICIENT (`gazevlm2`), `streamingtom`, `dycoke`, `fastvid`,
+  `prunevid` and `dtd`.
+- **Reference rows:** `uniform` (the 100% budget) and `blind` (the 0% budget).
+- **No `ours` and no `nogate`,** so these results can't show whether the gate itself helps. The report says that on every line, and `compare_budget.py` isn't used.
+- **Do this before section 10's step 4.** Don't start that step, or any other model's baselines, unless the user says so.
+- **Unchanged:** the budgets, the rule's limit, preference order and slots, `K` (64 on SmolVLM), the fovea setting, and every baseline parameter except its budget parameter.
+
+### One GPU type, and nothing reused
+
+Answers can change with the GPU type: SmolVLM differed on 60 of 1,760 answers between an L40S and a B200, and on 0 of 60 where the type matched on other models. So every row of this run comes
+from one GPU type, **B200**.
+
+- **Why B200:** it has run SmolVLM for 30 minutes at 27.7% GPU use without being cancelled, which would break the 50% limit on `gl*` nodes.
+- **Nothing is copied.** `seed_results.py` isn't called, and every row is scored fresh into `results/smolvlm_350/`. Scoring the reference rows and the budget rule again costs about an hour, and it means no row depends on which GPU an old run landed on.
+- **It's enforced.** The job asks for `--gres=gpu:b200:1`, which a requeue keeps. `check_gpu --expect B200` stops the job on anything else, and `--record` writes the GPU's name to `results/smolvlm_350/smolvlm/gpu_types.txt`. The report fails if that file shows two types.
+- **If B200s stay busy, ask the user.** Don't override `--gres`. Changing the type is their decision, and it means starting the results folder again.
+- **The old results are only compared with.** The pilot compares `uniform`, `blind` and `budget` with `results/nymeria_smolvlm/`, which also ran on a B200. A difference there isn't from the GPU type, so report the count even if it's 0.
+
+### How each baseline reaches its budget
+
+The target is a share of the question-weighted Uniform K tokens over all 350 videos, measured the way `summarize.py` does it. On a 64-frame video that's 259.2, 518.4 and 1,036.8 tokens per question, or 4.05, 8.1 and 16.2 tokens per frame. Each row gets one knob per budget for the
+whole dataset, chosen on token counts only, with no answer read and no LLM run. `calibrate.py --fractions` does this, and it uses the same code as `results/hpc_all/`.
+
+| Row | Budget parameter | Counted from | Fixed |
+|---|---|---|---|
+| `avgpool` | grid side `s` | the grid | adaptive pooling |
+| `gazevlm2` | tokens per frame `B` | frame counts | `alpha`, `beta` |
+| `gazevlm` | `rho` | gaze on every frame | `sigma`, `R_min`, 2 x 2 thumbnail, fixation gaze |
+| `streamingtom` | `G/N` | frame counts | `tau`, `k`, `beta` |
+| `dycoke` | pruning rate | frame counts | window 32 |
+| `dtd` | drop share | frame counts | relative mode |
+| `fastvid` | `r` | its plans on encoded frames, encoder only | `c`, `tau`, `ignore`, `d`, `p`, `beta` |
+| `prunevid` | `beta` | its plans on encoded frames, encoder only | `tau` 0.8, `gamma`, `k`, sets of 14 or fewer not merged |
+
+**Row breaks don't arise here.** They only exist on Phi, where these counts would land too high, so `--fractions` stops on Phi until the user decides how to count them.
+
+### What each row is expected to reach
+
+These are landings in percent at 5, 10 and 20%, from each method's token rule. A row takes the closest it can reach on either side. **Bold** is more than 0.5 points off, which the report flags as `nearest_only`. **Nothing is forced:** no other parameter changes to close a gap.
+
+| Row | 5% | 10% | 20% | Why it can't get closer |
+|---|---|---|---|---|
+| `avgpool` | 4.94 (2 x 2) | **11.11** (3 x 3) | 19.75 (4 x 4) | square grids only: 10% is 4.94 or 11.11 |
+| `gazevlm2` | 4.94 | 9.88 | 19.75 | |
+| `gazevlm` | **about 10.6** | **about 10.6** | about 20 | the 2 x 2 thumbnail and the smallest gaze region are its floor, so 5% and 10% are one condition |
+| `streamingtom` | 4.94 | 9.88 | 19.75 | |
+| `dycoke` | **5.52** | 10.30 | 19.87 | 2 whole frames, then whole tokens per frame: 5% is 4.32 or 5.52 |
+| `dtd` | 5.21 | 10.07 | 19.79 | |
+| `fastvid` | about 4.94 | about 9.88 | **not known** | near-duplicate frames give up tokens, which sets a ceiling. It had one condition on SmolVLM before, which suggests a ceiling under 16%. Only the calibration can tell |
+| `prunevid` | **not known** | about 10 | about 20 | sets of 14 tokens or fewer never merge, which sets a floor that depends on the video |
+
+No baseline has run at 5% before: the earlier targets were Ours' budgets, 16 to 31% on SmolVLM. **Step 2 prints the real values. Show them to the user whatever they are.**
+
+### Threads, parity and low GPU use
+
+- **Baseline rows ignored `--prefetch-workers`, so a thread check would have tested nothing.** On SmolVLM they now load frames on threads, off by default. On the other models `run.py` stops with an error instead of ignoring it.
+- **The two views of `gazevlm2`:** a frame's views share its key, so loaded frames are looked up by path. Each local view is a lossless crop in `/dev/shm`, about 86 MB per video at most, removed once it's encoded.
+- **Parity is per model, not per row.** Parity runs at the start of every run. To reach the baselines too, `check_identity.py` sets 4 rows to keep every token: `avgpool` 9 x 9, `dtd` dropping none, `dycoke` pruning none and `streamingtom` keeping all. They must then give Uniform K's answers and tokens. The other 4 rows can't reproduce stock input, so they get parity and the thread check only.
+- **Low GPU use:** this will be a low-use job, because SmolVLM's answers are short at these budgets. Which limit applies to B200 nodes isn't known. **If a job is cancelled for low GPU use, stop and tell the user.** Don't move it to another GPU type.
+
+### What changed in the code
+
+| File | Change |
+|---|---|
+| `accuracy_tables/calibrate.py` | new `--fractions`: targets from `budget.fractions`, nothing scored first, writes `targets.csv`, stops on Phi. New `--prefetch-workers`. GazeVLM's count now runs one video at a time, because keeping every frame's sorted heatmap would take about 45 GB on 350 videos |
+| `vlmeval/gazevlm.py`, `streamingtom.py` | SmolVLM's backends load frames through `prefetch` and `frame_input` |
+| `vlmeval/avgpool.py`, `gazevlm2.py`, `dycoke.py`, `dtd.py`, `fastvid.py`, `prunevid.py` | `prefetch_workers`, off by default. `gazevlm2` now names each crop's file by frame and reads the frame's side from its header |
+| `accuracy_tables/models.py`, `run.py` | pass the workers to the baseline rows, and stop on models without them |
+| `accuracy_tables/hpc/check_gpu.py` | `--expect` and `--record`. With neither it behaves as before |
+| `accuracy_tables/hpc/all350/check_identity.py` | new: the full-budget check |
+| `accuracy_tables/hpc/all350/report.py` | `--models` and `--targets`: target and measured budget per row and budget, `nearest_only`, the GPU types, a fixed row order |
+| `accuracy_tables/summarize.py` | a new column, `prompt_tokens_per_q` |
+| `accuracy_tables/hpc/smolvlm350.SBATCH`, `smolvlm350_tests.SBATCH`, `smolvlm350_summary.SBATCH` | new: the jobs |
+| `tests/test_smolvlm350.py` | new: CPU tests with a fake encoder and LLM, through the real run loops and `calibrate.py` |
+
+**Section 10's jobs and rows don't change.** `all350_vlm.SBATCH`, `seed_results.py`, `config.all350.yaml`, `budget_rule.py` and `compare_budget.py` aren't touched, and neither are your local `--comment` lines.
+
+### Steps
+
+**Job count: 7 `sbatch` jobs, 4 on GPU and 3 on CPU.** All times are estimates, and the answers number 173,565 at most (29 conditions x 5,985). That's 167,580 if `gazevlm` merges its 5% and 10%, and fewer if `fastvid` or `prunevid` merge any too.
+
+| Step | Job | Runs on | Time |
+|---|---|---|---|
+| 1. Tests | `smolvlm350_tests.SBATCH` | CPU | minutes |
+| 2. The baselines' knobs | `smolvlm350.SBATCH calibrate` | GPU | about 1 hour |
+| 3. Parity, threads, full budget | `smolvlm350.SBATCH check` | GPU | about 15 minutes |
+| 4. The pilot, on section 10's 7 videos | `smolvlm350.SBATCH pilot`, `smolvlm350_summary.SBATCH pilot` | GPU, CPU | about 20 minutes |
+| 5. All 350 videos | `smolvlm350.SBATCH full`, `smolvlm350_summary.SBATCH full` | GPU, CPU | about 5 hours |
+
+Set `SBATCH_ACCOUNT` as in section 5, and submit from `repo/`. **Before step 1,** on the login node:
+
+```bash
+squeue -u $USER                                 # no job of yours may be using the checkout, so wait for Phi's pilot
+git status --short                              # expect only your 2 local --comment edits
+git pull --ff-only origin eyehead-gate
+ls /scratch/$USER/GazeVLM/newvideos/lists/all350_pilot.txt     # from section 10's step 1
+```
+
+**Step 1: tests.**
+
+```bash
+sbatch accuracy_tables/hpc/smolvlm350_tests.SBATCH
+```
+
+The log should end with every test passing. **If one fails, fix it if it's a small problem in the new code and report what you changed.** Don't loosen a test to make it pass.
+
+**Step 2: the baselines' knobs.** Ask the user first.
+
+```bash
+sbatch --job-name=smolvlm350-calibrate accuracy_tables/hpc/smolvlm350.SBATCH calibrate
+```
+
+The log prints the GPU, the budgets and a table of every row's target, predicted budget, gap and knob, and ends with `TARGETS WRITTEN`. It writes `results/smolvlm_350/config_baselines.yaml`, `calibration.json` and `targets.csv`. **Show the user the table, and wait.** A job on another GPU type stops at once.
+
+**Step 3: parity, threads and full budget.** Ask the user first.
+
+```bash
+sbatch --job-name=smolvlm350-check accuracy_tables/hpc/smolvlm350.SBATCH check
+```
+
+The log should show `parity OK` three times, `=== 0 failed of 13` twice, `SAME ANSWERS`, `=== 0 failed of 5`, `SAME AS UNIFORM K`, and end with `CHECK DONE: smolvlm`. **`ANSWERS DIFFER` or `NOT THE SAME AS UNIFORM K`: stop and tell the user.** If parity fails, send them the report.
+
+**Step 4: the pilot.** Ask the user first. These are section 10's 7 videos, 386 questions.
+
+```bash
+ID=$(sbatch --parsable --job-name=smolvlm350-pilot accuracy_tables/hpc/smolvlm350.SBATCH pilot)
+sbatch --dependency=afterany:${ID%%;*} accuracy_tables/hpc/smolvlm350_summary.SBATCH pilot
+```
+
+- **The pilot's log** ends with a `TOKENS MATCH` line, which counts how many answers differ from `results/nymeria_smolvlm/`. Its `missing` count is the AEA video, which that folder doesn't have. Show the user this line even if it's 0. **`TOKENS DIFFER`: stop and tell the user.**
+- **The summary's log** gives the GPU use, then the table per group, and ends with `EVERY n IS COMPLETE`.
+- **Show the user the measured budget against the target for every row and budget, and wait.** That's the check before any full run. The table holds accuracy too, and nothing may change because of it.
+
+**Step 5: all 350 videos.** Ask the user first.
+
+```bash
+sbatch --job-name=smolvlm350-full accuracy_tables/hpc/smolvlm350.SBATCH full
+```
+
+**A job that ends in `TIMEOUT` isn't requeued: submit the same line again,** and it continues where it stopped. Never run two at once: `singleton` prevents it if you keep the job name. When it has finished:
+
+```bash
+sbatch accuracy_tables/hpc/smolvlm350_summary.SBATCH full
+```
+
+The log should end with `EVERY n IS COMPLETE`, and it writes `results/smolvlm_350/summary_by_group.csv`. **`INCOMPLETE`: rerun the job, or tell the user.** A question that ran out of memory counts as done, so it shows up here as a low `n`.
+
+### Expected, not bugs
+
+- **`nearest_only` is True** on the cells in bold above. It's a flag, not a failure.
+- **One condition fewer than 29 or more,** where budgets share a condition. The row still has a line per budget, with the same results.
+- **`fastvid` or `prunevid` landing apart on AEA and Nymeria:** one knob for the whole dataset, and their tokens depend on the video. Report it, and don't add a knob per group.
+- **`budget` measuring under its target:** the limit is a ceiling, so a quiet video sends only its marks.
+- **`gaze_missing_pct` is blank** on rows that don't use gaze. Only `budget`, `gazevlm` and `gazevlm2` have it.
+- **Under 64 frames per question** on `fastvid`, `prunevid` and on short videos: frames left with no tokens leave the prompt.
+- **`prompt_tokens_per_q` differs between rows at one budget:** the budget counts visual tokens only, and each frame sent also adds a time label to the prompt. Report it.
+- **About 10 minutes at 0% GPU at the start of the calibrate job:** loading the data, then counting GazeVLM's tokens from the gaze.
+- **`350 test videos` in the log, a `FutureWarning` about empty frames, and `sec` not being a latency:** as in section 10.
+
+### Rules for this task
+
+- **Don't change anything after seeing accuracy:** not the budgets, the limit, the preference order, the slots, the fovea setting, `K` or any baseline parameter.
+- **Don't rerun the calibrate job after step 3 without asking.** It rewrites the knobs, and results under the old ones would stop matching `targets.csv`.
+- **Calibrate on token counts only.** Never pick a knob by reading answers.
+- **Don't force a budget:** if a row can't reach one, report the nearest. Changing another parameter or the frame count is the user's decision.
+- **Don't add rows, controls, models or videos without asking,** and keep any batching as a separate change.
+- **Don't claim a winner.** Without a no-gate row, these results can't show whether the gate itself helps.
+- **One GPU type.** Don't override `--gres`, and don't copy records in from another folder.
+- **Never write to `data/folds/`, `results/hpc_all/`, `results/hpc_budget/` or `results/nymeria_smolvlm/`.** Never score with `--no-parity`.
+- **Commit only when the user asks.** Never commit results, accuracy numbers, NetIDs, account names, tokens or `*CONTEXT*.md`.
+- **Nothing runs on the user's Mac.** Give one read-only command at a time when you need them to look at something.
+
+### What to report back
+
+1. Any code you changed, and each step's last log line.
+2. Step 2's table: every row's target, predicted budget, gap and knob, and which rows only reached the nearest.
+3. Step 3: parity, `SAME ANSWERS` with each row's `max_prob_diff`, and the `SAME AS UNIFORM K` lines.
+4. Step 4: the `TOKENS MATCH` line, and the measured budget against the target for every row and budget.
+5. For each GPU job: the GPU type and node, its length, its mean and lowest 30-minute GPU use, and any `oom` or `nan` records.
+6. For all 350 videos, AEA and Nymeria, per row and budget: `n`, accuracy, target and measured budget, frames per question and `gaze_missing_pct`, with the note that the results can't show whether the gate itself helps.

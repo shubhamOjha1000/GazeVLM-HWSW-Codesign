@@ -46,9 +46,11 @@ The models (keys used everywhere in this folder):
 | `colab_accuracy_tables.ipynb` | the same steps on Colab (Google Drive paths) |
 | `hpc/` | the same steps as Slurm jobs on NYU Torch; see `../HPC_ACCURACY_RUNBOOK.md` |
 | `hpc/newvideos/` | gate data for videos outside the gate's 70, built from the cluster's files with no VRS or DINOv2; see section 9 of the runbook |
-| `hpc/all350/` | the budget rule on all 350 videos: joining the data, the token count, reusing records, the report; see section 10 of the runbook |
+| `hpc/all350/` | the budget rule on all 350 videos: joining the data, the token count, reusing records, the report; see section 10 of the runbook. Also the full-budget check for section 11 |
+| `hpc/smolvlm350*.SBATCH` | SmolVLM on all 350 videos with every row at 5, 10 and 20%, on one GPU type; see section 11 of the runbook |
 | `../tests/test_newvideos.py` | CPU tests of `hpc/newvideos/` and of loading frames on threads |
 | `../tests/test_all350.py` | CPU tests of `hpc/all350/` and of loading frames on threads on Qwen2.5, Qwen3 and Phi |
+| `../tests/test_smolvlm350.py` | CPU tests of section 11: threads on SmolVLM's baseline rows, the knobs, the full-budget check, the report |
 | `../tests/test_accuracy_tables.py` | CPU tests of the config, frame selection and budget code |
 | `../vlmeval/budget_rule.py` | the frame budget: the frame limit, the send reasons, the slots and the frame kept per slot |
 | `../tests/test_budget_rule.py` | CPU tests of the frame budget: the rule, the slots, the two rows, the comparison |
@@ -132,7 +134,9 @@ sets every baseline's knob to give the same budget on the same questions: exact 
 (StreamingTOM G / N, DyCoke's K, DTD's drop share, average pooling's s, the two-view GazeVLM's B), from the gaze
 (GazeVLM's rho) or from the encoded frames (PruneVid's beta, FastVID's r: their own plans, encoder only). Only
 token counts are used, never answers. It writes a copy of the config with those knobs (run the baselines with it)
-and `<out_dir>/<model>/calibration.json`.
+and `<out_dir>/<model>/calibration.json`. With `--fractions` the targets are `budget.fractions` (5, 10 and 20%) instead,
+so nothing needs scoring first, and it also writes `<out_dir>/<model>/targets.csv` for `hpc/all350/report.py`. It stops on
+Phi, whose baselines add row breaks that these counts leave out.
 
 **Smoke test** (does every method run on every model? a few minutes per model; the notebook's `SMOKE = True`):
 

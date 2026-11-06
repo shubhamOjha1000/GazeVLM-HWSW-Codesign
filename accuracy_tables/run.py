@@ -33,6 +33,7 @@ from accuracy_tables.models import ADAPTERS, build_messages  # noqa: E402
 
 ROWS = ("uniform", "blind", "ours", "gazevlm", "streamingtom", "dycoke", "fastvid", "prunevid", "dtd", "avgpool", "gazevlm2")
 EXTRA_ROWS = ("budget", "nogate")      # the frame budget (vlmeval/budget_rule.py): run only when named in --rows
+BASELINE_ROWS = ("gazevlm", "streamingtom", "dycoke", "fastvid", "prunevid", "dtd", "avgpool", "gazevlm2")
 BLIND = "blind (question and options only)"
 
 
@@ -203,7 +204,8 @@ def row_jobs(ad, cfg, data, rows):
                                              thumb=int(g["thumb"]), gaze=g["gaze"]) for r in g["rho"]}
         add("gazevlm", f"--- GazeVLM: the {k} Uniform K frames per video, ROI + {g['thumb']}x{g['thumb']} thumbnail tokens, "
             f"rho in {list(g['rho'])}", uniform_items, conds,
-            lambda items, conds, path: gz.run_questions(ad.gazevlm_backend(), items, conds, path, build_messages))
+            lambda items, conds, path: gz.run_questions(ad.gazevlm_backend(), items, conds, path, build_messages,
+                                                        prefetch_workers=ad.prefetch_workers()))
     if "streamingtom" in rows:
         from vlmeval import streamingtom as stm
         s = cfg["streamingtom"]
@@ -212,21 +214,24 @@ def row_jobs(ad, cfg, data, rows):
                  for r in s["ratio"]}
         add("streamingtom", f"--- StreamingTOM (CTR): the {k} Uniform K frames per video in time order, G / N in "
             f"{list(s['ratio'])}", uniform_items, conds,
-            lambda items, conds, path: stm.run_questions(ad.streamingtom_backend(), items, conds, path, build_messages))
+            lambda items, conds, path: stm.run_questions(ad.streamingtom_backend(), items, conds, path, build_messages,
+                                                         prefetch_workers=ad.prefetch_workers()))
     if "dycoke" in rows:
         from vlmeval import dycoke as dy
         conds = {dycoke_name(s["window"], s["prune"], k): dict(window=int(s["window"]), prune=float(s["prune"]))
                  for s in cfg["dycoke"]["settings"]}
         add("dycoke", f"--- DyCoke (TTM): the {k} Uniform K frames per video in windows; settings "
             f"{[(c['window'], c['prune']) for c in conds.values()]}", uniform_items, conds,
-            lambda items, conds, path: dy.run_questions(ad.dycoke_backend(), items, conds, path, build_messages))
+            lambda items, conds, path: dy.run_questions(ad.dycoke_backend(), items, conds, path, build_messages,
+                                                        prefetch_workers=ad.prefetch_workers()))
     if "fastvid" in rows:
         from vlmeval import fastvid as fv
         s = cfg["fastvid"]
         conds = {fastvid_name(r, s, k): dict(r=float(r), c=int(s["c"]), tau=float(s["tau"]), ignore=float(s["ignore"]),
                                              d=float(s["d"]), p=int(s["p"]), beta=float(s["beta"])) for r in s["r"]}
         add("fastvid", f"--- FastVID: the {k} Uniform K frames per video (offline), r in {list(s['r'])}", uniform_items, conds,
-            lambda items, conds, path: fv.run_questions(ad.fastvid_backend(), items, conds, path, build_messages))
+            lambda items, conds, path: fv.run_questions(ad.fastvid_backend(), items, conds, path, build_messages,
+                                                        prefetch_workers=ad.prefetch_workers()))
     if "prunevid" in rows:
         from vlmeval import prunevid as pv
         s = cfg["prunevid"]
@@ -234,14 +239,16 @@ def row_jobs(ad, cfg, data, rows):
                                               knn=int(s["knn"]), min_tokens=int(s["min_tokens"])) for c in s["settings"]}
         add("prunevid", f"--- PruneVid (token merging): the {k} Uniform K frames per video (offline); settings "
             f"{[(c['tau'], c['beta']) for c in conds.values()]} (tau, beta)", uniform_items, conds,
-            lambda items, conds, path: pv.run_questions(ad.prunevid_backend(), items, conds, path, build_messages))
+            lambda items, conds, path: pv.run_questions(ad.prunevid_backend(), items, conds, path, build_messages,
+                                                        prefetch_workers=ad.prefetch_workers()))
     if "dtd" in rows:
         from vlmeval import dtd
         conds = {dtd_name(s, k): dict(threshold=float(s["threshold"]), absolute=bool(s["absolute"]))
                  for s in cfg["dtd"]["settings"]}
         add("dtd", f"--- DTD (TimeChat-Online): the {k} Uniform K frames per video in time order; settings "
             f"{[(c['threshold'], 'absolute' if c['absolute'] else 'relative') for c in conds.values()]}", uniform_items, conds,
-            lambda items, conds, path: dtd.run_questions(ad.dtd_backend(), items, conds, path, build_messages))
+            lambda items, conds, path: dtd.run_questions(ad.dtd_backend(), items, conds, path, build_messages,
+                                                         prefetch_workers=ad.prefetch_workers()))
     if "avgpool" in rows:
         from vlmeval import avgpool as ap
         be = ad.avgpool_backend()
@@ -251,7 +258,8 @@ def row_jobs(ad, cfg, data, rows):
         add("avgpool", f"--- Uniform K + average pooling: the {k} Uniform K frames, each pooled to "
             f"{[f'{s}x{s}' for s in sides]} tokens (budgets {list(cfg['avgpool']['budget'])} of {ad.stock_tokens} tokens "
             f"per frame)", uniform_items, conds,
-            lambda items, conds, path: ap.run_questions(be, items, conds, path, build_messages))
+            lambda items, conds, path: ap.run_questions(be, items, conds, path, build_messages,
+                                                        prefetch_workers=ad.prefetch_workers()))
     if "gazevlm2" in rows:
         from vlmeval import gazevlm2 as gv2
         g = cfg["gazevlm2"]
@@ -259,7 +267,8 @@ def row_jobs(ad, cfg, data, rows):
         conds = {gazevlm2_name(t, g, k): dict(tokens=t, alpha=float(g["alpha"]), beta=float(g["beta"])) for t in tokens}
         add("gazevlm2", f"--- GazeVLM (two-view): the {k} Uniform K frames, each a global and a gaze-centred view; "
             f"{tokens} tokens per frame (budgets {list(g['budget'])} of {ad.stock_tokens})", uniform_items, conds,
-            lambda items, conds, path: gv2.run_questions(ad.gazevlm2_backend(), items, conds, path, build_messages))
+            lambda items, conds, path: gv2.run_questions(ad.gazevlm2_backend(), items, conds, path, build_messages,
+                                                         prefetch_workers=ad.prefetch_workers()))
     for row in EXTRA_ROWS:
         if row not in rows:
             continue
@@ -315,6 +324,13 @@ def models_without_threads(keys, workers):
     return [k for k in keys if workers and not ADAPTERS[k].loads_on_threads]
 
 
+def baselines_without_threads(keys, rows, workers):
+    """Models whose baseline rows can't take run.prefetch_workers: only SmolVLM's backends load frames on threads so far."""
+    if not workers or not set(rows) & set(BASELINE_ROWS):
+        return []
+    return [k for k in keys if not ADAPTERS[k].baselines_load_on_threads]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True, help="YAML config (copy config.example.yaml)")
@@ -329,7 +345,8 @@ def main(argv=None):
     ap.add_argument("--no-parity", action="store_true", help="skip the parity check (not recommended)")
     ap.add_argument("--prefetch-workers", type=int,
                     help="override run.prefetch_workers: threads loading a video's frames ahead, for the rows scored "
-                         "through the fovea modules (uniform, ours, budget, nogate) on qwen2.5, qwen3, phi and smolvlm")
+                         "through the fovea modules (uniform, ours, budget, nogate) on qwen2.5, qwen3, phi and smolvlm, "
+                         "and for the baseline rows on smolvlm")
     a = ap.parse_args(argv)
 
     cfg = common.load_config(a.config)
@@ -349,6 +366,9 @@ def main(argv=None):
     no_threads = models_without_threads(keys, cfg["run"]["prefetch_workers"])
     if no_threads:
         ap.error(f"frame loading threads aren't built for {no_threads}: leave out --prefetch-workers")
+    no_threads = baselines_without_threads(keys, rows, cfg["run"]["prefetch_workers"])
+    if no_threads:
+        ap.error(f"frame loading threads aren't built for the baseline rows of {no_threads}: leave out --prefetch-workers")
 
     data = common.load_data(cfg)
     if a.max_questions:

@@ -330,10 +330,9 @@ class Phi(gz.Phi):
 class SmolVLM(gz.SmolVLM):
     """SmolVLM2: 81 tokens of 42 px; saliency from its SigLIP's last layer (3 x 3 patches per token)."""
     def frame_state(self, fr):
-        from PIL import Image
         sm = self.sm
         vis, _ = sm.parts(self.model)
-        rec = sm.stock_input(self.ip, Image.open(fr["path"]).convert("RGB"))
+        rec = self.frame_input(fr)
         side = sm.IMG // sm.PATCH                                                # 27 patches per side
         pseudo = lambda q, k, m, s: pseudo_cls_attention(q, k, m, s, block_pool(side, 3))
         with _capture(self, encoder_layers(vis)[-1].self_attn, pseudo) as got:
@@ -354,13 +353,14 @@ def budget(ratio, n_tokens):
 
 
 @torch.no_grad()
-def run_questions(backend, items, conditions, out_path, build_messages, log_every=25):
+def run_questions(backend, items, conditions, out_path, build_messages, log_every=25, prefetch_workers=0):
     """Score questions on their frames with CTR-reduced tokens; resumable.
 
     conditions: {name: dict(ratio=G / N, and optionally tau, knn, beta, released_dpc)}.
     items: as for the *_fovea.run_questions (sorted by video), each item's frames in time order: a
     frame is reduced from its own tokens and its predecessor's only (causal). Each frame is encoded once
-    per video; its tokens are made once per (condition, predecessor, frame)."""
+    per video; its tokens are made once per (condition, predecessor, frame). With prefetch_workers, a
+    video's frames are loaded on threads when it starts, which its first `sec` then doesn't include."""
     done = set()
     if os.path.exists(out_path):
         for line in open(out_path):
@@ -378,6 +378,8 @@ def run_questions(backend, items, conditions, out_path, build_messages, log_ever
                 toks.clear()
                 torch.cuda.empty_cache()
                 video = it["video"]
+                if prefetch_workers:
+                    backend.prefetch(it["frames"], prefetch_workers)
             arg = {**DEFAULTS, **conditions[c]}
             t0 = time.time()
             per, prev = [], None

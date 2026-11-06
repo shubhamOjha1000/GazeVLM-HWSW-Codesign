@@ -78,12 +78,13 @@ class SmolVLM(gz.SmolVLM):
 
 # ---------------------------------------------------------------------------- evaluation
 @torch.no_grad()
-def run_questions(backend, items, conditions, out_path, build_messages, log_every=25):
+def run_questions(backend, items, conditions, out_path, build_messages, log_every=25, prefetch_workers=0):
     """Score questions on their frames, each pooled to s x s tokens; resumable.
 
     conditions: {name: dict(side=s)}.
     items: as for the *_fovea.run_questions (sorted by video). Each frame is encoded once per video and
-    pooled once per (side, frame)."""
+    pooled once per (side, frame). With prefetch_workers, a video's frames are loaded on threads when it
+    starts, which its first `sec` then doesn't include."""
     done = set()
     if os.path.exists(out_path):
         for line in open(out_path):
@@ -101,6 +102,8 @@ def run_questions(backend, items, conditions, out_path, build_messages, log_ever
                 toks.clear()
                 torch.cuda.empty_cache()
                 video = it["video"]
+                if prefetch_workers:
+                    backend.prefetch(it["frames"], prefetch_workers)
             s = int(conditions[c]["side"])
             t0 = time.time()
             per = []

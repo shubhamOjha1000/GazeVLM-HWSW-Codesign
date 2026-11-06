@@ -211,7 +211,7 @@ class SmolVLM(stm.SmolVLM):
 
 # ---------------------------------------------------------------------------- evaluation
 @torch.no_grad()
-def run_questions(backend, items, conditions, out_path, build_messages, log_every=25):
+def run_questions(backend, items, conditions, out_path, build_messages, log_every=25, prefetch_workers=0):
     """Score questions on their frames with PruneVid-merged tokens; resumable.
 
     conditions: {name: dict(tau=..., beta=..., and optionally gamma, knn, min_tokens)}.
@@ -234,6 +234,8 @@ def run_questions(backend, items, conditions, out_path, build_messages, log_ever
                 toks.clear()
                 torch.cuda.empty_cache()
                 video = it["video"]
+                if prefetch_workers:                         # its first `sec` then doesn't include loading
+                    backend.prefetch(it["frames"], prefetch_workers)
             arg = {**DEFAULTS, **conditions[c]}
             t0 = time.time()
             keys = tuple(fr["key"] for fr in it["frames"])

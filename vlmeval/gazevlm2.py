@@ -166,13 +166,48 @@ def _load_rgb(path):
     return Image.open(path).convert("RGB")
 
 
+def _frame_side(path):
+    """A square frame's side in px, from its header."""
+    from PIL import Image
+    with Image.open(path) as im:
+        return im.size[0]
+
+
+def crop_file(tmp, fr, alpha):
+    return os.path.join(tmp, f"{fr['key'][0]}_{fr['key'][1]}_{alpha:g}.bmp")
+
+
+def save_crop(fr, window, path):
+    """The frame's local view saved losslessly, for the encoder's frame path."""
+    r0, c0, side = window
+    _load_rgb(fr["path"]).crop((c0, r0, c0 + side, r0 + side)).save(path)
+
+
+def prefetch_views(backend, frames, alphas, tmp, workers):
+    """A video's whole frames and local views loaded on threads, so the GPU doesn't wait for them. The crops are the
+    same files the one-at-a-time path writes; only the timing changes."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def crop(job):
+        fr, alpha = job
+        window, _ = crop_window(gz.gaze_points(fr, "fixation")[0][0], _frame_side(fr["path"]), alpha)
+        path = crop_file(tmp, fr, alpha)
+        save_crop(fr, window, path)
+        return dict(fr, path=path)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        crops = list(pool.map(crop, [(fr, a) for fr in frames for a in alphas]))
+    backend.prefetch(list(frames) + crops, workers)
+
+
 @torch.no_grad()
-def run_questions(backend, items, conditions, out_path, build_messages, log_every=25):
+def run_questions(backend, items, conditions, out_path, build_messages, log_every=25, prefetch_workers=0):
     """Score questions on their frames, each reduced to its two views' selected tokens; resumable.
 
     conditions: {name: dict(tokens=B (per frame), alpha=..., beta=...)}.
     items: as for the *_fovea.run_questions (sorted by video). A frame's global view is encoded once per
-    video, its local view once per (frame, alpha)."""
+    video, its local view once per (frame, alpha). With prefetch_workers, a video's views are loaded on
+    threads when it starts, which its first `sec` then doesn't include."""
     done = set()
     if os.path.exists(out_path):
         for line in open(out_path):
@@ -185,6 +220,7 @@ def run_questions(backend, items, conditions, out_path, build_messages, log_ever
     # the crop goes to the encoder through the frame path; an uncompressed BMP in RAM (/dev/shm where it exists)
     # keeps that lossless and adds no PNG compression to the timings
     tmp = tempfile.mkdtemp(prefix="gazevlm2_", dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
+    alphas = sorted({float({**DEFAULTS, **cond}["alpha"]) for cond in conditions.values()})
     states, video, t_start, n_new = {}, None, time.time(), 0
     try:
         with open(out_path, "a") as fh:
@@ -193,6 +229,8 @@ def run_questions(backend, items, conditions, out_path, build_messages, log_ever
                     states.clear()
                     torch.cuda.empty_cache()
                     video = it["video"]
+                    if prefetch_workers:
+                        prefetch_views(backend, it["frames"], alphas, tmp, prefetch_workers)
                 arg = {**DEFAULTS, **conditions[c]}
                 alpha, beta, B = float(arg["alpha"]), float(arg["beta"]), int(arg["tokens"])
                 t0 = time.time()
@@ -202,14 +240,15 @@ def run_questions(backend, items, conditions, out_path, build_messages, log_ever
                     n_missing += int(missing)
                     if ("g", fr["key"]) not in states:
                         states[("g", fr["key"])] = backend.frame_state(fr)
-                        states[("S", fr["key"])] = _load_rgb(fr["path"]).size[0]
+                        states[("S", fr["key"])] = _frame_side(fr["path"])
                     S = states[("S", fr["key"])]
                     window, frac_l = crop_window(pts[0], S, alpha)
                     if ("l", fr["key"], alpha) not in states:
-                        r0, c0, side = window
-                        crop_path = os.path.join(tmp, "crop.bmp")
-                        _load_rgb(fr["path"]).crop((c0, r0, c0 + side, r0 + side)).save(crop_path)
+                        crop_path = crop_file(tmp, fr, alpha)
+                        if not os.path.exists(crop_path):    # with threads it's already written
+                            save_crop(fr, window, crop_path)
                         states[("l", fr["key"], alpha)] = backend.frame_state(dict(fr, path=crop_path))
+                        os.remove(crop_path)
                     glob, local = states[("g", fr["key"])], states[("l", fr["key"], alpha)]
                     n = backend.side
                     bv = view_budget(B, len(glob["tokens"]))
