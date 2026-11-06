@@ -1,0 +1,17 @@
+# All 350 videos on NYU Torch, from the data folder that accuracy_tables/hpc/all350/prepare.py joins. GV_ROOT and EGO_ROOT come from
+# common.sh. Everything not set here keeps the defaults in accuracy_tables/common.py, which are the protocol: don't change them.
+paths:
+  data_root: ${GV_ROOT}/newvideos
+  folds_dir: ${data_root}/all350/folds
+  gate_ckpt_dir: ${GV_ROOT}/data/runs/eyehead
+  oof_cache: ${data_root}/all350/preds.csv                       # the 3 groups' existing predictions, so oof_predictions is never called
+  questions_json: ${EGO_ROOT}/Egoeverything_VQA.json
+  links_json: null
+  frames_cache_dir: ${data_root}/frames_tar                      # never used: every video has its frames and meta.json
+  frames_local_dir: ${data_root}/all350/frames                   # symlinks to frames_1344/ and newvideos/frames/
+  raw_download_dir: ${data_root}/raw
+  out_dir: ${GV_ROOT}/results/default                            # the jobs pass --out-dir
+run:
+  videos: all                                                    # every row sits in test.csv here, so `test` means nothing: use all or a list
+# budget.tokens_per_frame: smolvlm's 17 comes from the defaults. qwen2.5, qwen3 and phi are measured by all350/measure_tokens.py and added
+# here only with the user's OK, as a `budget:` section holding `tokens_per_frame:`. Until then, a budget row on them stops with a clear error.

@@ -7,10 +7,10 @@ the project.
 **Everything runs as Slurm jobs, not notebooks.** The Python is already command-line scripts. The job files are in
 `accuracy_tables/hpc/`, and the method detail is in `accuracy_tables/README.md`.
 
-**New task: section 9, gate data for Nymeria and the budget rule on it.** Sections 1 to 7 cover the 12-video run, and section 8
-the budget rule on those videos. Both have run. Section 9 hasn't: its job files have only had a bash syntax check, and its
-Python and tests have never been executed, because Python isn't run on the machine they were written on. Expect to fix small
-problems, and report what you change.
+**New task: section 10, the budget rule on all 350 videos and 4 models.** Sections 1 to 7 cover the 12-video run, section 8 the
+budget rule on those videos, and section 9 gate data for the other 338 videos and SmolVLM on Nymeria. All of those have run.
+Section 10 hasn't: its job files have only had a bash syntax check, and its Python and tests have never been executed, because
+Python isn't run on the machine they were written on. Expect to fix small problems, and report what you change.
 
 ## 1. The task
 
@@ -21,8 +21,8 @@ budget as our method, then write one summary table. Accuracy only: latency, memo
 back, uncomment them in `MODELS` in `accuracy_tables/hpc/common.sh`: that one list drives the downloads, the smoke test and
 `submit_all.sh`.
 
-**Scope: the 12 videos below (834 questions).** The other 338 videos in `$EGO_ROOT` have no gate data, so the code skips
-them. Don't extend to them without asking the user.
+**Scope: the 12 videos below (834 questions).** Section 9 built gate data for the other 338 videos in `$EGO_ROOT`, and section 10
+runs on all 350. Sections 1 to 7 stay on these 12.
 
 | Video | Questions | Set |
 |---|---|---|
@@ -103,6 +103,9 @@ All are in `accuracy_tables/hpc/`. Submit every one **from the repository root**
 | `newvideos_gate.SBATCH` | section 9, check 3: gate predictions and the comparison with AEA | no |
 | `newvideos_vlm.SBATCH <check\|pilot\|full>` | section 9: SmolVLM on Nymeria | yes |
 | `newvideos_summary.SBATCH <pilot\|full>` | section 9: `summary.csv` and `budget_compare.csv` | no |
+| `all350_prepare.SBATCH` | section 10: tests, the joined data and its checks, the pilot list, the token count | no |
+| `all350_vlm.SBATCH <model> <check\|pilot\|full>` | section 10: one model, rows `uniform`, `blind`, `budget` | yes |
+| `all350_summary.SBATCH <pilot\|full>` | section 10: GPU use and the results table | no |
 
 Paths default to `/scratch/$USER/...`. Set `EGO_ROOT`, `GV_ROOT`, `HF_HOME`, `OVERLAY` or `IMAGE` before `sbatch` to
 override them. The `#SBATCH --output` lines assume `/scratch/<user>/GazeVLM/logs`.
@@ -137,6 +140,8 @@ Layout on the cluster:
   results/smoke_budget/   results/hpc_budget/       <- section 8
   newvideos/                                        <- section 9: lists, gaze, rows, frames, one folder per group
   results/prefetch_check/   results/smoke_nymeria/   results/nymeria_pilot/   results/nymeria_smolvlm/    <- section 9
+  newvideos/all350/                                 <- section 10: the joined fold files, predictions and frame links
+  results/hpc350_check/   results/hpc350_pilot/   results/hpc_350/                                       <- section 10
   logs/
 ```
 
@@ -444,13 +449,12 @@ Rerunning continues where it stopped.
 3. For the 6 new conditions: `n` (should be 834), measured budget, frames per question, and any `oom` or `nan` records.
 4. The `budget_compare.csv` table and the GPU use log.
 
-## 9. Next task: gate data for Nymeria, then the budget rule on SmolVLM
+## 9. Gate data for Nymeria, then the budget rule on SmolVLM
 
-**Don't submit any job until the user approves it, one step at a time.** Three checks must pass before any VLM job on Nymeria.
-
-**Status:** step 1 first stopped at `REBUILD DIFFERS`, from a missing crop of the calibration, now fixed. Step 2 then ran at commit
-`539b854` and found a 30 Hz gaze problem, also fixed (see "How the gate data is built"). Its `check_gate` table isn't valid, because one
-pilot video's predictions came from misread gaze. Rerun step 1, then step 2, before step 3.
+**This has run.** Rows, gate predictions and 1 fps frames exist for all 350 videos, and SmolVLM scored all 325 Nymeria videos, which took
+29:59 on a B200 with GPU use averaging 27.7%. Section 10 builds on it. Step 1 first stopped at `REBUILD DIFFERS`, from a missing crop of
+the calibration, and step 2 found a 30 Hz gaze problem. Both were fixed before the steps below ran to the end (see "How the gate data is
+built").
 
 Where this section differs from context section 13, this section is right: 13 came partly from web summaries of
 the code, and this was checked against the code.
@@ -668,3 +672,232 @@ About 1 to 2 hours. The job asks for 8, and rerunning continues where it stopped
 3. The `--- budget rule` and `--- no gate` log lines, including frames with no gaze.
 4. For each condition: `n`, measured budget, frames per question, `gaze_missing_pct`, and any `oom` or `nan` records.
 5. The `budget_compare.csv` table, the GPU type, and mean GPU use with the job's length.
+
+## 10. Next task: the budget rule on all 350 videos and 4 models
+
+**Don't submit any job until the user approves it, one step at a time.** Nothing here has been run.
+
+Where this section differs from context section 13, this section is right: it was checked against the code, and 13 is an older plan for a
+different set of rows.
+
+### Why this exists
+
+Section 9 scored the budget rule on Nymeria with SmolVLM only. This task runs it on every EgoEverything video (350 videos, 5,985 questions)
+on the 4 models, so it can be read per model, with AEA and Nymeria apart.
+
+### Scope, set by the user
+
+- **Models:** `qwen2.5`, `qwen3`, `smolvlm`, `phi`.
+- **Rows:** `budget`, plus `uniform` and `blind` as references. Uniform K is also what the budgets are measured against.
+- **No `nogate` row.** So these results can't show whether the gate itself helps, and `report.py` says that on every line of its table.
+  `compare_budget.py` needs that row, so these jobs don't call it. Existing SmolVLM no-gate records stay where they are and aren't copied.
+- **Ask before adding Ours or the other baselines.**
+- **Unchanged:** the budgets (5%, 10%, 20%), the limit, the preference order, the slots, `K`, and each model using its smallest fovea setting.
+
+### How the three groups become one run
+
+The existing code reads one fold folder, one predictions file and one frames folder, so `prepare.py` makes one of each under
+`newvideos/all350/`, and `config.all350.yaml` points at them. Everything else is only read, and `prepare_data.py` isn't used.
+
+| Group | Videos, questions | Rows from | Predictions from | Frames in |
+|---|---|---|---|---|
+| `aea12` | 12, 834 | `data/folds/` | `oof_preds_full.csv` (held-out folds, and the 5-model average on the 4 test videos) | `frames_1344/` |
+| `aea13` | 13, 1,478 | `newvideos/aea13/folds/` | `newvideos/aea13/preds.csv` (5-model average) | `newvideos/frames/` |
+| `nymeria` | 325, 3,673 | `newvideos/nymeria/folds/` | `newvideos/nymeria/preds.csv` (5-model average) | `newvideos/frames/` |
+
+- **Each video keeps its existing predictions.** The 12 keep their original rows too, not their rebuilt ones, because predictions are matched
+  by the exact frame-name strings, and `results/hpc_all/` and `results/hpc_budget/` were scored on them.
+- **Only the columns the code reads are kept,** so the file stays small: `sequence`, `feat_frame_1`, `feat_frame_2`, `quad`, `gaze_xy_window`,
+  `n_oof_in_gap`.
+- **Frames are symlinks,** so no frame is copied, and `ensure_frames` sees `meta.json` through them and never writes.
+- **All rows sit in `test.csv`,** so `test` means nothing in this config. Use `all` or a video list.
+- **The check replaces `prepare_data.py`'s 834 and 204:** 5,985 questions on 350 videos, and 834, 1,478 and 3,673 per group. Then each video's
+  labels, Uniform K frames, gate frames and SmolVLM budget frames, with their gaze, must match what its own group gives when read from where it
+  was built.
+
+### Tokens per frame
+
+On SmolVLM the smallest fovea is always 17 tokens. On the other 3 models the layout's rings depend on where the gaze falls, so the count varies
+by frame. The rule takes one number per model.
+
+| Model | Tokens per frame, possible range | On the 12 videos (`results/hpc_all/`, per question) | Limits at 5 / 10 / 20% if that holds |
+|---|---|---|---|
+| Qwen2.5, Qwen3 | 40 to 64 | mean 48.8, 47.2 to 50.5 | 25 / 50 / 100 (at 49) |
+| Phi | 253 to 320 | mean 280.4, 277.6 to 284.9 | 12 / 25 / 51 (at 281) |
+| SmolVLM | exactly 17 | 17 | 15 / 30 / 60 |
+
+- **The value:** `measure_tokens.py` counts every frame of all 350 videos from real gaze, with a frame with no gaze counted at the image centre,
+  and proposes the mean over all frames, rounded up. It reads no answers. **The value goes into `config.all350.yaml` only with the user's OK,** and
+  until then a budget row on these models stops with a clear error.
+- **The count is checked first:** on the 12 videos it must predict `n_image_tokens` exactly on every Ours record of `results/hpc_all/` at this fovea setting.
+- **Why the mean and not the maximum:** the maximum would guarantee no video goes over, but the limits would fall to 19 / 38 / 76 and 11 / 22 / 45, spending
+  only about 3.8 / 7.6 / 15.2% and 4.2 / 8.4 / 17.2%. With the mean, a video can land slightly over, and the measured budget shows it.
+- **Qwen3 shares Qwen2.5's count:** its layout is the same one scaled up.
+
+**What a frame costs on Phi:** 84 to 147 crop tokens, 12 to 18 row breaks, a separator and a 156-token global view. So 157 tokens are always
+there, which is why Phi gets about half of Qwen's frames at the same budget. This is the fovea setting as ruled, not a bug, and `n_image_tokens` counts all of it.
+
+**The 24 tokens on Phi's baselines in `results/hpc_all/`:** `calibrate.py` counts only kept tokens for StreamingTOM, DyCoke, DTD and PruneVid, but
+their Phi `pack` adds a row break after each token row that has tokens. Once nearly all 24 rows have a token, that is about 24 per frame, or
+3.2 points of budget above Ours. Average pooling counts its breaks. FastVID and GazeVLM have the same gap in their counts, and how far they
+landed hasn't been looked at. This comes from reading the code, and one smoke row fits it. It doesn't touch this run, because the budget rule's count includes the
+breaks and no baseline runs here. Don't change `calibrate.py`: the user decides that if the baselines come back.
+
+### Threads, parity and low GPU use
+
+- **Threads were SmolVLM only,** and `--prefetch-workers` was silently ignored on the others, so a threads check there would have tested nothing. Qwen2.5, Qwen3
+  and Phi now load and resize frames on threads, off by default. Other models stop with an error if it's set. `cells_to_patches` and all GPU work stay on the main thread.
+- **`OMP_NUM_THREADS=1` in the GPU job,** because 8 loading threads each starting 8 OpenMP threads would fight over the 8 cores.
+- **Parity depends on the question:** Qwen must give the same answer and Phi's next token must be a letter. It has only passed on one AEA question on these models, and
+  the first question sorted is now a Nymeria one. The check job tests one of each. **If it fails, send the user the report. Don't loosen it and never use `--no-parity`.**
+- **Low GPU use:** Torch's limits are 50% on `ga*`, `gl*` and `gr*` nodes, 60% on `gh*`, and 10% by default, with no time window given. Which applies to B200
+  nodes isn't known, so the pilot records the node. `gpu_summary.py` reports the mean and the lowest 30-minute mean, because a mean can hide a long idle stretch.
+
+### Reuse and GPU type
+
+| Model | `uniform`, `blind` | `budget` | Still to score |
+|---|---|---|---|
+| SmolVLM | `hpc_all` (12), `nymeria_smolvlm` (325) | `hpc_budget` (12), `nymeria_smolvlm` (325) | the 13 other AEA videos, 1,478 questions |
+| Qwen2.5, Qwen3, Phi | `hpc_all` (12) | nothing | `uniform` and `blind` on 5,151 questions, `budget` on all 5,985 |
+
+- **`seed_results.py` copies them** into `results/hpc_350/` at the start of the full run, so the run skips them. It stops on an error record, a duplicate, a record of another
+  video, another condition name, or a wrong count. Step 1 also checks every one has the frames and tokens the joined data gives today.
+- **Why it's safe:** since `hpc_all`, the only model-code change on those rows is the thread loading, which the check job tests.
+- **Every new GPU job requests `--gres=gpu:b200:1`,** so all new records share one GPU type. Reused records stay on the GPUs they ran on, which were mixed. Tokens and frames don't depend on
+  the GPU. Answers can differ only through rounding on near-ties, which favours no row, and each check job measures it on 30 reused questions. Report the GPU types either way.
+
+### What changed in the code
+
+| File | Change |
+|---|---|
+| `accuracy_tables/hpc/all350/prepare.py` | new: joins the groups, picks the pilot, checks the result and the reused records |
+| `.../measure_tokens.py` | new: tokens per frame on real gaze, checked against recorded runs, and the proposed values |
+| `.../seed_results.py` | new: copies reusable records, with checks |
+| `.../report.py` | new: the results per model, for all videos, AEA and Nymeria |
+| `.../gpu_summary.py` | new: mean and lowest 30-minute GPU use |
+| `accuracy_tables/hpc/config.all350.yaml`, 3 `all350_*.SBATCH` files | new: paths and the jobs |
+| `vlmeval/qwen_fovea.py`, `qwen3_fovea.py`, `phi_fovea.py`, `accuracy_tables/models.py`, `run.py`, `common.py` | loading frames on threads, off by default |
+| `accuracy_tables/hpc/newvideos/compare_records.py` | new `--report`: only different frames or tokens fail, and it counts different answers |
+| `accuracy_tables/summarize.py` | skips a model with no results in the chosen videos |
+| `tests/test_all350.py` | new: CPU tests |
+
+**The existing rows and jobs don't change.** `smoke.SBATCH` and `run_model.SBATCH` aren't touched, so your local `--comment` lines stay. `compare_budget.py`,
+`budget_rule.py` and `prepare_data.py` aren't touched.
+
+### Steps
+
+**Job count: 14 `sbatch` jobs, 11 on GPU and 3 on CPU,** plus an expected 1 or 2 reruns for Phi, and perhaps 1 for Qwen3. All times are estimates.
+
+| Step | Job | Runs on |
+|---|---|---|
+| 1. Tests, joined data, checks, token count | `all350_prepare.SBATCH` | CPU |
+| 2. Parity, threads and reused answers | `all350_vlm.SBATCH <model> check`, for Qwen2.5, Qwen3 and Phi | 3 GPU |
+| 3. The pilot, on 7 videos | `all350_vlm.SBATCH <model> pilot`, for all 4; `all350_summary.SBATCH pilot` | 4 GPU, CPU |
+| 4. All 350 videos | `all350_vlm.SBATCH <model> full`, for all 4; `all350_summary.SBATCH full` | 4 GPU, CPU |
+
+Set `SBATCH_ACCOUNT` as in section 5, and submit from `repo/`. **Before step 1,** on the login node:
+
+```bash
+squeue -u $USER                                 # no job of yours may be using the checkout
+git status --short                              # expect only your 2 local --comment edits
+git pull --ff-only origin eyehead-gate
+myquota                                         # the joined files need under 1 GB, and the links 350 files
+```
+
+**Step 1: tests, joined data, checks and the token count.** About 30 to 60 minutes.
+
+```bash
+sbatch accuracy_tables/hpc/all350_prepare.SBATCH
+```
+
+The log should show the tests passing, the 7 pilot videos with their question counts, each group's counts, then `COMBINED MATCHES`, `REUSED RECORDS MATCH` and
+`TOKEN COUNT MATCHES RECORDS`, and end with the token table, the limits and a `PROPOSED` line. **Any other ending: stop and tell the user.** **Show the user the table, the limits and the
+`PROPOSED` line, and wait.** They decide the values, and they get committed to `config.all350.yaml`. Then pull again before step 2.
+
+**Step 2: check each new model.** Ask the user first. A few minutes on Qwen, up to about 30 on Phi.
+
+```bash
+for M in qwen2.5 qwen3 phi; do
+    sbatch --job-name=all350-check-$M accuracy_tables/hpc/all350_vlm.SBATCH $M check
+done
+```
+
+Each log should show `parity OK` three times, `=== 0 failed of 5` twice, `SAME ANSWERS`, `=== 0 failed of 2`, a `TOKENS MATCH` line, and end with `CHECK DONE`. Threads on and off run on the same
+GPU in one job, so **`ANSWERS DIFFER` means stop and tell the user.** The `TOKENS MATCH` line says how many of 60 reused answers changed against `results/hpc_all/`. Show it to the user even if it's 0: it's how
+much the GPU type matters, and they decide whether reuse stands. **`TOKENS DIFFER`: stop and tell the user.**
+
+**Step 3: the pilot.** Ask the user first. The 7 videos are 2 Nymeria videos with many questions, 4 with one, and 1 new AEA video, picked by position in the sorted names. That's about 440 questions: Phi takes
+roughly 1 to 2 hours, and SmolVLM a few minutes.
+
+```bash
+IDS=""
+for M in qwen2.5 qwen3 phi smolvlm; do
+    ID=$(sbatch --parsable --job-name=all350-pilot-$M accuracy_tables/hpc/all350_vlm.SBATCH $M pilot)
+    IDS=$IDS:${ID%%;*}
+done
+sbatch --dependency=afterany$IDS accuracy_tables/hpc/all350_summary.SBATCH pilot
+```
+
+The summary's log gives each job's GPU use, then the table, and ends with `EVERY n IS COMPLETE`. Then show the user the node and length of each job, and the time per row:
+
+```bash
+sacct -u $USER -S now-7days -X --name=all350-pilot-qwen2.5,all350-pilot-qwen3,all350-pilot-phi,all350-pilot-smolvlm --format=JobName%24,NodeList,Elapsed,State
+grep -h "^--- \|^done:" /scratch/$USER/GazeVLM/logs/all350-pilot-phi_*.log
+```
+
+**If a job's lowest 30-minute mean is under its node's limit, stop and tell the user before step 4.** SmolVLM's job will be too short for a 30-minute reading. Its `TOKENS MATCH` line compares the Nymeria videos with
+`results/nymeria_smolvlm/`, and its `missing` count is the new AEA video, which that folder doesn't have. Rescale the time table below from the pilot and show the user. If a job would need more than 8 hours, say so.
+
+**Step 4: all 350 videos.** Ask the user first.
+
+```bash
+for M in qwen2.5 qwen3 phi smolvlm; do
+    sbatch --job-name=all350-full-$M accuracy_tables/hpc/all350_vlm.SBATCH $M full
+done
+```
+
+| Model | New answers | At the speeds of `results/hpc_all/`, no threads | If B200 and threads help as assumed | Passes 8 hours? | Low-GPU risk |
+|---|---|---|---|---|---|
+| SmolVLM | 7,390 | about 9 min, plus about 5 min startup | shorter | No | Low: short, and it ran 30 min at 27.7% uncancelled |
+| Qwen2.5 | 28,257 | 6.7 h | 2.4 h | No | Medium: about 60% of the time is loading and encoding frames |
+| Qwen3 | 28,257 | 7.8 h | 2.6 h | Only close if B200 gives no speed-up | Medium: about 75% |
+| Phi | 28,257 | 22.7 h | 10.3 h | **Yes: 2 or 3 jobs** | Low on Uniform, medium on the budget rows |
+
+The assumption divides frame encoding by 3.7, which is what SmolVLM gained on Nymeria on a B200 with threads, and model answering by 2, which is a guess. Phi's Uniform row alone is about 15.5 hours at those speeds, at about 10.5 s per question. **A job that ends in `TIMEOUT` isn't requeued: submit the same line again,
+and it continues where it stopped.** The copy step leaves existing result files alone. Never run two jobs of one model at once: `singleton` prevents it if you keep the job name.
+
+When every job has finished:
+
+```bash
+sbatch accuracy_tables/hpc/all350_summary.SBATCH full
+```
+
+The log should end with `EVERY n IS COMPLETE`. It writes `results/hpc_350/summary_by_group.csv`. **`INCOMPLETE`: rerun the unfinished model, or tell the user.** A question that ran out of memory counts as done, so it shows up here as a low `n`.
+
+### Expected, not bugs
+
+- **`350 test videos` in the log:** every row sits in `test.csv` in this config, so the word means nothing here.
+- **The rule can send fewer frames than the limit:** the limit is a ceiling, so a quiet video sends only its marks.
+- **Qwen's limit at 20% can pass K:** about 100 foveated frames against Uniform K's 96 stock frames. Only SmolVLM has a frame cap.
+- **A measured budget slightly above its target,** on Qwen or Phi: the limit uses the mean, and the kept frames can cost a little more. Report it, and don't adjust anything.
+- **A `FutureWarning` about concatenating empty frames,** from the empty `train_val_fold1.csv`, is harmless.
+- **A 5-minute `load_data` at 0% GPU** at the start of every job, including reruns.
+- **With threads on, the first `sec` of a video or block** no longer includes loading its frames, so `sec` isn't a latency. Use the `done:` lines and the job's length for time.
+- **`D: ground truth` and the other conditions in `select_conditions`** are computed and never used. On the new videos they mean nothing.
+
+### Rules for this task
+
+- **Don't change anything after seeing accuracy:** not the budgets, the limit, the preference order, the fovea setting, the slots or `K`.
+- **Don't add rows, controls, models or videos without asking,** and keep any batching as a separate change.
+- **Don't claim a winner.** Without a no-gate row, these results can't show whether the gate itself helps.
+- **Never write to `data/folds/`, `results/hpc_all/`, `results/hpc_budget/` or `results/nymeria_smolvlm/`.** Never score with `--no-parity`.
+- **Commit only when the user asks.** Never commit results, accuracy numbers, NetIDs, account names, tokens or `*CONTEXT*.md`.
+- **Nothing runs on the user's Mac.** Give one read-only command at a time when you need them to look at something.
+
+### What to report back
+
+1. Any code you changed, and each step's last log line.
+2. Step 1's token table, limits and `PROPOSED` line.
+3. For each new model: parity, `SAME ANSWERS` with its `max_prob_diff`, and how many reused answers changed.
+4. For each job: the GPU type and node, its length, its mean and lowest 30-minute GPU use, and any `oom` or `nan` records.
+5. Per model, for all 350 videos, AEA and Nymeria: `n`, accuracy, measured budget, frames per question and `gaze_missing_pct`, with the note that the results can't show whether the gate itself helps.

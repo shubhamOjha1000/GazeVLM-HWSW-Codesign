@@ -46,7 +46,9 @@ The models (keys used everywhere in this folder):
 | `colab_accuracy_tables.ipynb` | the same steps on Colab (Google Drive paths) |
 | `hpc/` | the same steps as Slurm jobs on NYU Torch; see `../HPC_ACCURACY_RUNBOOK.md` |
 | `hpc/newvideos/` | gate data for videos outside the gate's 70, built from the cluster's files with no VRS or DINOv2; see section 9 of the runbook |
+| `hpc/all350/` | the budget rule on all 350 videos: joining the data, the token count, reusing records, the report; see section 10 of the runbook |
 | `../tests/test_newvideos.py` | CPU tests of `hpc/newvideos/` and of loading frames on threads |
+| `../tests/test_all350.py` | CPU tests of `hpc/all350/` and of loading frames on threads on Qwen2.5, Qwen3 and Phi |
 | `../tests/test_accuracy_tables.py` | CPU tests of the config, frame selection and budget code |
 | `../vlmeval/budget_rule.py` | the frame budget: the frame limit, the send reasons, the slots and the frame kept per slot |
 | `../tests/test_budget_rule.py` | CPU tests of the frame budget: the rule, the slots, the two rows, the comparison |
@@ -453,7 +455,8 @@ frames than a low budget pays for. They run only when named in `--rows`, and `bu
   pursuit, else frame 0, else the still frame nearest the slot's middle.
 - **`nogate`:** the same slots and foveation, the middle frame of each slot, always the full limit.
 
-Both use the model's smallest fovea setting, and `budget.tokens_per_frame` must give its token count (only SmolVLM2 is set).
+Both use the model's smallest fovea setting, and `budget.tokens_per_frame` must give its token count. Only SmolVLM2 is set by default, at
+its exact 17. On the other models the count depends on where the gaze falls, and section 10 of the runbook measures one number per model.
 
 ## Results
 

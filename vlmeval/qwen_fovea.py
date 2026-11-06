@@ -352,6 +352,20 @@ def resize01(img01, size):
                          align_corners=False)[0].clamp(0, 1)
 
 
+def load_resized(jobs, ready, workers):
+    """Makes frame images on `workers` threads, so the GPU doesn't wait for frames decoded one at a time. jobs: [(frame, side
+    px)]; ready[(frame key, side)] gets exactly what resize01(load_frame01(path, IMG), side) gives. Only the timing changes."""
+    from concurrent.futures import ThreadPoolExecutor
+    todo = [(fr, side) for fr, side in jobs if (fr["key"], side) not in ready]
+
+    def load(job):
+        return resize01(load_frame01(job[0]["path"], IMG), job[1])
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for (fr, side), x in zip(todo, pool.map(load, todo)):
+            ready[(fr["key"], side)] = x
+
+
 def to_uint8_pil(img01):
     from PIL import Image
     return Image.fromarray((img01.permute(1, 2, 0).numpy() * 255).round().clip(0, 255).astype(np.uint8))
@@ -461,13 +475,15 @@ def frame_layout(conditions, cond, fr):
 
 @torch.no_grad()
 def run_questions(model, proc, letter_ids, items, conditions, out_path, build_messages,
-                  log_every=25):
+                  log_every=25, prefetch_workers=0):
     """Score multiple-choice questions whose frames are tokenized per condition; resumable.
 
     items: dicts with qid, video, question, options, answer, and frames: a list of dicts
            (key, path to the 1344 px frame, t seconds, gaze, gaze_other). Items of the same
            video should be adjacent: each frame's vision features are computed once per
            video and condition, then reused by every question of that video.
+    With prefetch_workers, a video's frames are loaded on threads when the video starts, which
+    its first `sec` then doesn't include.
     """
     vis = visual_of(model)
     check_encoder(vis)
@@ -482,20 +498,25 @@ def run_questions(model, proc, letter_ids, items, conditions, out_path, build_me
     todo = [(it, c) for it in items for c in conditions if (c, it["qid"]) not in done]
     print(f"{len(done)} already scored, {len(todo)} to go -> {out_path}")
 
-    feats, video, t_start, n_new = {}, None, time.time(), 0
+    feats, ready, video, t_start, n_new = {}, {}, None, time.time(), 0
     with open(out_path, "a") as fh:
         for it, c in todo:
             if it["video"] != video:                      # new video: drop the old features
                 feats.clear()
+                ready.clear()
                 torch.cuda.empty_cache()
                 video = it["video"]
+                if prefetch_workers:
+                    load_resized([(fr, frame_layout(conditions, c, fr)[1]) for fr in it["frames"]], ready, prefetch_workers)
             t0 = time.time()
             per = []
             for fr in it["frames"]:
                 key = (c, fr["key"])
                 if key not in feats:
                     cells, size, used = frame_layout(conditions, c, fr)
-                    img01 = resize01(load_frame01(fr["path"], IMG), size)
+                    img01 = ready.get((fr["key"], size))
+                    if img01 is None:
+                        img01 = resize01(load_frame01(fr["path"], IMG), size)
                     feats[key] = (encode_cells(vis, img01, cells, size, mean, std), cells, size,
                                   conditions[c][0] == "fovea" and used is None)
                 per.append(feats[key])

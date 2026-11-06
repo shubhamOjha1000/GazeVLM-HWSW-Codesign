@@ -67,6 +67,8 @@ def summarize(cfg, videos=None):
             continue
         if videos is not None:
             res = res[res.video.isin(videos)]
+        if not len(res):
+            continue
         res = res.copy()
         res["correct"] = res["correct"].astype(int)
         acc = egoev.accuracy_table(res)

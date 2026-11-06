@@ -381,13 +381,16 @@ def frame_layout(conditions, cond, fr):
 
 
 @torch.no_grad()
-def run_questions(model, proc, letter_ids, items, conditions, out_path, build_messages, log_every=25):
+def run_questions(model, proc, letter_ids, items, conditions, out_path, build_messages, log_every=25,
+                  prefetch_workers=0):
     """Score questions on their frames under each condition; resumable.
 
     items: dicts with qid, video, question, options, answer and frames (key, path to the 1344 px
     frame, t seconds, gaze). Work runs video by video and, within a video, condition by
     condition: each frame's tokens and DeepStack features (4x the memory of the tokens alone)
-    are computed once per (video, condition) and reused by every question of that video."""
+    are computed once per (video, condition) and reused by every question of that video.
+    With prefetch_workers, a block's frames are loaded on threads when the block starts, which
+    that block's first `sec` then doesn't include."""
     vis, _, _ = parts(model)
     check_encoder(vis)
     ip = proc.image_processor
@@ -402,24 +405,30 @@ def run_questions(model, proc, letter_ids, items, conditions, out_path, build_me
     todo.sort(key=lambda x: x[0]["video"])                   # stable: video, condition, question
     print(f"{len(done)} already scored, {len(todo)} to go -> {out_path}")
 
-    toks, imgs, block, video, t_start, n_new = {}, {}, None, None, time.time(), 0
+    toks, imgs, ready, block, video, t_start, n_new = {}, {}, {}, None, None, time.time(), 0
     with open(out_path, "a") as fh:
         for it, c in todo:
             if it["video"] != video:
                 imgs.clear()
+                ready.clear()
                 video = it["video"]
             if (video, c) != block:
                 toks.clear()
                 torch.cuda.empty_cache()
                 block = (video, c)
+                if prefetch_workers:
+                    qf.load_resized([(fr, frame_layout(conditions, c, fr)[1]) for fr in it["frames"]], ready, prefetch_workers)
             t0 = time.time()
             per = []
             for fr in it["frames"]:
                 if fr["key"] not in toks:
-                    if fr["key"] not in imgs:
-                        imgs[fr["key"]] = qf.load_frame01(fr["path"], qf.IMG)
                     cells, side, used = frame_layout(conditions, c, fr)
-                    t_, d_ = encode_cells(vis, qf.resize01(imgs[fr["key"]], side), cells, side, mean, std)
+                    x = ready.get((fr["key"], side))
+                    if x is None:
+                        if fr["key"] not in imgs:
+                            imgs[fr["key"]] = qf.load_frame01(fr["path"], qf.IMG)
+                        x = qf.resize01(imgs[fr["key"]], side)
+                    t_, d_ = encode_cells(vis, x, cells, side, mean, std)
                     toks[fr["key"]] = (t_, d_, cells, side, conditions[c][0] == "fovea" and used is None)
                 per.append(toks[fr["key"]])
             try:

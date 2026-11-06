@@ -32,12 +32,16 @@ class Adapter:
     key = ""
     stock_tokens = 0
     default_ids = ()
+    loads_on_threads = False                         # its score() honours run.prefetch_workers
 
     def __init__(self, model_id=None, cfg=None):
         ids = model_id if model_id else self.default_ids
         self.model_ids = [ids] if isinstance(ids, str) else list(ids)
         self.cfg = cfg or {}
         self.model_id = None
+
+    def prefetch_workers(self):
+        return int(self.cfg.get("run", {}).get("prefetch_workers", 0))
 
     # -- to implement per model
     def _load(self, model_id):
@@ -139,6 +143,7 @@ def _qwen_text_ids(proc, messages):
 
 class Qwen25(Adapter):
     key, stock_tokens, default_ids = "qwen2.5", 256, ("Qwen/Qwen2.5-VL-3B-Instruct",)
+    loads_on_threads = True
     SIDE = 448                                       # stock frame: 16 x 16 tokens of 28 px
 
     def _load(self, model_id):
@@ -161,7 +166,8 @@ class Qwen25(Adapter):
 
     def score(self, items, conditions, out_path):
         from vlmeval import qwen_fovea as qf
-        qf.run_questions(self.model, self.proc, self.letter_ids, items, conditions, out_path, build_messages)
+        qf.run_questions(self.model, self.proc, self.letter_ids, items, conditions, out_path, build_messages,
+                         prefetch_workers=self.prefetch_workers())
 
     def blind_ids(self, messages):
         return _qwen_text_ids(self.proc, messages)
@@ -180,6 +186,7 @@ class Qwen25(Adapter):
 
 class Qwen3(Adapter):
     key, stock_tokens, default_ids = "qwen3", 256, ("Qwen/Qwen3-VL-4B-Instruct",)
+    loads_on_threads = True
 
     def _load(self, model_id):
         from vlmeval import qwen3_fovea as q3
@@ -200,7 +207,8 @@ class Qwen3(Adapter):
 
     def score(self, items, conditions, out_path):
         from vlmeval import qwen3_fovea as q3
-        q3.run_questions(self.model, self.proc, self.letter_ids, items, conditions, out_path, build_messages)
+        q3.run_questions(self.model, self.proc, self.letter_ids, items, conditions, out_path, build_messages,
+                         prefetch_workers=self.prefetch_workers())
 
     def blind_ids(self, messages):
         return _qwen_text_ids(self.proc, messages)
@@ -277,6 +285,7 @@ class Gemma(Adapter):
 
 class Phi(Adapter):
     key, stock_tokens, default_ids = "phi", 757, ("microsoft/Phi-3.5-vision-instruct",)
+    loads_on_threads = True
 
     def _load(self, model_id):
         from vlmeval import phi_fovea as ph
@@ -307,7 +316,8 @@ class Phi(Adapter):
 
     def score(self, items, conditions, out_path):
         from vlmeval import phi_fovea as ph
-        ph.run_questions(self.img, self.llm, self.tok, self.letter_ids, items, conditions, out_path, build_messages)
+        ph.run_questions(self.img, self.llm, self.tok, self.letter_ids, items, conditions, out_path, build_messages,
+                         prefetch_workers=self.prefetch_workers())
 
     def blind_ids(self, messages):
         from vlmeval import phi_fovea as ph
@@ -348,6 +358,7 @@ class Phi(Adapter):
 
 class SmolVLM(Adapter):
     key, stock_tokens, default_ids = "smolvlm", 81, ("HuggingFaceTB/SmolVLM2-2.2B-Instruct",)
+    loads_on_threads = True
 
     def _load(self, model_id):
         from vlmeval import smolvlm_fovea as sm
@@ -379,7 +390,7 @@ class SmolVLM(Adapter):
     def score(self, items, conditions, out_path):
         from vlmeval import smolvlm_fovea as sm
         sm.run_questions(self.model, self.proc, self.letter_ids, items, conditions, out_path, build_messages,
-                         prefetch_workers=int(self.cfg.get("run", {}).get("prefetch_workers", 0)))
+                         prefetch_workers=self.prefetch_workers())
 
     def blind_ids(self, messages):
         from vlmeval import smolvlm_fovea as sm

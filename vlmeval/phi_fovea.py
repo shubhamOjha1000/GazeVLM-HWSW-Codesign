@@ -576,11 +576,28 @@ def load_pil(path):
     return Image.open(path).convert("RGB")
 
 
+def load_views(frames, ready, workers):
+    """Makes the views of each frame not yet in ready, on `workers` threads, so the GPU doesn't wait for frames decoded
+    one at a time. ready[frame key] gets exactly what views(load_pil(path)) gives. Only the timing changes."""
+    from concurrent.futures import ThreadPoolExecutor
+    todo = [fr for fr in frames if fr["key"] not in ready]
+
+    def load(fr):
+        return views(load_pil(fr["path"]))
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for fr, v in zip(todo, pool.map(load, todo)):
+            ready[fr["key"]] = v
+
+
 @torch.no_grad()
-def run_questions(img, llm, tok, letter_ids, items, conditions, out_path, build_messages, log_every=25):
+def run_questions(img, llm, tok, letter_ids, items, conditions, out_path, build_messages, log_every=25,
+                  prefetch_workers=0):
     """Score questions on their frames under each condition; resumable. Work runs video by video
     and, within a video, condition by condition; each frame's views and global tokens are computed
-    once per video, its condition tokens once per (video, condition)."""
+    once per video, its condition tokens once per (video, condition). With prefetch_workers, a
+    block's views are made on threads when the block starts, which that block's first `sec` then
+    doesn't include."""
     done = set()
     if os.path.exists(out_path):
         for line in open(out_path):
@@ -591,22 +608,26 @@ def run_questions(img, llm, tok, letter_ids, items, conditions, out_path, build_
     todo.sort(key=lambda x: x[0]["video"])                   # stable: video, condition, question
     print(f"{len(done)} already scored, {len(todo)} to go -> {out_path}")
 
-    toks, base, block, video, t_start, n_new = {}, {}, None, None, time.time(), 0
+    toks, base, ready, block, video, t_start, n_new = {}, {}, {}, None, None, time.time(), 0
     with open(out_path, "a") as fh:
         for it, c in todo:
             if it["video"] != video:
                 base.clear()
+                ready.clear()
                 video = it["video"]
             if (video, c) != block:
                 toks.clear()
                 torch.cuda.empty_cache()
                 block = (video, c)
+                if prefetch_workers:
+                    load_views([fr for fr in it["frames"] if fr["key"] not in base], ready, prefetch_workers)
             t0 = time.time()
             per = []
             for fr in it["frames"]:
                 if fr["key"] not in toks:
                     if fr["key"] not in base:
-                        hd01, glb = views(load_pil(fr["path"]))
+                        loaded = ready.pop(fr["key"], None)
+                        hd01, glb = loaded if loaded is not None else views(load_pil(fr["path"]))
                         base[fr["key"]] = (hd01, global_rows(img, glb))
                     e, cells, n_crop, used = frame_tokens(img, conditions, c, fr, *base[fr["key"]])
                     toks[fr["key"]] = (e, cells, n_crop, conditions[c][0] == "fovea" and used is None)

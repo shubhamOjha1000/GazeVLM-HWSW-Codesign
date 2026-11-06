@@ -310,6 +310,11 @@ def run_model(key, cfg, data, rows, info_extra=None, keep_going=False):
     return status
 
 
+def models_without_threads(keys, workers):
+    """Models that would silently ignore run.prefetch_workers."""
+    return [k for k in keys if workers and not ADAPTERS[k].loads_on_threads]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True, help="YAML config (copy config.example.yaml)")
@@ -323,7 +328,8 @@ def main(argv=None):
                     help="a failing row or model does not stop the rest; a pass / fail table is printed at the end")
     ap.add_argument("--no-parity", action="store_true", help="skip the parity check (not recommended)")
     ap.add_argument("--prefetch-workers", type=int,
-                    help="override run.prefetch_workers: threads loading a video's frames ahead (SmolVLM2 only)")
+                    help="override run.prefetch_workers: threads loading a video's frames ahead, for the rows scored "
+                         "through the fovea modules (uniform, ours, budget, nogate) on qwen2.5, qwen3, phi and smolvlm")
     a = ap.parse_args(argv)
 
     cfg = common.load_config(a.config)
@@ -340,6 +346,9 @@ def main(argv=None):
     bad = [k for k in keys if k not in ADAPTERS] + [r for r in rows if r not in ROWS + EXTRA_ROWS]
     if bad:
         ap.error(f"unknown model(s) / row(s): {bad}")
+    no_threads = models_without_threads(keys, cfg["run"]["prefetch_workers"])
+    if no_threads:
+        ap.error(f"frame loading threads aren't built for {no_threads}: leave out --prefetch-workers")
 
     data = common.load_data(cfg)
     if a.max_questions:
