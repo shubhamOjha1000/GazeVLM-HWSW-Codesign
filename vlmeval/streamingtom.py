@@ -245,8 +245,8 @@ class Qwen25(gz.Qwen25):
 class Qwen3(gz.Qwen3):
     """Qwen3-VL: 256 tokens of 32 px plus DeepStack features; saliency from its last ViT block."""
     def frame_state(self, fr):
-        qf, q3 = self.qf, self.q3
-        img = qf.resize01(qf.load_frame01(fr["path"], qf.IMG), q3.IMG)
+        q3 = self.q3
+        img = self.frame_input(fr)
         cells = q3.uniform_cells(q3.IMG)
         pseudo = lambda q, k, m, s: pseudo_cls_attention(q, k, m, s, group_pool(4))
         with _capture(self, self.vis.blocks[-1].attn, pseudo) as got:

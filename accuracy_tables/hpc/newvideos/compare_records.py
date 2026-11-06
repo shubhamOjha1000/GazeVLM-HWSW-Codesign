@@ -7,6 +7,9 @@ largest probability difference. Ends with SAME ANSWERS, or a failed job. Prints 
 
 With --report, for runs on different GPU types: only different frames or tokens fail the job, and it says how many answers
 differ and how many records <ref> doesn't have, for the user to judge.
+
+With --exact, for one run split into shards against the same run whole: any probability that differs, at the 4 decimals a record
+holds, and any record only <ref> has, fail the job too. Ends with SAME ANSWERS AND PROBABILITIES.
 """
 import argparse
 import json
@@ -22,8 +25,8 @@ def load_records(path):
 
 
 def compare_records(new, ref):
-    """-> dict(records, missing, pred_differs, tokens_differ, max_prob_diff)."""
-    out = dict(records=len(new), missing=0, pred_differs=0, tokens_differ=0, max_prob_diff=0.0)
+    """-> dict(records, missing, ref_only, pred_differs, tokens_differ, max_prob_diff)."""
+    out = dict(records=len(new), missing=0, ref_only=sum(key not in new for key in ref), pred_differs=0, tokens_differ=0, max_prob_diff=0.0)
     for key, a in new.items():
         b = ref.get(key)
         if b is None:
@@ -36,9 +39,10 @@ def compare_records(new, ref):
     return out
 
 
-def problems(r, report=False):
+def problems(r, report=False, exact=False):
     """How many differences in compare_records' result fail the job."""
-    return r["tokens_differ"] + (r["records"] == 0) + (0 if report else r["missing"] + r["pred_differs"])
+    found = r["tokens_differ"] + (r["records"] == 0) + (0 if report else r["missing"] + r["pred_differs"])
+    return found + (r["ref_only"] + (r["max_prob_diff"] > 0) if exact else 0)
 
 
 def main():
@@ -47,12 +51,13 @@ def main():
     ap.add_argument("--ref", required=True)
     ap.add_argument("--rows", required=True, help="comma list of result files, without .jsonl")
     ap.add_argument("--report", action="store_true", help="only different frames or tokens fail; report different answers")
+    ap.add_argument("--exact", action="store_true", help="a different probability, or a record only --ref has, fails too")
     a = ap.parse_args()
     bad = compared = changed = 0
     for row in a.rows.split(","):
         r = compare_records(load_records(os.path.join(a.new, f"{row}.jsonl")), load_records(os.path.join(a.ref, f"{row}.jsonl")))
         print(f"{row}: {r}")
-        bad += problems(r, a.report)
+        bad += problems(r, a.report, a.exact)
         compared += r["records"] - r["missing"]
         changed += r["pred_differs"]
     if a.report:
@@ -62,7 +67,7 @@ def main():
     elif bad:
         sys.exit("ANSWERS DIFFER: stop and tell the user")
     else:
-        print("SAME ANSWERS")
+        print("SAME ANSWERS AND PROBABILITIES" if a.exact else "SAME ANSWERS")
 
 
 if __name__ == "__main__":

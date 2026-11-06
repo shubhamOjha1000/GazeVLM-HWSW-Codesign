@@ -4,7 +4,7 @@
     python -u -m accuracy_tables.hpc.all350.check_identity --compare <folder>                   a model's results scored with it
 
 Run's parity check covers a model's own path, not a baseline's. This checks that the baselines' encoding, packing and prompt reach the same
-answers when nothing is dropped: a 9 x 9 pool of SmolVLM's 9 x 9 grid, DTD dropping nothing, DyCoke pruning nothing, StreamingTOM keeping all
+answers when nothing is dropped: average pooling at the model's full grid, DTD dropping nothing, DyCoke pruning nothing, StreamingTOM keeping all
 tokens. FastVID, PruneVid and both GazeVLMs can't reproduce stock input, so they only get parity and the thread check.
 """
 import argparse

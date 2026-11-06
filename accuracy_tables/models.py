@@ -188,6 +188,7 @@ class Qwen25(Adapter):
 class Qwen3(Adapter):
     key, stock_tokens, default_ids = "qwen3", 256, ("Qwen/Qwen3-VL-4B-Instruct",)
     loads_on_threads = True
+    baselines_load_on_threads = True
 
     def _load(self, model_id):
         from vlmeval import qwen3_fovea as q3

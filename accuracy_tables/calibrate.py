@@ -21,9 +21,15 @@
 With --fractions, step 1 is skipped: the targets are the config's budget.fractions (5, 10 and 20%), so nothing needs
 scoring first, and it also writes <out_dir>/<model>/targets.csv, which tells the report each row's condition at each budget.
 Not on Phi yet: its baselines add row breaks that these counts leave out (runbook section 11).
+
+With --counts <file>, for a model whose calibration can pass a job's time limit: each video's token counts are saved to the file as
+soon as they're known, so a rerun continues from there, and FastVID's and PruneVid's come from their token arithmetic instead of their
+whole plans, which is much faster and gives the same numbers. Each job also runs the whole plans on its first videos and stops if
+they disagree. Without --counts nothing here changes.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -42,6 +48,7 @@ GRID_R = [round(0.005 * i, 3) for i in range(2, 101)]           # FastVID retent
 GRID_RHO = [round(0.01 * i, 2) for i in range(1, 96)]           # GazeVLM gaze-mass fractions tried
 UNCOUNTED_ROW_BREAKS = ("phi",)                                 # models whose baselines' row breaks these counts leave out
 NEAREST_ONLY_PTS = 0.5                                          # further than this from its target, a row only reached the nearest
+COUNTS_CROSS_CHECK = 2                                          # videos per job that --counts also counts through the whole plans
 
 
 # ---------------------------------------------------------------------------- budgets as summarize.py measures them
@@ -138,6 +145,111 @@ def fastvid_kept(states, r, s):
     return sum(len(kept) for kept, _ in plans)
 
 
+# ---------------------------------------------------------------------------- the same counts without the plans
+def prunevid_counts(states, betas, s):
+    """prunevid_kept at each beta, without clustering: a set of m tokens gives m centres up to min_tokens and otherwise
+    max(int(beta m), 1), and the sets depend only on the segments and the static test, which don't depend on beta."""
+    from vlmeval import prunevid as pv
+    min_tokens = int(s["min_tokens"])
+    G = torch.stack([st["tokens"].float().mean(0) for st in states])
+    sets, f0 = [], 0                                                 # (tokens in the set, how many times it occurs)
+    for W in pv.segments(G, float(s["gamma"]), int(s["knn"])):
+        static = pv.static_positions(torch.stack([st["tokens"] for st in states[f0:f0 + W]]), float(s["settings"][0]["tau"]))
+        n_static = int(static.sum())
+        if n_static:
+            sets.append((n_static, 1))
+        if len(static) - n_static:
+            sets.append((len(static) - n_static, W))
+        f0 += W
+
+    def centres(m, beta):
+        return m if m <= min_tokens else min(max(int(m * beta), 1), m)
+
+    return [sum(times * centres(m, beta) for m, times in sets) for beta in betas]
+
+
+def fastvid_counts(states, rs, s):
+    """fastvid_kept at each r, without its selection and merging: a frame keeps exactly the salient and context tokens the
+    method's own budgets give it."""
+    from vlmeval import fastvid as fv
+    G = torch.stack([st["tokens"].float().mean(0) for st in states])
+    sizes = fv.segments(G, int(s["c"]), float(s["tau"]))
+    N = len(states[0]["tokens"])
+    out = []
+    for r in rs:
+        kept, f0 = 0, 0
+        for size in sizes:
+            n_sal, n_ctx = fv.budgets(G[f0:f0 + size], N, r, float(s["d"]), int(s["p"]), float(s["ignore"]))
+            kept += sum(n_sal) + sum(n_ctx)
+            f0 += size
+        out.append(kept)
+    return out
+
+
+def counts_key(cfg, side):
+    """What a video's saved counts depend on, so that a file from other settings is refused rather than reused."""
+    parts = dict(rho=GRID_RHO, r=GRID_R, beta=GRID_BETA, K=cfg["run"]["K"], max_frames=cfg["run"]["max_frames"], side=side,
+                 gazevlm={k: cfg["gazevlm"][k] for k in ("sigma", "r_min", "thumb", "gaze")},
+                 fastvid={k: cfg["fastvid"][k] for k in ("c", "tau", "ignore", "d", "p", "beta")},
+                 prunevid=dict(tau=cfg["prunevid"]["settings"][0]["tau"], gamma=cfg["prunevid"]["gamma"], knn=cfg["prunevid"]["knn"],
+                               min_tokens=cfg["prunevid"]["min_tokens"]))
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def read_counts(path, key):
+    """{video: its saved counts}. Run repair_results first: a half-written last line stops here."""
+    done = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                if line.strip():
+                    rec = json.loads(line)
+                    if rec["key"] != key:
+                        sys.exit(f"{path} holds counts from other settings: stop and tell the user")
+                    done[rec["video"]] = rec
+    return done
+
+
+def resumable_counts(path, frames, backend, cfg, side, log=print):
+    """Tokens kept per knob and video, read from the file where it can and otherwise counted, one video at a time, and added to
+    the file at once. -> (kept_gz, kept_fv, kept_pv), each {knob: {video: tokens}}."""
+    key = counts_key(cfg, side)
+    done = read_counts(path, key)
+    log(f"{len(done)} of {len(frames)} videos already counted in {path}")
+    g, workers, checked = cfg["gazevlm"], int(cfg["run"]["prefetch_workers"]), 0
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with torch.no_grad(), open(path, "a") as fh:
+        for i, v in enumerate(frames, 1):
+            if v in done:
+                continue
+            prefixes = [heat_prefix(fr, g) for fr in frames[v]]
+            gaze = [gazevlm_tokens(prefixes, r, g, side) for r in GRID_RHO]
+            del prefixes                                             # a frame's sorted heatmap takes about 2 MB
+            if workers:
+                backend.prefetch(frames[v], workers)
+            states = []
+            for fr in frames[v]:
+                st = backend.frame_state(fr)
+                states.append(dict(tokens=st["tokens"], sal=st["sal"]))   # the counts don't depend on DeepStack features
+            fast, prune = fastvid_counts(states, GRID_R, cfg["fastvid"]), prunevid_counts(states, GRID_BETA, cfg["prunevid"])
+            if checked < COUNTS_CROSS_CHECK:
+                checked += 1
+                if (fast != [fastvid_kept(states, r, cfg["fastvid"]) for r in GRID_R]
+                        or prune != [prunevid_kept(states, beta, cfg["prunevid"]) for beta in GRID_BETA]):
+                    sys.exit(f"{v}: the token arithmetic differs from the methods' own plans: stop and tell the user")
+                log(f"   {v}: the token arithmetic matches the methods' own plans")
+            rec = dict(video=v, key=key, gazevlm=gaze, fastvid=fast, prunevid=prune)
+            fh.write(json.dumps(rec) + "\n")
+            fh.flush()
+            done[v] = rec
+            del states
+            torch.cuda.empty_cache()
+            log(f"   {i} of {len(frames)}: {v}, {len(frames[v])} frames")
+    pick = lambda name, j: {v: done[v][name][j] for v in frames}
+    return ({r: pick("gazevlm", j) for j, r in enumerate(GRID_RHO)}, {r: pick("fastvid", j) for j, r in enumerate(GRID_R)},
+            {beta: pick("prunevid", j) for j, beta in enumerate(GRID_BETA)})
+
+
 # ---------------------------------------------------------------------------- the whole calibration
 def ours_budgets(out_dir, key):
     """{ours condition: measured budget (fraction)} from the ours and uniform result files."""
@@ -190,8 +302,8 @@ def targets_table(key, knobs, cfg):
     return pd.DataFrame(lines)
 
 
-def calibrate(cfg, key, targets, log=print):
-    """-> {method: [{target, knob, predicted, condition}]} for the matched budgets (fractions)."""
+def calibrate(cfg, key, targets, log=print, counts_path=None):
+    """-> {method: [{target, knob, predicted, condition}]} for the matched budgets (fractions). counts_path: see resumable_counts."""
     data = common.load_data(cfg)
     ad = ADAPTERS[key](cfg["models"].get(key), cfg).load()
     try:
@@ -210,11 +322,14 @@ def calibrate(cfg, key, targets, log=print):
         out = {m: [] for m in ("streamingtom", "dycoke", "dtd", "avgpool", "gazevlm2", "gazevlm", "prunevid", "fastvid")}
         window = int(cfg["dycoke"]["settings"][0]["window"])
         g = cfg["gazevlm"]
-        kept_gz = {r: {} for r in GRID_RHO}
-        for v in frames:                     # one video at a time: a frame's sorted heatmap takes about 2 MB
-            prefixes = [heat_prefix(fr, g) for fr in frames[v]]
-            for r in GRID_RHO:
-                kept_gz[r][v] = gazevlm_tokens(prefixes, r, g, side)
+        if counts_path:
+            kept_gz, kept_fv, kept_pv = resumable_counts(counts_path, frames, ad.fastvid_backend(), cfg, side, log)
+        else:
+            kept_gz = {r: {} for r in GRID_RHO}
+            for v in frames:                 # one video at a time: a frame's sorted heatmap takes about 2 MB
+                prefixes = [heat_prefix(fr, g) for fr in frames[v]]
+                for r in GRID_RHO:
+                    kept_gz[r][v] = gazevlm_tokens(prefixes, r, g, side)
         gz_cands = [(weighted(kept_gz[r], full, nq), r) for r in GRID_RHO]
         for b in targets:
             for m, (pred, knob) in (("streamingtom", match_streamingtom(b, n, nq, full, N)),
@@ -224,23 +339,24 @@ def calibrate(cfg, key, targets, log=print):
                                     ("gazevlm2", match_gazevlm2(b, stock, N)),
                                     ("gazevlm", closest(gz_cands, b))):
                 out[m].append(dict(target=b, knob=knob, predicted=pred))
-        log("encoding the Uniform K frames (encoder only) for PruneVid's and FastVID's plans ...")
-        fv_be = ad.fastvid_backend()
-        kept_pv = {beta: {} for beta in GRID_BETA}
-        kept_fv = {r: {} for r in GRID_R}
-        workers = int(cfg["run"]["prefetch_workers"])
-        with torch.no_grad():
-            for v in frames:
-                if workers:
-                    fv_be.prefetch(frames[v], workers)
-                states = [fv_be.frame_state(fr) for fr in frames[v]]
-                for beta in GRID_BETA:
-                    kept_pv[beta][v] = prunevid_kept(states, beta, cfg["prunevid"])
-                for r in GRID_R:
-                    kept_fv[r][v] = fastvid_kept(states, r, cfg["fastvid"])
-                log(f"   {v}: {len(states)} frames")
-                del states
-                torch.cuda.empty_cache()
+        if not counts_path:
+            log("encoding the Uniform K frames (encoder only) for PruneVid's and FastVID's plans ...")
+            fv_be = ad.fastvid_backend()
+            kept_pv = {beta: {} for beta in GRID_BETA}
+            kept_fv = {r: {} for r in GRID_R}
+            workers = int(cfg["run"]["prefetch_workers"])
+            with torch.no_grad():
+                for v in frames:
+                    if workers:
+                        fv_be.prefetch(frames[v], workers)
+                    states = [fv_be.frame_state(fr) for fr in frames[v]]
+                    for beta in GRID_BETA:
+                        kept_pv[beta][v] = prunevid_kept(states, beta, cfg["prunevid"])
+                    for r in GRID_R:
+                        kept_fv[r][v] = fastvid_kept(states, r, cfg["fastvid"])
+                    log(f"   {v}: {len(states)} frames")
+                    del states
+                    torch.cuda.empty_cache()
         for b in targets:
             pred, knob = closest([(weighted(kept_pv[beta], full, nq), beta) for beta in GRID_BETA], b)
             out["prunevid"].append(dict(target=b, knob=knob, predicted=pred))
@@ -286,6 +402,7 @@ def main(argv=None):
     ap.add_argument("--videos", help="override run.videos: test, all, or a comma list of video names")
     ap.add_argument("--out-dir", help="override paths.out_dir (where ours and uniform were scored)")
     ap.add_argument("--prefetch-workers", type=int, help="override run.prefetch_workers: threads loading frames ahead while encoding")
+    ap.add_argument("--counts", help="keep each video's token counts in this file, so a rerun continues; see the top of this file")
     ap.add_argument("--write", required=True, help="the matched config to write (next to --config keeps relative paths)")
     a = ap.parse_args(argv)
     if a.fractions and a.model in UNCOUNTED_ROW_BREAKS:
@@ -320,7 +437,7 @@ def main(argv=None):
         targets = [float(ours[c]) for c in sorted(picked, key=ours.get)]
     print(f"matching every baseline to {[f'{100 * t:.2f}%' for t in targets]}")
 
-    knobs = calibrate(cfg, a.model, targets)
+    knobs = calibrate(cfg, a.model, targets, counts_path=a.counts)
     print("\nbaseline knobs (predicted budget, %):")
     for m, ks in knobs.items():
         print(f"   {m:<13} " + "   ".join(f"{k['knob']:g} ({100 * k['predicted']:.2f}%)" for k in ks))
@@ -343,7 +460,8 @@ def main(argv=None):
     print(f"\nwritten {a.write} and {os.path.join(out_dir, a.model, 'calibration.json')}")
     if a.fractions:
         table = targets_table(a.model, knobs, cfg)
-        table.to_csv(os.path.join(out_dir, a.model, "targets.csv"), index=False)
+        table.to_csv(os.path.join(out_dir, a.model, "targets.csv.tmp"), index=False)
+        os.replace(os.path.join(out_dir, a.model, "targets.csv.tmp"), os.path.join(out_dir, a.model, "targets.csv"))
         reach = table[table.predicted_pct.notna()].copy()
         reach["miss_pts"] = reach.predicted_pct - reach.target_pct
         reach["nearest_only"] = reach.miss_pts.abs() > NEAREST_ONLY_PTS

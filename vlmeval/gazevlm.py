@@ -160,8 +160,8 @@ class Backend:
     max_pixels = 448 * 448
 
     def prefetch(self, frames, workers):
-        """Loads a video's frames on threads ahead of encoding them. Only SmolVLM has this so far, and run.py stops
-        before a model that doesn't."""
+        """Loads a video's frames on threads ahead of encoding them. Only SmolVLM and Qwen3-VL have this so far, and
+        run.py stops before a model that doesn't."""
         raise NotImplementedError(f"{type(self).__name__}: frame loading threads aren't built for this model")
 
     def _messages(self, it, build_messages):
@@ -204,10 +204,25 @@ class Qwen3(Backend):
         q3.check_encoder(self.vis)
         self.mean, self.std = proc.image_processor.image_mean, proc.image_processor.image_std
         self.side, self.max_pixels = q3.IMG // q3.BASE, qf.IMG * qf.IMG
+        self.ready = {}                                  # (frame path, side px) -> its image, made ahead on threads
+
+    def prefetch(self, frames, workers):
+        """A video's images made on threads, so the GPU doesn't wait for frames decoded one at a time. Each frame gets
+        exactly what frame_input would make; only the timing changes."""
+        self.ready.clear()
+        self.qf.load_resized([(dict(fr, key=fr["path"]), self.q3.IMG) for fr in frames], self.ready, workers)
+
+    def frame_input(self, fr):
+        """The frame's image, from the threads if they made it. Looked up by path, because the two-view GazeVLM's views
+        of a frame share its key."""
+        img = self.ready.pop((fr["path"], self.q3.IMG), None)
+        if img is None:
+            img = self.qf.resize01(self.qf.load_frame01(fr["path"], self.qf.IMG), self.q3.IMG)
+        return img
 
     def frame_grid(self, fr):
-        qf, q3, s = self.qf, self.q3, self.side
-        img = qf.resize01(qf.load_frame01(fr["path"], qf.IMG), q3.IMG)
+        q3, s = self.q3, self.side
+        img = self.frame_input(fr)
         tok, deep = q3.encode_cells(self.vis, img, q3.uniform_cells(q3.IMG), q3.IMG, self.mean, self.std)
         return tok.view(s, s, -1), [d.view(s, s, -1) for d in deep]
 
