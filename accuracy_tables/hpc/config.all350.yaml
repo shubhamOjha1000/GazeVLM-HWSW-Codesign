@@ -13,5 +13,9 @@ paths:
   out_dir: ${GV_ROOT}/results/default                            # the jobs pass --out-dir
 run:
   videos: all                                                    # every row sits in test.csv here, so `test` means nothing: use all or a list
-# budget.tokens_per_frame: smolvlm's 17 comes from the defaults. qwen2.5, qwen3 and phi are measured by all350/measure_tokens.py and added
-# here only with the user's OK, as a `budget:` section holding `tokens_per_frame:`. Until then, a budget row on them stops with a clear error.
+budget:
+  tokens_per_frame:                                              # smolvlm's 17 comes from the defaults
+    # measured by all350/measure_tokens.py and approved by the user
+    qwen2.5: 51
+    qwen3: 51
+    phi: 285
