@@ -145,6 +145,7 @@ def _qwen_text_ids(proc, messages):
 class Qwen25(Adapter):
     key, stock_tokens, default_ids = "qwen2.5", 256, ("Qwen/Qwen2.5-VL-3B-Instruct",)
     loads_on_threads = True
+    baselines_load_on_threads = True
     SIDE = 448                                       # stock frame: 16 x 16 tokens of 28 px
 
     def _load(self, model_id):

@@ -7,11 +7,12 @@ the project.
 **Everything runs as Slurm jobs, not notebooks.** The Python is already command-line scripts. The job files are in
 `accuracy_tables/hpc/`, and the method detail is in `accuracy_tables/README.md`.
 
-**New task: section 12, Qwen3-VL-4B on all 350 videos, split across 3 A100s.** Sections 1 to 7 cover the 12-video run, section 8 the
-budget rule on those videos, and section 9 gate data for the other 338 videos and SmolVLM on Nymeria. Section 10, the budget rule on 4 models, has
-run up to its pilot, and its step 4 waits for the user. Section 11, SmolVLM with every row at 5, 10 and 20%, has run, and section 12 is the same
-experiment on Qwen3. Section 12 hasn't run: its job files have only had a bash syntax check, and its Python and tests have never been executed,
-because Python isn't run on the machine they were written on. Expect to fix small problems, and report what you change.
+**New task: section 13, Qwen2.5-VL-3B on all 350 videos, split across 3 A100s. Don't pull it until Qwen3's full merge in section 12 has finished.**
+Sections 1 to 7 cover the 12-video run, section 8 the budget rule on those videos, and section 9 gate data for the other 338 videos and SmolVLM on
+Nymeria. Section 10, the budget rule on 4 models, has run up to its pilot, and its step 4 waits for the user. Section 11 is SmolVLM with every row at
+5, 10 and 20%, section 12 is the same on Qwen3, and section 13 is the same on Qwen2.5. Section 13 hasn't run: its job files have only had a bash syntax
+check, and its Python and tests have never been executed, because Python isn't run on the machine they were written on. Expect to fix small problems,
+and report what you change.
 
 ## 1. The task
 
@@ -114,6 +115,10 @@ All are in `accuracy_tables/hpc/`. Submit every one **from the repository root**
 | `qwen3350.SBATCH <calibrate\|check>` | section 12: Qwen3's knobs, and its checks, on one A100 | yes |
 | `qwen3350.SBATCH <checkshard\|pilot\|full> <0\|1\|2>` | section 12: one of Qwen3's 3 shards, on one A100 | yes |
 | `qwen3350_merge.SBATCH <check\|pilot\|full>` | section 12: merges the 3 shards, then compares or summarizes | no |
+| `qwen25350_tests.SBATCH` | section 13: the CPU tests | no |
+| `qwen25350.SBATCH calibrate` | section 13: Qwen2.5's knobs and shard assignment, on one A100 | yes |
+| `qwen25350.SBATCH full <0\|1\|2>` | section 13: one of Qwen2.5's 3 shards, on one A100 | yes |
+| `qwen25350_merge.SBATCH` | section 13: merges the 3 shards, summarizes, then compares with the earlier pilot | no |
 
 Paths default to `/scratch/$USER/...`. Set `EGO_ROOT`, `GV_ROOT`, `HF_HOME`, `OVERLAY` or `IMAGE` before `sbatch` to
 override them. The `#SBATCH --output` lines assume `/scratch/<user>/GazeVLM/logs`.
@@ -152,6 +157,7 @@ Layout on the cluster:
   results/hpc350_check/   results/hpc350_pilot/   results/hpc_350/                                       <- section 10
   results/smolvlm_350_check/   results/smolvlm_350_pilot/   results/smolvlm_350/                         <- section 11
   results/qwen3_350_check/   results/qwen3_350_pilot/   results/qwen3_350/                               <- section 12
+  results/qwen25_350/                                                                                    <- section 13
   logs/
 ```
 
@@ -1353,4 +1359,206 @@ The log should end with `EVERY n IS COMPLETE`, and it writes `results/qwen3_350/
 3. Step 3: parity, `SAME ANSWERS` with each row's `max_prob_diff`, the `SAME AS UNIFORM K` lines, and each row's line from the shards against the whole run.
 4. Step 4: the `TOKENS MATCH` line, the estimate of full-run hours, and the measured budget against the target for every row and budget.
 5. For each shard: its questions and videos, node, full GPU name, elapsed time, GPU mean and lowest 30-minute mean, and any `oom` or `nan` records.
+6. For all 350 videos, AEA and Nymeria, per row and budget: `n`, accuracy, target and measured budget, frames per question, `gaze_missing_pct` and `prompt_tokens_per_q`, flagged rows and every deviation, with the note that the results can't show whether the gate itself helps. **Don't claim a winner.**
+
+## 13. Next task: Qwen2.5-VL-3B on all 350 videos, split across 3 A100s
+
+**Before you pull anything, confirm that Qwen3's full merge in section 12 has finished.** Pulling changes the code on disk, so a Qwen3 shard resubmit or its merge could run on a different commit from the one its shards started with. Read this section on GitHub until then. The first command block below does the check, and only pulls if it passes.
+
+**The user submits every job.** Nothing here has been run.
+
+### Why this exists
+
+It's the same table as sections 11 and 12, on Qwen2.5. Section 12's Python is reused as it is: `shards.py`, `merge_shards.py`, `report.py`, `calibrate.py`, `check_identity.py` and `gpu_summary.py` all take the model as a setting. Only 3 small job files are new, because Qwen3's must stay as they are while its jobs run.
+
+### Scope, set by the user
+
+- **Model:** `qwen2.5`, which is `Qwen/Qwen2.5-VL-3B-Instruct`, the same id as every earlier run. Step 1 checks the cluster's copy.
+- **Videos:** all 350, 5,985 questions, with AEA and Nymeria reported separately.
+- **Rows:** `uniform`, `blind`, `budget`, `avgpool`, `gazevlm`, `gazevlm2`, `streamingtom`, `dycoke`, `fastvid`, `prunevid` and `dtd`. Everything but `uniform` and `blind` runs at 5, 10 and 20%. **No earlier result is reused.**
+- **GPUs:** 3 one-GPU jobs, all on A100 (`--gres=gpu:a100:1`), with whole videos per shard, balanced by question count.
+- **Results:** `results/qwen25_350/`, laid out as in section 12, with `qwen2.5` in place of `qwen3`.
+- **Steps:** the tests, calibrate, then the full run straight away. **There is no check job and no pilot.** Parity still runs at the start of every shard job, and `--no-parity` is never used.
+
+### The settled values
+
+None of these changes. They come from `common.py`'s defaults and from commit `98c383a`.
+
+| Setting | Value |
+|---|---|
+| `K` | 96 Uniform K frames per video, or all of a shorter video's frames |
+| Policy | D+P |
+| Fovea | `R=70 a=160`, the smallest setting, on the 448 px frame |
+| Budgets | 5, 10 and 20% of each video's Uniform K tokens |
+| Stock tokens per frame | 256 |
+| Rule's tokens per frame | 51 (`config.all350.yaml`, approved in `98c383a`) |
+| Rule's frame limits | 24, 48 and 96 on a video with at least 96 frames |
+| Preference order and slots | as in `budget_rule.py` |
+| Baselines' other parameters | `common.py`'s defaults; only each row's budget parameter is calibrated |
+| Calibration | token counts only. A row that can't reach a budget is reported as `nearest_only`, with nothing tuned to fix it |
+
+### What's different from section 12
+
+| | Section 12, Qwen3 | Section 13, Qwen2.5 |
+|---|---|---|
+| Check job and small set in shards | yes | **no** |
+| Pilot | yes | **no** |
+| `max_prob_diff` 0.0 between shards and a whole run, on the GPU | measured | **not measured:** only on the fake model in the unit tests |
+| Threads against no threads on baseline rows, on the GPU | measured | **not measured:** only on the fake model in the unit tests |
+| GPU use before the full run | measured | **not measured:** watch it in the first hour |
+| Comparison with an earlier pilot | before the full run, and it can stop the job | after the merge, and it only reports |
+
+### Threads
+
+Qwen2.5's `uniform` and `budget` rows already loaded frames on threads, from section 10. **Its 8 baseline rows didn't, and ignored the setting,** which would have put the jobs at risk on `ga*` nodes, where GPU use under 50% gets a job cancelled. They now use the same threaded loading as section 12. Tests check that its images are identical with threads on and off, and that all 8 rows write the same records.
+
+### What changed in the code
+
+| File | Change |
+|---|---|
+| `accuracy_tables/hpc/qwen25350.SBATCH`, `qwen25350_merge.SBATCH`, `qwen25350_tests.SBATCH` | new: the jobs |
+| `accuracy_tables/hpc/all350/shard_progress.py` | new: answers done per shard and row. Standard library only, so it runs on a login node, and it reads no answers |
+| `tests/test_qwen25350.py` | new: CPU tests on a fake Qwen2.5, through the real calibrate, run, merge and report code |
+| `vlmeval/gazevlm.py`, `streamingtom.py` | Qwen2.5's backends load frames through `prefetch` and `frame_input` |
+| `accuracy_tables/models.py`, `run.py` | Qwen2.5's baseline rows take `--prefetch-workers`, and the help says so |
+| `tests/test_qwen3350.py` | its small-dataset fixture became a function that takes the model, so these tests can reuse it. One test renamed, and `qwen2.5` dropped from its list of models without threads |
+| `tests/test_smolvlm350.py` | 2 tests that used `qwen2.5` as the model without threads now use `internvl`, which still has none. They test the same thing |
+
+**Qwen3 isn't affected.** A test checks that its 3 job files and the code its merge runs (`merge_shards.py`, `shards.py`, `report.py`, `summarize.py`, `check_gpu.py`, `repair_results.py`, `compare_records.py`) are byte for byte what `e3d6803` had, and another that a merge never looks at the commit or code now on disk. `smoke.SBATCH` and `run_model.SBATCH` aren't touched, so your 2 local `--comment` edits can't conflict.
+
+### Steps
+
+**Job count: 6 `sbatch` jobs, 4 on GPU and 2 on CPU,** plus an expected 3 resubmissions. **All times are estimates, with no pilot behind them on this GPU.**
+
+Set `SBATCH_ACCOUNT` as in section 5. Every command assumes `/scratch/$USER/GazeVLM`.
+
+**Step 1: confirm Qwen3 has finished, pull, and run the tests.**
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+if squeue -h -u $USER -o "%j" | grep -q "^qwen3350"; then
+    echo "STOP: a Qwen3 job is still queued or running. Don't pull."
+elif [ ! -s ../results/qwen3_350/qwen3/merge_info.json ] || ! tail -n 1 "$(ls -t ../logs/qwen3350-merge_*.log | head -1)" | grep -q "EVERY n IS COMPLETE"; then
+    echo "STOP: Qwen3's full merge hasn't finished. Don't pull."
+else
+    git status --short
+    git pull --ff-only origin eyehead-gate
+    git log --oneline | head -1
+    ls $HF_HOME/hub/models--Qwen--Qwen2.5-VL-3B-Instruct/snapshots/
+    grep -h '"model_id"' ../results/hpc_all/qwen2.5/run_info.json ../results/hpc350_pilot/qwen2.5/run_info.json
+    sbatch accuracy_tables/hpc/qwen25350_tests.SBATCH
+fi
+```
+
+- **`STOP`:** do nothing else, and try again later.
+- **Expect** `git status` to show only your 2 local `--comment` edits, one snapshot folder, and `"model_id": "Qwen/Qwen2.5-VL-3B-Instruct"` twice.
+- **More than one snapshot, or another `model_id`: stop and tell the user,** because the checkpoint may not be the earlier runs' one.
+- **The test log** is `logs/qwen25350-tests_<job>.log`. Its last line should say how many passed, with no `failed` or `error`. **Stop on any failure.** Fix it only if it's a small problem in the new code, and never loosen a test to make it pass.
+
+**Step 2: the knobs and the assignment.** Estimated 2 to 3 hours.
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+sbatch --job-name=qwen25350-calibrate accuracy_tables/hpc/qwen25350.SBATCH calibrate
+```
+
+- **If it ends in `TIMEOUT`, submit the same line again.** It continues from the videos it has already counted.
+- **The log** prints the GPU, each shard's questions and videos, `the token arithmetic matches the methods' own plans` twice per job, a table of every row's target, predicted budget, gap, `nearest_only` and knob, and ends with `TARGETS WRITTEN`.
+- **Expected `nearest_only`:** `avgpool` at 5% (6.25%) and 20% (19.14%), and perhaps `fastvid` or `prunevid`, because their tokens depend on the frames. Report them, and don't tune anything.
+- **Stop on:** a job on another GPU type, `the token arithmetic differs`, or `the assignment is wrong`.
+- **Don't rerun it once it has finished.** The job refuses, because the shards read its results.
+
+**Step 3: all 350 videos.** Estimated 10 to 14 hours per shard, so about 2 jobs each.
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+for N in 0 1 2; do
+    sbatch --job-name=qwen25350-full-$N accuracy_tables/hpc/qwen25350.SBATCH full $N
+done
+```
+
+- **A shard's log starts with** the GPU's full name, `shard <n>: commit ...`, and `parity OK`. It then has one block per row, and ends with `=== 0 failed of 13` and `SHARD DONE: full <n>`.
+- **`TIMEOUT`, or a preemption that didn't requeue:** resubmit only that shard, with its own number. It repairs a half-written last line and continues from its own files:
+
+```bash
+N=0      # the shard that stopped
+sbatch --job-name=qwen25350-full-$N accuracy_tables/hpc/qwen25350.SBATCH full $N
+```
+
+- **Stop on:** parity failing (send the user the report, and never use `--no-parity`), a line that says `failed of 13` with anything but `0 failed`, a job cancelled for low GPU use, a job refusing its GPU or `doesn't match the shards before it`, or A100s staying busy. **Don't override `--gres`, and don't pull between shard jobs.**
+
+**Then the merge, by hand, only when all 3 logs show `SHARD DONE: full <n>`:**
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+for N in 0 1 2; do grep -l "SHARD DONE: full $N" ../logs/qwen25350-full-${N}_*.log | tail -n 1; done
+sbatch accuracy_tables/hpc/qwen25350_merge.SBATCH
+```
+
+The first line must print a log for all 3 shards. The merge's log, `logs/qwen25350-merge_<job>.log`, shows in order:
+
+1. **`MERGED`,** with each shard's questions, videos and node, and the full GPU name. **`MERGE STOPPED`: stop and tell the user.** It names what's wrong and writes nothing.
+2. **Each job's GPU mean and lowest 30-minute mean.**
+3. **The table per group** (all, AEA, Nymeria), with `prompt_tokens_per_q`, ending with `EVERY n IS COMPLETE`. **`INCOMPLETE`: stop and tell the user.** It writes `results/qwen25_350/summary_by_group.csv`.
+4. **A comparison with the earlier Qwen2.5 pilot** in `results/hpc350_pilot/`, ending with `TOKENS MATCH: answers differ on <N> of 1930 records compared`. That pilot ran on an L40S, so some answers will differ: between L40S and B200 it was 3 of 60. **Report the count. It doesn't fail the run.** If frames or tokens differ, it prints `TOKENS DIFFER` and then a line saying the comparison didn't end cleanly. The job still succeeds, and the merged results stand, but tell the user, because frames and tokens shouldn't depend on the GPU.
+
+### Checking GPU use and progress
+
+All of this only reads. Run it any time from a login node:
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+squeue -u $USER -o "%.12i %.24j %.2t %.10M %R"
+python3 -m accuracy_tables.hpc.all350.shard_progress --root ../results/qwen25_350 --model qwen2.5
+python3 -m accuracy_tables.hpc.all350.gpu_summary ../logs/gpu_qwen25350-full-*_*.csv
+for N in 0 1 2; do
+    L=$(ls -t ../logs/qwen25350-full-${N}_*.log 2>/dev/null | head -1)
+    [ -n "$L" ] || continue
+    echo "--- shard $N"
+    grep -v processor_kwargs "$L" | tail -n 1 | cut -c1-170
+    cut -d, -f2 ../logs/gpu_$(basename "$L" .log).csv | tail -n 15 | tr -d '\n'; echo
+done
+```
+
+- **`shard_progress` is the true progress.** It counts answers written, for the whole shard. An answer is one question under one condition, so a shard's total is its questions times the conditions, at most 29.
+- **The counter in the log, such as `4675/11970  0.06 s each  ~7 min left`, covers less than it looks like.**
+    - It counts answers in **the current row only,** and starts again at every row.
+    - After a resubmission, its total is only **what that row had left,** not the row's size.
+    - `~7 min left` is for **that row, not the shard.**
+    - The name in brackets is the condition and video it has reached.
+- **Rows run in this order,** whatever order the job lists them in: `uniform`, `blind`, `gazevlm`, `streamingtom`, `dycoke`, `fastvid`, `prunevid`, `dtd`, `avgpool`, `gazevlm2`, then `budget` at 5, 10 and 20%.
+- **GPU use:** `gpu_summary` gives each job's mean and lowest 30-minute mean, and the last line of the loop shows the last 15 minutes. The node's name is in the `squeue` output. **On a `ga*` node, tell the user if a job's lowest 30-minute mean nears 50%.** About 5 minutes near 0% at the start of each job is normal, while it loads the data. **Check this in the first hour,** because there's no pilot behind it.
+
+### Expected, not bugs
+
+- **Shards finishing hours apart.** They're balanced by questions, but much of the time is encoding, which follows the number of videos.
+- **A rerun of a finished shard** does nothing after about 5 minutes of loading, and ends with `SHARD DONE`.
+- **Several lines per job in `shard_info.jsonl` and `gpu_types.txt`:** one per job. They must all agree.
+- **Fewer than 29 conditions,** if two budgets share one. The row still has a line per budget.
+- **`fastvid` or `prunevid` landing apart on AEA and Nymeria:** one knob for the whole dataset.
+- **`budget` measuring under its target:** the limit is a ceiling, so a quiet video sends only its marks. It can also land slightly over, because 51 tokens per frame is a mean rounded up.
+- **`gaze_missing_pct` is blank** on rows that don't use gaze.
+- **`prompt_tokens_per_q` differing between rows at one budget:** the budget counts visual tokens only, and each frame sent also adds a time label.
+
+### Rules for this task
+
+- **Don't pull until Qwen3's full merge has finished.**
+- **Don't change anything after seeing accuracy:** not `K`, the policy, the fovea, the baselines, the budgets, the limits or the preference order.
+- **Don't add rows, controls, models or videos without asking.**
+- **Calibrate on token counts only,** once.
+- **Don't claim a winner.** Without a no-gate row, these results can't show whether the gate itself helps.
+- **Never score with `--no-parity`.**
+- **If A100s stay busy, ask the user.** Don't override `--gres` or use another GPU type.
+- **Don't pull between shard jobs of this run.** A different commit stops the next job.
+- **Never write to `results/qwen3_350/` or any folder section 12 lists as read-only.** `results/hpc350_pilot/` is only read.
+- **Commit only when the user asks.** This repo is public: never commit results, NetIDs, account names, tokens or `*CONTEXT*.md`.
+- **Nothing runs on the user's Mac.**
+
+### What to report back
+
+1. Any code you changed, and each step's last log line.
+2. Step 1: the test result, the snapshot folder and the two `model_id` lines.
+3. Step 2: every row's target, predicted budget and `nearest_only`, and the questions and videos per shard.
+4. For each shard: its questions and videos, node, full GPU name, elapsed time, GPU mean and lowest 30-minute mean, and any `oom` or `nan` records.
+5. The pilot comparison: the `TOKENS MATCH` line and each row's `max_prob_diff`.
 6. For all 350 videos, AEA and Nymeria, per row and budget: `n`, accuracy, target and measured budget, frames per question, `gaze_missing_pct` and `prompt_tokens_per_q`, flagged rows and every deviation, with the note that the results can't show whether the gate itself helps. **Don't claim a winner.**

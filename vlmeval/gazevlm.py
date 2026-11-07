@@ -160,8 +160,8 @@ class Backend:
     max_pixels = 448 * 448
 
     def prefetch(self, frames, workers):
-        """Loads a video's frames on threads ahead of encoding them. Only SmolVLM and Qwen3-VL have this so far, and
-        run.py stops before a model that doesn't."""
+        """Loads a video's frames on threads ahead of encoding them. Only SmolVLM, Qwen2.5-VL and Qwen3-VL have this so
+        far, and run.py stops before a model that doesn't."""
         raise NotImplementedError(f"{type(self).__name__}: frame loading threads aren't built for this model")
 
     def _messages(self, it, build_messages):
@@ -179,10 +179,25 @@ class Qwen25(Backend):
         self.mean, self.std = proc.image_processor.image_mean, proc.image_processor.image_std
         self.px, self.max_pixels = 448, qf.IMG * qf.IMG
         self.side = self.px // qf.BASE
+        self.ready = {}                                  # (frame path, side px) -> its image, made ahead on threads
+
+    def prefetch(self, frames, workers):
+        """A video's images made on threads, so the GPU doesn't wait for frames decoded one at a time. Each frame gets
+        exactly what frame_input would make; only the timing changes."""
+        self.ready.clear()
+        self.qf.load_resized([(dict(fr, key=fr["path"]), self.px) for fr in frames], self.ready, workers)
+
+    def frame_input(self, fr):
+        """The frame's image, from the threads if they made it. Looked up by path, because the two-view GazeVLM's views
+        of a frame share its key."""
+        img = self.ready.pop((fr["path"], self.px), None)
+        if img is None:
+            img = self.qf.resize01(self.qf.load_frame01(fr["path"], self.qf.IMG), self.px)
+        return img
 
     def frame_grid(self, fr):
         qf = self.qf
-        img = qf.resize01(qf.load_frame01(fr["path"], qf.IMG), self.px)
+        img = self.frame_input(fr)
         return qf.encode_cells(self.vis, img, qf.uniform_cells(self.px), self.px, self.mean, self.std
                                ).view(self.side, self.side, -1)
 

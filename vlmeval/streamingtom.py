@@ -222,7 +222,7 @@ class Qwen25(gz.Qwen25):
     """Qwen2.5-VL: 256 tokens of 28 px; saliency from its last ViT block (a full-attention block)."""
     def frame_state(self, fr):
         qf = self.qf
-        img = qf.resize01(qf.load_frame01(fr["path"], qf.IMG), self.px)
+        img = self.frame_input(fr)
         cells = qf.uniform_cells(self.px)
         pseudo = lambda q, k, m, s: pseudo_cls_attention(q, k, m, s, group_pool(4))
         with _capture(self, self.vis.blocks[-1].attn, pseudo) as got:

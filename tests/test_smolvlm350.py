@@ -162,7 +162,7 @@ def test_a_two_view_rerun_resumes_with_threads(tmp_path, fake_smolvlm):
 
 def test_only_smolvlm_baselines_take_threads():
     assert run.baselines_without_threads(["smolvlm"], ROWS, 8) == []
-    assert run.baselines_without_threads(["phi", "qwen2.5", "smolvlm"], ["dtd"], 8) == ["phi", "qwen2.5"]
+    assert run.baselines_without_threads(["phi", "internvl", "smolvlm"], ["dtd"], 8) == ["phi", "internvl"]
     assert run.baselines_without_threads(["phi"], ["uniform", "budget"], 8) == []
     assert run.baselines_without_threads(["phi"], ["dtd"], 0) == []
     with pytest.raises(NotImplementedError, match="threads"):
@@ -282,7 +282,7 @@ def test_fractions_stop_on_phi_until_its_row_breaks_are_counted():
 
 def test_threads_are_refused_on_a_model_without_them(capsys):
     with pytest.raises(SystemExit):
-        cal.main(["--config", "x", "--model", "qwen2.5", "--points", "1", "--prefetch-workers", "2", "--write", "y"])
+        cal.main(["--config", "x", "--model", "internvl", "--points", "1", "--prefetch-workers", "2", "--write", "y"])
     assert "threads aren't built" in capsys.readouterr().err
 
 

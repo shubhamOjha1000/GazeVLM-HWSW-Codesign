@@ -49,10 +49,12 @@ The models (keys used everywhere in this folder):
 | `hpc/all350/` | the budget rule on all 350 videos: joining the data, the token count, reusing records, the report; see section 10 of the runbook. Also the full-budget check for section 11 |
 | `hpc/smolvlm350*.SBATCH` | SmolVLM on all 350 videos with every row at 5, 10 and 20%, on one GPU type; see section 11 of the runbook |
 | `hpc/qwen3350*.SBATCH`, `hpc/all350/shards.py`, `merge_shards.py`, `estimate_hours.py` | the same on Qwen3, split across 3 one-GPU jobs and merged into one table; see section 12 of the runbook |
+| `hpc/qwen25350*.SBATCH`, `hpc/all350/shard_progress.py` | the same on Qwen2.5, with no check job or pilot, and answers done per shard; see section 13 of the runbook |
 | `../tests/test_newvideos.py` | CPU tests of `hpc/newvideos/` and of loading frames on threads |
 | `../tests/test_all350.py` | CPU tests of `hpc/all350/` and of loading frames on threads on Qwen2.5, Qwen3 and Phi |
 | `../tests/test_smolvlm350.py` | CPU tests of section 11: threads on SmolVLM's baseline rows, the knobs, the full-budget check, the report |
 | `../tests/test_qwen3350.py` | CPU tests of section 12: the assignment, threads on Qwen3's baseline rows, resuming, the merge and what it refuses, merged against unsharded |
+| `../tests/test_qwen25350.py` | CPU tests of section 13: threads on Qwen2.5's baseline rows, its shard split, merged against unsharded, and that Qwen3's jobs and merge code are unchanged |
 | `../tests/test_accuracy_tables.py` | CPU tests of the config, frame selection and budget code |
 | `../vlmeval/budget_rule.py` | the frame budget: the frame limit, the send reasons, the slots and the frame kept per slot |
 | `../tests/test_budget_rule.py` | CPU tests of the frame budget: the rule, the slots, the two rows, the comparison |

@@ -325,7 +325,7 @@ def models_without_threads(keys, workers):
 
 
 def baselines_without_threads(keys, rows, workers):
-    """Models whose baseline rows can't take run.prefetch_workers: only SmolVLM's and Qwen3's backends load frames on threads so far."""
+    """Models whose baseline rows can't take run.prefetch_workers: only SmolVLM's, Qwen2.5's and Qwen3's backends load frames on threads so far."""
     if not workers or not set(rows) & set(BASELINE_ROWS):
         return []
     return [k for k in keys if not ADAPTERS[k].baselines_load_on_threads]
@@ -346,7 +346,7 @@ def main(argv=None):
     ap.add_argument("--prefetch-workers", type=int,
                     help="override run.prefetch_workers: threads loading a video's frames ahead, for the rows scored "
                          "through the fovea modules (uniform, ours, budget, nogate) on qwen2.5, qwen3, phi and smolvlm, "
-                         "and for the baseline rows on smolvlm and qwen3")
+                         "and for the baseline rows on smolvlm, qwen2.5 and qwen3")
     a = ap.parse_args(argv)
 
     cfg = common.load_config(a.config)

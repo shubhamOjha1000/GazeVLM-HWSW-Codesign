@@ -273,10 +273,10 @@ def test_threads_give_exactly_what_loading_one_at_a_time_gives(tmp_path, monkeyp
     assert ahead.ready == {}
 
 
-def test_qwen3_is_the_only_model_this_adds_baseline_threads_to(monkeypatch):
+def test_models_without_baseline_threads_are_still_refused(monkeypatch):
     monkeypatch.setattr(run, "ADAPTERS", models.ADAPTERS)
     assert run.baselines_without_threads(["qwen3", "smolvlm"], ROWS, 8) == []
-    assert run.baselines_without_threads(["qwen2.5", "phi", "internvl", "gemma"], ["dtd"], 8) == ["qwen2.5", "phi", "internvl", "gemma"]
+    assert run.baselines_without_threads(["phi", "internvl", "gemma"], ["dtd"], 8) == ["phi", "internvl", "gemma"]
 
 
 # ---------------------------------------------------------------------------- the token counts
@@ -329,16 +329,16 @@ def score(w, out_dir, videos, workers):
     cfg["paths"]["out_dir"] = str(out_dir)
     cfg["run"]["parity"] = False
     cfg["run"]["prefetch_workers"] = workers
-    run.run_model(M, cfg, data_of(w, videos), ROWS)
+    run.run_model(w.model, cfg, data_of(w, videos), ROWS)
 
 
 def run_shard(w, root, shard, workers=2, repo=None, gpu=GPU):
     """What the job does: record the GPU, repair, check and record the job, score."""
-    folder = shards.shard_folder(str(root), shard, M)
+    folder = shards.shard_folder(str(root), shard, w.model)
     os.makedirs(folder, exist_ok=True)
     check_gpu.record(os.path.join(folder, "gpu_types.txt"), gpu)
     repair(folder)
-    shards.start(str(root), shard, M, w.base, w.targets, ROWS, workers, gpu, VERSIONS, repo=repo or w.repo)
+    shards.start(str(root), shard, w.model, w.base, w.targets, ROWS, workers, gpu, VERSIONS, repo=repo or w.repo)
     score(w, os.path.join(str(root), "shards", str(shard)), shards.read_manifest(str(root))["shards"][shard]["videos"], workers)
 
 
@@ -354,45 +354,51 @@ def fake_repo(folder, commit="abc123", code="x = 1\n"):
     return folder
 
 
-@pytest.fixture(scope="module")
-def world(tmp_path_factory):
-    mp = pytest.MonkeyPatch()
-    base = tmp_path_factory.mktemp("world")
+def build_world(base, mp, model, adapter, fake, folder):
+    """A small dataset, calibrated through calibrate.py's real main, scored whole with no threads, then in 3 shards with threads, and merged."""
     g, e = base / "g", base / "e"
     os.makedirs(g)
     os.makedirs(e)
     mp.setenv("GV_ROOT", str(g))
     mp.setenv("EGO_ROOT", str(e))
-    fake_model(mp)
+    fake(mp)
     real_bootstrap = egoev.video_bootstrap
     mp.setattr(egoev, "video_bootstrap", lambda df, stat, B=1000, seed=0: real_bootstrap(df, stat, 50, seed))     # the same seed, fewer draws
     with open(e / "Egoeverything_VQA.json", "w") as f:
         json.dump([dict(video_name=v) for v in QUESTION_ORDER], f)
     rng = np.random.default_rng(0)
-    w = SimpleNamespace(frames={v: write_frames(base, v, N_FRAMES) for v in VIDEOS}, labels={v: rng.integers(0, 4, N_FRAMES - 1) for v in VIDEOS},
+    w = SimpleNamespace(model=model, frames={v: write_frames(base, v, N_FRAMES) for v in VIDEOS}, labels={v: rng.integers(0, 4, N_FRAMES - 1) for v in VIDEOS},
                         qs=pd.DataFrame(dict(qid=range(len(QUESTION_ORDER)), video=QUESTION_ORDER, question="q", options=[list("abcde")] * len(QUESTION_ORDER),
                                              answer=["A", "B"] * 5 + ["A"])),
-                        repo=fake_repo(str(base / "repo")), root=g / "results" / "qwen3_350", whole=g / "results" / "whole")
+                        repo=fake_repo(str(base / "repo")), root=g / "results" / folder, whole=g / "results" / "whole")
     # calibrate, through its real main
     mp.setattr(common, "load_data", lambda cfg: data_of(w, list(VIDEOS)))
-    mp.setattr(cal, "ADAPTERS", dict(qwen3=Qwen3))
-    mp.setattr(run, "ADAPTERS", dict(qwen3=Qwen3))
+    mp.setattr(cal, "ADAPTERS", {model: adapter})
+    mp.setattr(run, "ADAPTERS", {model: adapter})
     w.cal = w.root / "calibrate"
     w.base = str(w.cal / "config_baselines.yaml")
-    w.targets = str(w.cal / M / "targets.csv")
-    w.counts = str(w.cal / M / "kept_counts.jsonl")
-    w.cal_gpu = str(w.cal / M / "gpu_types.txt")
-    os.makedirs(w.cal / M)
+    w.targets = str(w.cal / model / "targets.csv")
+    w.counts = str(w.cal / model / "kept_counts.jsonl")
+    w.cal_gpu = str(w.cal / model / "gpu_types.txt")
+    os.makedirs(w.cal / model)
     check_gpu.record(w.cal_gpu, GPU)
-    cal.main(["--config", prepare.CONFIG, "--model", M, "--fractions", "--prefetch-workers", "2", "--counts", w.counts, "--out-dir", str(w.cal), "--write", w.base])
+    cal.main(["--config", prepare.CONFIG, "--model", model, "--fractions", "--prefetch-workers", "2", "--counts", w.counts, "--out-dir", str(w.cal), "--write", w.base])
     # scored whole with no threads, then in 3 shards with threads
     score(w, w.whole, list(VIDEOS), 0)
     shards.write_manifest(str(w.root), shards.manifest_of(dict(VIDEOS), 3, "all"))
     for shard in range(3):
         run_shard(w, w.root, shard)
-    w.merge_info = merge_shards.merge(str(w.root), M, w.targets, w.base, ROWS, w.cal_gpu)
-    yield w
-    mp.undo()
+    w.merge_info = merge_shards.merge(str(w.root), model, w.targets, w.base, ROWS, w.cal_gpu)
+    return w
+
+
+@pytest.fixture(scope="module")
+def world(tmp_path_factory):
+    mp = pytest.MonkeyPatch()
+    try:
+        yield build_world(tmp_path_factory.mktemp("world"), mp, M, Qwen3, fake_model, "qwen3_350")
+    finally:
+        mp.undo()
 
 
 @pytest.fixture
