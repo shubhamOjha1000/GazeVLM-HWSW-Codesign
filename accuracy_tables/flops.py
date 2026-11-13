@@ -403,6 +403,46 @@ def stock_qwen3():
     return uniform_qwen3(q3.IMG)
 
 
+# ---------------------------------------------------------------------------- SmolVLM2-256M (runbook section 16)
+def prompt_len_smolvlm256(ad, question, options, frames, image_tokens):
+    """Tokens of the prompt SmolVLM2-256M's rows build (smolvlm256_fovea.run_questions and its backends)."""
+    from accuracy_tables.models import build_messages
+    from vlmeval import smolvlm256_fovea as s2
+    msgs = build_messages(question, options, [(fr["path"], fr["t"]) for fr in frames], s2.IMG * s2.IMG)
+    return int(s2.prompt_ids(ad.proc, msgs, [int(t) for t in image_tokens], s2.TOKENIZE["add_special_tokens"]).shape[1])
+
+
+def features_smolvlm256(cells, img):
+    """SigLIP attends over the whole frame in every layer: its patches P (16 per 64 px cell: linear layers, patch embedding,
+    projection) and P^2 (attention)."""
+    from vlmeval import smolvlm256_fovea as s2
+    p = float(len(cells) * s2.SHUFFLE * s2.SHUFFLE)
+    return [p, p * p]
+
+
+def vision_smolvlm256(ad, cells, img):
+    """Counted FLOPs of the 256M's encoder and connector (smolvlm256_fovea.encode_cells) on one frame of this layout."""
+    from vlmeval import smolvlm256_fovea as s2
+    ip = ad.proc.image_processor
+    x = torch.zeros(3, s2.IMG, s2.IMG)
+    return count_flops(lambda: s2.encode_cells(ad.model, x, np.asarray(cells), ip.image_mean, ip.image_std))[0]
+
+
+def layout_smolvlm256(conditions, cond, fr):
+    from vlmeval import smolvlm256_fovea as s2
+    return s2.frame_layout(conditions, cond, fr)[:2]
+
+
+def uniform_smolvlm256(side):
+    from vlmeval import smolvlm256_fovea as s2
+    return s2.uniform_cells(int(side)), int(side)
+
+
+def stock_smolvlm256():
+    from vlmeval import smolvlm256_fovea as s2
+    return uniform_smolvlm256(s2.IMG)
+
+
 # Per model: prefill(ad, n) and prompt_len(...) always; llm_shape(ad) for the check against the config; and, where a foveated frame's
 # cost follows its layout, layout(conditions, cond, frame) -> (cells, side), stock() -> the stock layout, features(cells, side) and
 # vision(ad, cells, side) -> counted FLOPs.
@@ -412,4 +452,9 @@ MEASURE = {
                     stock=stock_qwen25, uniform=uniform_qwen25, fit_sides=(224, 336), features=features_qwen25, vision=vision_qwen25),
     "qwen3": dict(prefill=measure_prefill_qwen3, prompt_len=prompt_len_qwen, llm_shape=llm_shape, layout=layout_qwen3,
                   stock=stock_qwen3, uniform=uniform_qwen3, fit_sides=(256, 384), features=features_qwen3, vision=vision_qwen3),
+    # the same answer forward as the 2.2B's (smolvlm_fovea.letter_probs); 4 uniform sides, so the fit has 16 layouts with its 3 fovea
+    # settings (1 + 4 + 7 + 2 x 2)
+    "smolvlm256": dict(prefill=measure_prefill_smolvlm, prompt_len=prompt_len_smolvlm256, llm_shape=llm_shape, layout=layout_smolvlm256,
+                       stock=stock_smolvlm256, uniform=uniform_smolvlm256, fit_sides=(128, 256, 384, 448), features=features_smolvlm256,
+                       vision=vision_smolvlm256, llm_shape_tolerance=EXACT_TOLERANCE),
 }

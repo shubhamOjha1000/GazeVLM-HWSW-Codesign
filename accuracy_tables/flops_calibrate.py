@@ -342,7 +342,10 @@ def make_plan(ad, cfg, data, out_model_dir, verify_n=VERIFY_QUESTIONS, log=print
             f"{llm_check['want_c']:,} from the model's config: {100 * llm_check['c_off']:+.3f}%")
         log(f"n term {c[1]:.4g} against 2 x {shape['non_embedding_params']:,} non-embedding parameters = {llm_check['want_b']:.4g}: "
             f"{100 * llm_check['b_off']:+.2f}%, for information only")
-        if abs(llm_check["c_off"]) > flops.LLM_SHAPE_TOLERANCE:
+        tolerance = measure.get("llm_shape_tolerance", flops.LLM_SHAPE_TOLERANCE)
+        if abs(llm_check["c_off"]) > tolerance:
+            log(f"ATTENTION NOT COUNTED as the config describes it: the n^2 term is {100 * llm_check['c_off']:+.4f}% off "
+                f"4 x layers x heads x head_dim (tolerance {100 * tolerance:g}%)")
             sys.exit(f"c DIFFERS FROM CONFIG by {100 * llm_check['c_off']:+.2f}%: the counter doesn't see the LLM's attention as its "
                      "config describes it. Stop and tell the user.")
     units = dict(v_stock=u["ve"] / u["frames"], v_fovea=o["ve"] / o["frames"], prefill=c, gate_per_decision=float(gate),

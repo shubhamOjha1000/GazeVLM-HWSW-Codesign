@@ -40,6 +40,7 @@ from vlmeval import spatial as sp
 MODEL_CANDIDATES = ("HuggingFaceTB/SmolVLM2-2.2B-Instruct",)
 IMG, PATCH, BASE, TOP = 384, 14, 42, 126
 GRID = 9                                       # 42 px tokens per side (27 patches / 3)
+SHUFFLE = 3                                    # patches per token side (the connector's scale_factor), as the backends read it
 FAKE, GLOBAL, IMAGE = "<fake_token_around_image>", "<global-img>", "<image>"
 
 

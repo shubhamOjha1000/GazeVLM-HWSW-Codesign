@@ -216,6 +216,10 @@ class SmolVLM(stm.SmolVLM):
     saliency = "cls"
 
 
+class SmolVLM256(stm.SmolVLM256):
+    saliency = "cls"
+
+
 # ---------------------------------------------------------------------------- evaluation
 @torch.no_grad()
 def run_questions(backend, items, conditions, out_path, build_messages, log_every=25, prefetch_workers=0):

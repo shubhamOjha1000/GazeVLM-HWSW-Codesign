@@ -7,12 +7,12 @@ the project.
 **Everything runs as Slurm jobs, not notebooks.** The Python is already command-line scripts. The job files are in
 `accuracy_tables/hpc/`, and the method detail is in `accuracy_tables/README.md`.
 
-**New task: section 15, section 14's FLOPs-matched table on Qwen2.5-VL-3B and Qwen3-VL-4B, each split across 3 A100s. Don't pull it until section
-14's summary exists, and never while a section 12, 13 or 14 job is queued or running.** Section 15 hasn't run. Sections 13 and 14 came in one earlier pull.
+**New task: section 16, section 14's FLOPs-matched table on SmolVLM2-256M, on one B200. Don't pull it while any section 12 to 15 job is queued or
+running.** Section 16 hasn't run. Sections 14 and 15 have.
 Sections 1 to 7 cover the 12-video run, section 8 the budget rule on those videos, and section 9 gate data for the other 338 videos and SmolVLM on
 Nymeria. Section 10, the budget rule on 4 models, has run up to its pilot, and its step 4 waits for the user. Section 11 is SmolVLM with every row at
-5, 10 and 20%, section 12 is the same on Qwen3, section 13 the same on Qwen2.5, and section 14 SmolVLM with every row matched on total FLOPs.
-Section 15's job files have only had a bash syntax check, and its Python and tests have never been executed, because Python isn't run on the machine
+5, 10 and 20%, section 12 is the same on Qwen3, section 13 the same on Qwen2.5, section 14 SmolVLM with every row matched on total FLOPs, and section 15 the same on Qwen2.5
+and Qwen3. Section 16's job files have only had a bash syntax check, and its Python and tests have never been executed, because Python isn't run on the machine
 they were written on. Expect to fix small problems, and report what you change.
 
 ## 1. The task
@@ -127,6 +127,11 @@ All are in `accuracy_tables/hpc/`. Submit every one **from the repository root**
 | `qwen_flops.SBATCH <qwen2.5\|qwen3> calibrate` | section 15: the split and one model's sealed FLOPs plan, on one A100 | yes |
 | `qwen_flops.SBATCH <qwen2.5\|qwen3> full <0\|1\|2>` | section 15: one of a model's 3 FLOPs-matched shards, on one A100 | yes |
 | `qwen_flops_merge.SBATCH <qwen2.5\|qwen3>` | section 15: merges a model's 3 shards, writes its FLOPs table, compares with section 12 or 13 | no |
+| `smolvlm256_download.SBATCH` | section 16: SmolVLM2-256M at its pinned revision, into `$HF_HOME` | no |
+| `smolvlm256_flops_tests.SBATCH` | section 16: every CPU test, the 256M's tokens per frame, `SAME FRAMES AS 2.2B` and the `PROPOSED` limits | no |
+| `smolvlm256_flops_checks.SBATCH` | section 16: the 2.2B's regression, the 256M's parity, full-budget identity and threads, on one B200 | yes |
+| `smolvlm256_flops.SBATCH <calibrate\|full>` | section 16: the 256M's FLOPs plan with a projected run time, then every planned condition, on one B200 | yes |
+| `smolvlm256_flops_summary.SBATCH` | section 16: the records, GPU use, the FLOPs table and the side table against the 2.2B | no |
 
 Paths default to `/scratch/$USER/...`. Set `EGO_ROOT`, `GV_ROOT`, `HF_HOME`, `OVERLAY` or `IMAGE` before `sbatch` to
 override them. The `#SBATCH --output` lines assume `/scratch/<user>/GazeVLM/logs`.
@@ -168,6 +173,7 @@ Layout on the cluster:
   results/qwen25_350/                                                                                    <- section 13
   results/smolvlm_flops/                                                                                 <- section 14
   results/qwen25_flops/   results/qwen3_flops/                                                           <- section 15
+  results/smolvlm256_flops/                                                                              <- section 16
   logs/
 ```
 
@@ -2108,5 +2114,315 @@ They share a job name, so the second waits for the first. Each log, `logs/qwen-f
     - `n`, accuracy and its interval;
     - target and measured FLOPs share, and the token share;
     - GFLOPs, frames, frames encoded and prompt tokens per question.
+
+    **Don't claim a winner.**
+
+## 16. Next task: SmolVLM2-256M on all 350 videos, every row matched on total FLOPs, one B200
+
+**Don't pull while any job of sections 12 to 16 is queued or running, or before section 14's summary exists.** Step 1 checks this.
+**The user submits every job, and stops for an OK after each step.** Nothing here has been run. The job files have had a bash syntax check only, and the Python and its tests have never been executed. Expect to fix small problems, and report what you change.
+
+### Why this exists
+
+Section 14 matched every row on FLOPs on SmolVLM2-2.2B, and section 15 on Qwen2.5 and Qwen3. The user wants the same experiment on the smallest SmolVLM2, SmolVLM2-256M, with the same 35 conditions, the same matching and the same table.
+
+### Scope, set by the user
+
+- **Model:** `smolvlm256`, which is `HuggingFaceTB/SmolVLM2-256M-Video-Instruct` pinned at revision `9cda5c165b28c68a52e9bb542d2b89f0f6963709`. Results only in `results/smolvlm256_flops/`.
+- **Videos:** all 350, 5,985 questions (AEA 2,312 on 25 videos, Nymeria 3,673 on 325), reported as all, AEA and Nymeria.
+- **Rows:** section 14's 35 conditions:
+    - `uniform` and `blind`;
+    - at 5, 10 and 20%: `budget` (ours), `nogate`, `uniform_flops` and the 8 baselines.
+- **Matching:** section 14's, unchanged. Ours' measured FLOPs share at each token budget is the target. `choose_k` sets each row's `K'`, and the baselines' own knob matching sets their budget parameters.
+- **One GPU type, B200,** as section 14. Every row is scored fresh: nothing is reused from earlier runs.
+- **Reused as they are:** the gate (5 folds averaged), its row files for all 350 videos, the 1 fps frames and the questions. Nothing is rebuilt.
+- **No winner is claimed.** The gate itself is only compared against `nogate`.
+
+### What the 256M's own config gives, and what that changed
+
+Read from its pinned `config.json` and `preprocessor_config.json`, and checked against the loaded model at every job's start (`check_geometry`):
+
+| | SmolVLM2-2.2B (section 14) | SmolVLM2-256M |
+|---|---|---|
+| Frame | 384 px, 14 px patches, 27 x 27 | **512 px, 16 px patches, 32 x 32** |
+| Pixel shuffle | 3: 9 x 9 = **81 tokens** of 42 px | **4: 8 x 8 = 64 tokens** of 64 px |
+| LLM | SmolLM2-1.7B | **SmolLM2-135M: 30 layers, 9 query heads against 3 key/value heads of 64**, 8,192 positions |
+| Chat template, answer letters, prompt | | the same |
+
+**Settings that couldn't be reused as they were, and what the user approved on 2026-11-13:**
+
+| Setting | On the 2.2B | On the 256M | Why |
+|---|---|---|---|
+| **The fovea** (ours and `nogate`) | 3 x 3 grid of 126 px cells, the nearest kept full, the rest shrunk 3x: **17 of 81** | **2 x 2 grid of 256 px cells, the nearest kept full (16 tokens), the other 3 shrunk 4x: 19 of 64** | An 8 x 8 grid has no 3 x 3 split. The 2.2B's fovea uses its own pixel-shuffle step (3x), so this uses the 256M's (4x). It covers 1/4 of the frame (the 2.2B's covers 1/9). 19 on every frame, whatever the gaze |
+| Tokens per frame of the budget rule | 17 | **19** (`config.smolvlm256.yaml`) | follows from the fovea |
+| Frame limits at 5 / 10 / 20% | 15 / 30 / 60 | **10 / 21 / 43** | the same proposer, `floor(budget x 64 x 64 / 19)`. **Step 2 prints them as PROPOSED and stops for the user's OK** |
+| A shrunk cell's patch positions | the centre patch of each 3 x 3 block | the patch just up and left of each 4 x 4 block's centre | the 2.2B port's rule, `(k - 1) // 2`. A 4 x 4 block has no centre patch |
+| StreamingTOM's and FastVID's saliency | keys pooled over each token's 3 x 3 patches | over its 4 x 4 patches | the same rule, on this model's patches per token |
+| GazeVLM's 2 x 2 thumbnail and `r_min` 0.125 | 4 of 81 tokens, `r_min` about 1.1 tokens | **kept:** 4 of 64 tokens, `r_min` exactly 1 token | the user kept both definitions |
+| StreamingTOM knn 7, FastVID c 8, p 4, knn 4, PruneVid knn 7, min_tokens 14 | | **kept** | the authors' values, already used unchanged on 81- and 256-token models |
+| Frame loading threads | 8 on 8 cores | **16 on 16 cores** | the B200's low-GPU-use limit. Step 2 checks they change no answer |
+
+Nothing else changes: K = 64 Uniform K frames (64 x 64 image tokens + text, about 4,900 of the 8,192 positions), the budgets, the slots, the preference order, the gate and every baseline parameter.
+
+**Kept apart from the earlier runs.** The 256M's settings live in their own `accuracy_tables/hpc/config.smolvlm256.yaml`, which is `config.all350.yaml` plus three entries. `config.all350.yaml`, the defaults and section 14's job files are byte for byte as before, and a test pins them.
+
+### FLOPs on the 256M
+
+- **The counter and the definition are section 14's:** `torch.utils.flop_counter` on the real model, gate + vision encoder + LLM prefill.
+- **The LLM** is counted at 5 prompt lengths and fitted as `c0 + c1 n + c2 n²`.
+    - `c2` must equal `4 x 30 layers x 9 heads x 64 = 69,120`, **within 0.01%, not section 15's 1%**.
+    - Grouped-query attention (9 query heads against 3 key/value heads) is counted over the query's heads, as in `d0f6def`.
+    - A miss prints `ATTENTION NOT COUNTED` and stops with `c DIFFERS FROM CONFIG`.
+- **The vision encoder** is fitted on 16 layouts, as in `8de72e8`, to patches and patches squared (SigLIP attends over the whole frame):
+    - the stock frame;
+    - uniform frames of 128, 256, 384 and 448 px;
+    - the run's fovea at 7 gaze points;
+    - the 2- and 3-cell fovea at 2 gaze points each.
+    - It must reproduce every layout within 0.01%. It stops on `aren't linear` or `the fit can't be checked`.
+- **Step 4** scores every planned condition on 2 questions under the counter, as before. `FLOPS DIFFER` stops it.
+
+### What each row is expected to reach
+
+**Rough estimates from the model's size, not results.** Step 3 prints the real values. Show them to the user whatever they are.
+
+| | Estimate |
+|---|---|
+| One stock frame | about 215 GFLOPs |
+| One foveated frame (19 tokens, 304 patches) | about 56 GFLOPs, the same for every gaze |
+| The LLM per prompt token | about 0.2 GFLOPs, so **the vision encoder is about 85% of a Uniform K question** |
+| Targets at 5 / 10 / 20% tokens | about 4 / 8 / 17% of the FLOPs, or lower where a video sends fewer frames than its limit |
+| `K'` of the 7 single-view baselines | about 3 / 6 / 12 |
+| `K'` of `uniform_flops` | about 3 / 6 / 12 |
+| `K'` of `gazevlm2` | about 1 or 2 / 3 / 6 |
+
+- **Few frames for the baselines.** On this model the encoder dominates, and a baseline encodes every input frame at full size. So it gets few frames at an equal cost, more so than on the 2.2B.
+- **`nearest_only` is likely at 5%,** and on `gazevlm2` at every budget: one frame is worth 1 to 3 points of the FLOPs share there. It's a flag, not a failure.
+- **`avgpool` keeps 4 x 4 = 16 of 64 tokens,** the nearest square to 19, and **`gazevlm2` an even count, 18 or 20.**
+
+### Low GPU use: the main risk
+
+`gb*` nodes cancel jobs under 10% GPU use and warn under 50%. The 2.2B's calibrate averaged 11.8%, and the 256M asks far less of the GPU, so loading frames on the CPU sets the pace.
+
+- **16 loading threads on 16 cores,** checked in step 2 to give the same answers as none.
+- **Calibrate prints this job's GPU mean and lowest 30-minute mean, and the projected full-run time.** These come from a timing run on every 25th video.
+- **Stop rule: if calibrate's GPU mean is under 15%, stop before step 4 and ask the user.**
+- **Nothing that can change an answer was changed:** no batching of questions, no precision, attention or generation change.
+
+### What changed in the code
+
+| File | What it is |
+|---|---|
+| `vlmeval/smolvlm256_fovea.py` | new: the 256M's wrapper: its geometry, fovea, encoder path, parity and scoring. It imports the 2.2B module's geometry-free code (prompt, letters, merge, probabilities) rather than copying it |
+| `vlmeval/gazevlm.py`, `streamingtom.py`, `dycoke.py`, `fastvid.py`, `prunevid.py`, `dtd.py`, `avgpool.py`, `gazevlm2.py` | a `SmolVLM256` backend each, on the 256M's module. StreamingTOM's saliency now reads the patches per token from the module (`SHUFFLE`), which is 3 on the 2.2B, so the 2.2B's behaviour is unchanged |
+| `vlmeval/smolvlm_fovea.py` | one new constant, `SHUFFLE = 3`. Nothing else |
+| `accuracy_tables/models.py` | the `SmolVLM256` adapter; `download_kwargs`, for its pinned revision |
+| `accuracy_tables/flops.py`, `flops_calibrate.py` | the 256M's measuring functions; its exact `c2` check; `ATTENTION NOT COUNTED` before every `c DIFFERS FROM CONFIG` stop |
+| `accuracy_tables/hpc/config.smolvlm256.yaml` | new: `config.all350.yaml` plus the 256M's frame cap, fovea list and tokens per frame |
+| `accuracy_tables/hpc/all350/smolvlm256_checks.py` | new: picks the check videos, the tokens and `PROPOSED` limits, `SAME FRAMES AS 2.2B`, the strict answer comparison, `SAME AS UNIFORM K` at max_prob_diff 0.0, the projection, one job's records, the side table |
+| `accuracy_tables/hpc/all350/flops_shards.py` | the ledger count per folder, shared with the check above |
+| `accuracy_tables/hpc/download_models.py` | passes a model's pinned revision and file patterns, and prints the snapshot against the pin |
+| `accuracy_tables/hpc/smolvlm256_download.SBATCH`, `smolvlm256_flops_tests.SBATCH`, `smolvlm256_flops_checks.SBATCH`, `smolvlm256_flops.SBATCH`, `smolvlm256_flops_summary.SBATCH` | new: the jobs |
+| `tests/test_smolvlm256_flops.py` | new: 63 CPU tests |
+
+### Steps
+
+**Job count: 6 `sbatch` jobs: 3 on B200 (checks, calibrate, full) and 3 on CPU (download, tests, summary),** plus resubmissions after a time limit. All times are estimates.
+
+| Step | Job | Runs on | Time |
+|---|---|---|---|
+| 1. Pull and download | `smolvlm256_download.SBATCH` | CPU, with internet | a few minutes |
+| 2a. Tests, tokens, frames | `smolvlm256_flops_tests.SBATCH` | CPU | 1 to 2 hours |
+| 2b. Regression, parity, identity, threads | `smolvlm256_flops_checks.SBATCH` | B200 | 20 to 40 minutes |
+| 3. The plan | `smolvlm256_flops.SBATCH calibrate` | B200 | 1 to 1.5 hours |
+| 4. All 350 videos | `smolvlm256_flops.SBATCH full` | B200 | 45 minutes to 1.5 hours (the 2.2B took 1:05) |
+| 5. The table | `smolvlm256_flops_summary.SBATCH` | CPU | 1.5 to 2 hours (section 14's took about 1.5) |
+
+Set `SBATCH_ACCOUNT` as in section 5. Every command assumes `/scratch/$USER/GazeVLM`. Keep your own `HF_HOME`: no job here sets it.
+
+**Step 1: pull only if it's safe, then download the model.**
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+if squeue -h -u $USER -o "%j" | grep -Eq "^(smolvlm-flops|smolvlm256|qwen3350|qwen25350|qwen25-flops|qwen3-flops|qwen-flops)"; then
+    echo "STOP: a job of sections 12 to 16 is queued or running. Don't pull."
+elif [ ! -s ../results/smolvlm_flops/summary_flops_by_group.csv ]; then
+    echo "STOP: section 14's results/smolvlm_flops/summary_flops_by_group.csv isn't there, and step 2 compares with section 14. Don't pull."
+else
+    git status --short
+    git pull --ff-only origin eyehead-gate
+    git log --oneline | head -3
+    sbatch accuracy_tables/hpc/smolvlm256_download.SBATCH
+fi
+```
+
+- **`STOP`:** do nothing else, and tell the user.
+- **Expect** `git status` to show only your 2 local `--comment` edits.
+- **The download log,** `logs/smolvlm256-download_<job>.log`, ends with:
+    - `smolvlm256: HuggingFaceTB/SmolVLM2-256M-Video-Instruct -> .../snapshots/9cda5c165b28c68a52e9bb542d2b89f0f6963709`;
+    - `smolvlm256: snapshot 9cda5c165b28c68a52e9bb542d2b89f0f6963709, pinned 9cda5c165b28c68a52e9bb542d2b89f0f6963709: the same`.
+- **`DIFFERENT`, or a failed download: stop and tell the user.** Then list it:
+
+```bash
+ls $HF_HOME/hub/models--HuggingFaceTB--SmolVLM2-256M-Video-Instruct/snapshots/
+```
+
+**Step 2: the tests and the checks.** Ask the user first. The two jobs can run at the same time:
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+sbatch accuracy_tables/hpc/smolvlm256_flops_tests.SBATCH
+sbatch accuracy_tables/hpc/smolvlm256_flops_checks.SBATCH
+```
+
+**2a, `logs/smolvlm256-flops-tests_<job>.log` (CPU), shows in order:**
+
+1. **`853 passed, 3 skipped`:** the 790 tests that passed at `d0f6def` and 63 new ones. A different total is fine if nothing fails. **Any `failed` or `error`: stop.**
+2. **The geometry:** `SmolVLM2-256M at 9cda5c...: 512 px, 16 px patches, pixel shuffle 4: 64 stock tokens per frame (SmolVLM2-2.2B: 81); text context 8192 positions`.
+3. **`foveated tokens per frame at k = 1: 19 on every one of <n> frames`**.
+4. **The limits table,** for both models.
+5. **`the 2.2B's budget frames recomputed here give the frame count of all 17955 budget records`**, then **`SAME FRAMES AS 2.2B: ...`**.
+    - The check applies only where a video's limit is the same on both models. Those are short videos, where both clamp to the same count.
+    - Everywhere else it says the check doesn't apply, because the limits differ.
+6. **`PROPOSED, needs the user's OK: smolvlm256 tokens per frame: stock 64, foveated 19; frame limits 10/21/43 at 5/10/20% ...`**, ending in **`STOP`**.
+
+**2b, `logs/smolvlm256-flops-checks_<job>.log` (B200), shows in order:**
+
+1. The GPU's full name.
+2. **The 2.2B's regression:**
+    - `parity OK`;
+    - the uniform, blind and budget rows (all 3 budgets, which includes 10%) on 20 questions;
+    - `SAME ANSWERS: 0 of <n> records differ, max_prob_diff 0.0` against section 14's records.
+3. **The 256M's `parity OK`,** with `geometry: 512 px, 16 px patches, pixel shuffle 4: 64 tokens per frame` and `tokens_per_image_in_stock 64`.
+    - It compares our path with Hugging Face's own processor and forward, and their logits, on the stock input.
+    - It doesn't compare with `generate`, because no row decodes: every row reads the first answer token's logits, as on the 2.2B.
+4. **`SAME AS UNIFORM K at max_prob_diff 0.0`:** avgpool, dtd, dycoke and streamingtom at full budget on 30 questions.
+5. **The threads check:** all 12 rows on 50 questions, run once with no loading threads and once with 16, then `SAME ANSWERS: 0 of <n> records differ, max_prob_diff 0.0`.
+6. This job's GPU mean and lowest 30-minute mean, then `CHECKS DONE: smolvlm256`.
+
+**Stop and tell the user on:**
+- `ANSWERS DIFFER`, `NOT THE SAME AS UNIFORM K`, `FRAMES DIFFER FROM 2.2B`, `FOVEATED TOKENS DIFFER`;
+- `parity failed`, `geometry isn't`, `the 2.2B's budget frames recomputed here don't`;
+- a GPU other than B200.
+
+**Send the user both logs' lines above, and wait for the OK on the PROPOSED limits.** Nothing is calibrated before it.
+
+**Step 3: the plan.** Only after the user's OK:
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+sbatch --job-name=smolvlm256-flops-calibrate accuracy_tables/hpc/smolvlm256_flops.SBATCH calibrate
+```
+
+The log, `logs/smolvlm256-flops-calibrate_<job>.log`, shows in order:
+
+1. **The GPU's full name, the data** (5,985 questions on 350 videos) **and `parity OK`.**
+2. **`--- step 1`:**
+    - the gate's FLOPs;
+    - the LLM's quadratic;
+    - `n^2 term 69,120 ... from the model's config: +0.000%`;
+    - `one stock frame ... GFLOPs, one foveated frame ... GFLOPs`;
+    - `the encoder per frame = ... exact on all 16 layouts`.
+3. **`--- step 2`:** the prompt fit.
+4. **`--- step 3`:**
+    - `budget 5%: 19.00 image tokens ... per foveated frame`, and the same for the other budgets and `nogate`;
+    - ours' and the no-gate control's FLOPs shares;
+    - the `K'` counts.
+5. **`--- step 4`:** one `ok` line per condition and question.
+6. **The table, `<n> conditions for 35 lines`, and `PLAN WRITTEN`.**
+7. **The timing run** on every 25th video, then **`PROJECTED full run: about <a> to <b> hours ...`**.
+8. **This job's GPU mean and lowest 30-minute mean, then `CALIBRATE DONE: smolvlm256`.**
+
+**Stop and tell the user on any of these:**
+- `FLOPS DIFFER`, `aren't a quadratic`, `prefill is ... x the fitted one`;
+- `ATTENTION NOT COUNTED` or `c DIFFERS FROM CONFIG`;
+- `aren't linear`, `the fit can't be checked`, `the token arithmetic differs`;
+- a non-B200 GPU.
+
+**Stop before step 4 and ask the user if this job's GPU mean is under 15%.** If the job is cancelled for low GPU use, tell the user. Don't move it to another GPU type.
+
+- **`TIMEOUT` or a preemption: submit the same line again.** It continues the token counts it has saved. If the plan was written before the timing run finished, it refuses to start again: tell the user.
+- **Send the user** the step 1 and step 3 lines, the table, the projection and the GPU lines, **and wait.**
+
+**Step 4: all 350 videos.** Only after the user's OK:
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+sbatch --job-name=smolvlm256-flops-full accuracy_tables/hpc/smolvlm256_flops.SBATCH full
+```
+
+- **The log starts with** the GPU's full name and `parity OK`, then `<n> jobs, <m> conditions`. It has one block per condition.
+- **It ends with `=== 0 failed of <n>`** (35, or fewer if two budgets share a condition), then this job's GPU mean and lowest 30-minute mean, then **`RUN DONE: full smolvlm256`**. One job, so this line stands for section 15's `SHARD DONE`.
+- **`TIMEOUT`, or a preemption that didn't requeue: submit the same line again.** It cuts a half-written last line and skips every record already scored.
+- **Progress,** any time, from a login node:
+
+```bash
+wc -l /scratch/$USER/GazeVLM/results/smolvlm256_flops/smolvlm256/*.jsonl
+python3 -m accuracy_tables.hpc.all350.gpu_summary /scratch/$USER/GazeVLM/logs/gpu_smolvlm256-flops-full_*.csv
+```
+
+**Step 5: the table,** when step 4's log ends with `RUN DONE`.
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+sbatch accuracy_tables/hpc/smolvlm256_flops_summary.SBATCH
+```
+
+The log, `logs/smolvlm256-flops-summary_<job>.log`, shows in order:
+
+1. **`oom / nan records: 0`.**
+2. **`GPU per record: {'NVIDIA B200': 209475}`.**
+3. **`RECORDS: 209475 of 209475 planned answers in .../smolvlm256 (one job, so nothing to merge)`.** This stands for section 15's `MERGED`. The total is 2 x 5,985 + 11 x 17,955, or less if two budgets share a condition.
+4. **The full job's GPU mean and lowest 30-minute mean.**
+5. **The units, then the table per group** (all, AEA, Nymeria), and **`EVERY n IS COMPLETE`.**
+6. **The side table** against SmolVLM2-2.2B: per group, row and budget, each model's accuracy, interval and FLOPs share. No paired test, no winner.
+7. **`TOKENS MATCH: not applicable, different model`.** The 256M sends 64 tokens per frame, the 2.2B 81, through another LLM, so no record can match.
+8. **`written .../summary_flops_by_group.csv and .../summary_vs_2p2b.csv`.**
+
+**`INCOMPLETE`: rerun step 4, or tell the user.**
+
+**Step 6: the report.** Per group (all, AEA, Nymeria), every row and budget:
+- `n`, accuracy and its 95% interval;
+- target and measured FLOPs share, and the token share;
+- GFLOPs, frames, frames encoded and prompt tokens per question.
+
+Plus Uniform minus Blind per group, the GPU job table (type, node, length, mean and lowest 30-minute mean) and every deviation from this section.
+
+### Expected, not bugs
+
+- **`nogate` above ours' FLOPs:** it always sends the limit. It has no target.
+- **`budget` with its planned share equal to its target:** the target is its own share.
+- **`flops_pct` differing slightly from `planned_pct`:** the report uses each answer's real prompt length.
+- **A baseline's vision ratio from 1.000 to about 1.02 in step 4:** its own work, counted as zero.
+- **`frames_per_q` under `K'`** on `fastvid`, `prunevid` and `dtd`: frames left with no tokens leave the prompt, but they were encoded.
+- **SAME FRAMES AS 2.2B on few pairs:** the 256M's limits (10 / 21 / 43) differ from the 2.2B's (15 / 30 / 60) on any video with 64 frames or more, so only short videos are compared.
+
+### Rules for this task
+
+- **Don't pull** while a job of sections 12 to 16 is queued or running, or between step 3 and step 4.
+- **Don't calibrate before the user approves the PROPOSED limits,** and don't change anything after seeing accuracy:
+    - not K, the tokens per frame, the limits, the budgets or the fovea;
+    - not the preference order, the slots or the gate;
+    - not the planning rule, any `K'` or any baseline parameter.
+- **Plan on FLOPs and token counts only.** Don't force a target.
+- **Don't add rows, controls, models or videos without asking.** **Don't claim a winner.**
+- **One GPU type, B200.** Don't override `--gres`. If B200s stay busy, ask the user. **Never score with `--no-parity`.**
+- **Write only to `results/smolvlm256_flops/`.** Never write to `data/folds/` or to any results folder of sections 8 to 15; `results/smolvlm_flops/` is only read.
+- **This repo is public:** never commit results, logs, NetIDs, account names, tokens or `*CONTEXT*.md`. Commit only when the user asks.
+- **Nothing runs on the user's Mac.**
+
+### What to report back
+
+1. Any code you changed, and each job's last log line.
+2. **Step 1:** `git status`, the snapshot line and the folder listing.
+3. **Step 2:**
+    - the test result;
+    - the geometry line, the tokens per frame, the limits table, the frame check and the PROPOSED line;
+    - the regression, parity, identity and threads lines with their counts and max_prob_diff.
+4. **Step 3:**
+    - the units, the `n^2` term against the config and the encoder fit;
+    - the targets, the no-gate control's shares and the whole table with `K'`, knobs, token shares and `nearest_only`;
+    - every step 4 line that isn't exactly 1.00000;
+    - the projection and the GPU mean.
+5. **Steps 4 and 5:** the GPU job table, the records lines, both CSV paths, and the report of step 6.
 
     **Don't claim a winner.**

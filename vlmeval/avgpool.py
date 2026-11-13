@@ -76,6 +76,10 @@ class SmolVLM(gz.SmolVLM):
         return self.frame_tokens(grid, EMPTY, s)
 
 
+class SmolVLM256(SmolVLM, gz.SmolVLM256):
+    """SmolVLM2-256M: its 8 x 8 LLM tokens, raster order."""
+
+
 # ---------------------------------------------------------------------------- evaluation
 @torch.no_grad()
 def run_questions(backend, items, conditions, out_path, build_messages, log_every=25, prefetch_workers=0):

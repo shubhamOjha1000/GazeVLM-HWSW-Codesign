@@ -13,6 +13,7 @@ to its GazeVLM, StreamingTOM, DyCoke, FastVID, PruneVid, DTD, average-pooling an
     gemma      vlmeval/gemma_fovea.py      256 tokens (896 px, 4 x 4 pooling)
     phi        vlmeval/phi_fovea.py        757 tokens (672 px HD view + 336 px global view)
     smolvlm    vlmeval/smolvlm_fovea.py     81 tokens (384 px)
+    smolvlm256 vlmeval/smolvlm256_fovea.py  64 tokens (512 px)
 """
 
 import gc
@@ -43,6 +44,11 @@ class Adapter:
 
     def prefetch_workers(self):
         return int(self.cfg.get("run", {}).get("prefetch_workers", 0))
+
+    @classmethod
+    def download_kwargs(cls):
+        """Extra arguments to huggingface_hub.snapshot_download for this model (a pinned revision, which files)."""
+        return {}
 
     # -- to implement per model
     def _load(self, model_id):
@@ -401,4 +407,51 @@ class SmolVLM(Adapter):
         return sm.prompt_ids(self.proc, messages, [], sm.TOKENIZE["add_special_tokens"])
 
 
-ADAPTERS = {a.key: a for a in (Qwen25, Qwen3, InternVL, Gemma, Phi, SmolVLM)}
+class SmolVLM256(SmolVLM):
+    """SmolVLM2-256M-Video-Instruct (runbook section 16): SmolVLM's adapter on vlmeval/smolvlm256_fovea.py, its 512 px input, 64 tokens
+    per frame and its own fovea setting list (ours.smolvlm256_k). Its backends are the SmolVLM256 classes, found by this class's name.
+    Loads the pinned revision."""
+    key, stock_tokens, default_ids = "smolvlm256", 64, ("HuggingFaceTB/SmolVLM2-256M-Video-Instruct",)
+    loads_on_threads = True
+    baselines_load_on_threads = True
+
+    @property
+    def module(self):
+        from vlmeval import smolvlm256_fovea as sm
+        return sm
+
+    @classmethod
+    def download_kwargs(cls):
+        from vlmeval import smolvlm256_fovea as sm
+        return dict(revision=sm.REVISION, allow_patterns=list(sm.DOWNLOAD_PATTERNS))
+
+    def _load(self, model_id):
+        self.model, self.proc, self.letter_ids = self.module.load_model(model_id)
+
+    def parity(self, frame, question, options):
+        from PIL import Image
+        sm = self.module
+        rep = sm.parity_report(self.model, self.proc, self.letter_ids, Image.open(frame["path"]).convert("RGB"),
+                               question, options, build_messages)
+        ok = (rep["images_in_stock"] == 1 and rep["tokens_per_image_in_stock"] == sm.STOCK_TOKENS == self.stock_tokens
+              and rep["pixel_max_abs_diff"] < 1e-3 and rep["own_path_vs_get_image_features"] < 1e-3
+              and rep["vision_fp32_cos_min"] > 0.9999 and rep["tokens_ids_equal"] and rep["llm_probs_max_abs_diff"] < 1e-3
+              and rep["llm_same_answer"])
+        return ok, rep
+
+    def stock_condition(self):
+        return ("uniform", self.module.IMG)
+
+    def fovea_settings(self, ours_cfg):
+        return [dict(k=int(k)) for k in ours_cfg["smolvlm256_k"]]
+
+    def score(self, items, conditions, out_path):
+        self.module.run_questions(self.model, self.proc, self.letter_ids, items, conditions, out_path, build_messages,
+                                  prefetch_workers=self.prefetch_workers())
+
+    def blind_ids(self, messages):
+        sm = self.module
+        return sm.prompt_ids(self.proc, messages, [], sm.TOKENIZE["add_special_tokens"])
+
+
+ADAPTERS = {a.key: a for a in (Qwen25, Qwen3, InternVL, Gemma, Phi, SmolVLM, SmolVLM256)}

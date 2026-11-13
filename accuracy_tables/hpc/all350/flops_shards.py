@@ -128,23 +128,31 @@ def error_counts(root, model, rows, manifest):
     return out
 
 
+def folder_gpus(folder, rows, name):
+    """One results folder's records attributed to the GPU on its ledger -> (Counter {GPU name: records}, messages)."""
+    gpus, found = collections.Counter(), []
+    path = os.path.join(folder, LEDGER)
+    entries = read_jsonl(path) if os.path.exists(path) else []
+    for row in rows:
+        n = count_lines(os.path.join(folder, f"{row}.jsonl"))
+        mine = sorted((e for e in entries if e["row"] == row), key=lambda e: e["first_line"])
+        if n and (not mine or mine[0]["first_line"] != 0):
+            found.append(f"{name} {row}: records before the first ledger line")
+            continue
+        for i, e in enumerate(mine):
+            end = mine[i + 1]["first_line"] if i + 1 < len(mine) else n
+            if min(end, n) > e["first_line"]:
+                gpus[e["gpu"]] += min(end, n) - e["first_line"]
+    return gpus, found
+
+
 def ledger_gpus(root, model, rows, manifest):
     """Each shard's records attributed to the GPU on the ledger -> ({GPU name: records}, messages)."""
     gpus, found = collections.Counter(), []
     for s in range(manifest["n_shards"]):
-        folder = shards.shard_folder(root, s, model)
-        path = os.path.join(folder, LEDGER)
-        entries = read_jsonl(path) if os.path.exists(path) else []
-        for row in rows:
-            n = count_lines(os.path.join(folder, f"{row}.jsonl"))
-            mine = sorted((e for e in entries if e["row"] == row), key=lambda e: e["first_line"])
-            if n and (not mine or mine[0]["first_line"] != 0):
-                found.append(f"shard {s} {row}: records before the first ledger line")
-                continue
-            for i, e in enumerate(mine):
-                end = mine[i + 1]["first_line"] if i + 1 < len(mine) else n
-                if min(end, n) > e["first_line"]:
-                    gpus[e["gpu"]] += min(end, n) - e["first_line"]
+        got, msgs = folder_gpus(shards.shard_folder(root, s, model), rows, f"shard {s}")
+        gpus.update(got)
+        found += msgs
     if len(gpus) > 1:
         found.append(f"records from more than one GPU on the ledger: {dict(gpus)}")
     return dict(gpus), found

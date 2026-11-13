@@ -1,0 +1,28 @@
+# SmolVLM2-256M on all 350 videos (runbook section 16): config.all350.yaml, line for line, plus the 256M's own entries below.
+# Kept apart so that config.all350.yaml, and with it every earlier run's settings and plan hashes, doesn't change. Everything not set
+# here keeps the defaults in accuracy_tables/common.py, which are the protocol: don't change them. GV_ROOT and EGO_ROOT come from common.sh.
+paths:
+  data_root: ${GV_ROOT}/newvideos
+  folds_dir: ${data_root}/all350/folds
+  gate_ckpt_dir: ${GV_ROOT}/data/runs/eyehead
+  oof_cache: ${data_root}/all350/preds.csv                       # the 3 groups' existing predictions, so oof_predictions is never called
+  questions_json: ${EGO_ROOT}/Egoeverything_VQA.json
+  links_json: null
+  frames_cache_dir: ${data_root}/frames_tar                      # never used: every video has its frames and meta.json
+  frames_local_dir: ${data_root}/all350/frames                   # symlinks to frames_1344/ and newvideos/frames/
+  raw_download_dir: ${data_root}/raw
+  out_dir: ${GV_ROOT}/results/default                            # the jobs pass --out-dir
+run:
+  videos: all                                                    # every row sits in test.csv here, so `test` means nothing: use all or a list
+  max_frames:
+    smolvlm256: 64                                               # Uniform K = 64, as on SmolVLM2-2.2B (smolvlm keeps its 64 from the defaults)
+ours:
+  smolvlm256_k: [1, 2, 3]                                        # 19 / 34 / 49 of 64 tokens; k = 1, the smallest, is the budget rule's
+budget:
+  tokens_per_frame:
+    qwen2.5: 51
+    qwen3: 51
+    phi: 285
+    # k = 1 on the 2 x 2 grid of 256 px cells: 4 + 15 = 19 on every frame. smolvlm256_checks tokens measures it on every frame of all
+    # 350 videos and stops if any differs; the limits it proposes need the user's OK before calibrate (runbook section 16, step 2).
+    smolvlm256: 19

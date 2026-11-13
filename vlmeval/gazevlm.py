@@ -351,6 +351,16 @@ class SmolVLM(Backend):
         return self.sm.letter_probs(self.model, inputs, self.letter_ids), int(ids.shape[1])
 
 
+class SmolVLM256(SmolVLM):
+    """SmolVLM2-256M at its processor's 512 px image: 8 x 8 tokens of 64 px. Everything else is SmolVLM's backend, on
+    vlmeval/smolvlm256_fovea.py, so the gaze maps onto its own 8 x 8 grid."""
+    def __init__(self, model, proc, letter_ids):
+        super().__init__(model, proc, letter_ids)
+        from vlmeval import smolvlm256_fovea as sm
+        self.sm = sm
+        self.side, self.max_pixels = sm.GRID, sm.IMG * sm.IMG
+
+
 # ---------------------------------------------------------------------------- evaluation
 @torch.no_grad()
 def run_questions(backend, items, conditions, out_path, build_messages, log_every=25, prefetch_workers=0):

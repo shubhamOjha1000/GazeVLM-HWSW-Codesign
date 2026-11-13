@@ -160,6 +160,10 @@ class SmolVLM(_Views, stm.SmolVLM):
     pass
 
 
+class SmolVLM256(_Views, stm.SmolVLM256):
+    pass
+
+
 # ---------------------------------------------------------------------------- evaluation
 def _load_rgb(path):
     from PIL import Image

@@ -84,6 +84,10 @@ class SmolVLM(stm.SmolVLM):
     saliency = False
 
 
+class SmolVLM256(stm.SmolVLM256):
+    saliency = False
+
+
 # ---------------------------------------------------------------------------- evaluation
 @torch.no_grad()
 def run_questions(backend, items, conditions, out_path, build_messages, log_every=25, prefetch_workers=0):

@@ -333,17 +333,21 @@ class SmolVLM(gz.SmolVLM):
         sm = self.sm
         vis, _ = sm.parts(self.model)
         rec = self.frame_input(fr)
-        side = sm.IMG // sm.PATCH                                                # 27 patches per side
-        pseudo = lambda q, k, m, s: pseudo_cls_attention(q, k, m, s, block_pool(side, 3))
+        side = sm.IMG // sm.PATCH                                                # patches per side: 27 (2.2B), 32 (256M)
+        pseudo = lambda q, k, m, s: pseudo_cls_attention(q, k, m, s, block_pool(side, sm.SHUFFLE))
         with _capture(self, encoder_layers(vis)[-1].self_attn, pseudo) as got:
             tok = sm.encode_uniform(self.model, rec, sm.IMG, self.mean, self.std)
         st = dict(tokens=tok)
         if got:
-            st["sal"] = got[0][0] if _kind(self) == "cls" else pool_saliency(got[0][0], side, 3)
+            st["sal"] = got[0][0] if _kind(self) == "cls" else pool_saliency(got[0][0], side, sm.SHUFFLE)
         return st
 
     def pack(self, st, plan, beta):
         return (apply_plan(st["tokens"], plan, beta),)
+
+
+class SmolVLM256(SmolVLM, gz.SmolVLM256):
+    """SmolVLM2-256M: 64 tokens of 64 px; saliency from its SigLIP's last layer (4 x 4 patches per token)."""
 
 
 # ---------------------------------------------------------------------------- evaluation

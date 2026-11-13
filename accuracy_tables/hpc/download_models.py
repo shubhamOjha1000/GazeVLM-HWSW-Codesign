@@ -13,8 +13,13 @@ from accuracy_tables.models import ADAPTERS  # noqa: E402
 failed = []
 for key in sys.argv[1:] or ADAPTERS:
     model_id = ADAPTERS[key].default_ids[0]
+    kw = ADAPTERS[key].download_kwargs()                    # SmolVLM2-256M: its pinned revision, without the ONNX exports
     try:
-        print(f"{key}: {model_id} -> {snapshot_download(model_id)}", flush=True)
+        path = snapshot_download(model_id, **kw)
+        print(f"{key}: {model_id} -> {path}", flush=True)
+        if kw.get("revision"):
+            print(f"{key}: snapshot {os.path.basename(path)}, pinned {kw['revision']}: "
+                  f"{'the same' if os.path.basename(path) == kw['revision'] else 'DIFFERENT: stop and tell the user'}", flush=True)
     except Exception as ex:
         failed.append(key)
         print(f"{key}: {model_id} FAILED: {type(ex).__name__}: {str(ex)[:300]}", flush=True)
