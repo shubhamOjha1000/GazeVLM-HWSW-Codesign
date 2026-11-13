@@ -62,6 +62,7 @@ def table(sysdf, flops, gate, acc=None):
             r[m], r[m + "_sd"] = g[m].mean(), g[m].std(ddof=1) if len(g) > 1 else 0.0
         r["ve_gflops"] = fl.loc[cond, "ve_gflops"] if len(fl) and cond in fl.index else np.nan
         r["prefill_gflops"] = fl.loc[cond, "prefill_gflops"] if len(fl) and cond in fl.index else np.nan
+        r["combined_gflops"] = r["ve_gflops"] + r["prefill_gflops"]          # vision side + LLM prefill (nan if either is)
         if row == "ours":
             vids = g.video.tolist()
             r["overhead_mflops"] = np.mean([gate[v]["flops"] / 1e6 for v in vids if v in gate]) if gate else np.nan
@@ -86,17 +87,21 @@ def _f(x, fmt="{:.2f}"):
 
 
 def latex_rows(df, model_label):
-    """Rows in system_performance.tex's desktop-table layout."""
+    """Rows in system_performance.tex's desktop-table layout: model, method, token budget, frames encoded, GFLOPs (vision encoder,
+    language decoder's prefill, combined), peak memory in GB (vision encoder, language decoder, overall with its saving vs Uniform
+    K), overhead (MFLOPs / ms), TTFT in s (speed-up), TPS (speed-up), power (W) / energy (J) over the TTFT, then accuracy."""
     lines = []
     for i, r in df.iterrows():
         name = {"uniform": "stock (uniform $K$)", "ours": r"\textbf{Ours}"}.get(r.row, r.row)
         lines.append(" & ".join([
             model_label if not lines else "", f"{name}", _f(r.budget_pct, "{:.1f}\\%"), _f(r.frames_encoded, "{:.0f}"),
-            _f(r.ve_gflops, "{:.0f}"), _f(r.ve_peak_gb), _f(r.ld_peak_gb),
+            _f(r.ve_gflops, "{:.0f}"), _f(r.get("prefill_gflops"), "{:.0f}"), _f(r.get("combined_gflops"), "{:.0f}"),
+            _f(r.ve_peak_gb), _f(r.ld_peak_gb),
             f"{_f(r.overall_gb)} ({_f(r.get('overall_saving_pct'), '{:.0f}')}\\%)",
             f"{_f(r.overhead_mflops, '{:.1f}')} / {_f(r.overhead_ms, '{:.0f}')}",
             f"{_f(r.ttft_s)} ({_f(r.get('ttft_speedup'), '{:.2f}')}$\\times$)",
             f"{_f(r.tps, '{:.1f}')} ({_f(r.get('tps_speedup'), '{:.2f}')}$\\times$)",
+            f"{_f(r.get('power_w'), '{:.0f}')} / {_f(r.get('energy_j'), '{:.1f}')}",
             _f(r.get("accuracy"), "{:.1f}")]) + r" \\")
     return "\n".join(lines)
 
@@ -122,7 +127,8 @@ def main(argv=None):
         f.write(latex_rows(df, a.label or a.model) + "\n")
     pd.set_option("display.width", 250)
     pd.set_option("display.max_columns", 40)
-    cols = ["row", "condition", "n", "budget_pct", "frames_encoded", "ve_gflops", "ve_peak_gb", "ld_peak_gb", "overall_gb",
+    cols = ["row", "condition", "n", "budget_pct", "frames_encoded", "ve_gflops", "prefill_gflops", "combined_gflops", "ve_peak_gb",
+            "ld_peak_gb", "overall_gb",
             "overall_saving_pct", "overhead_mflops", "overhead_ms", "ttft_s", "ttft_sd", "ttft_speedup", "tps",
             "tps_speedup", "energy_j", "power_w", "accuracy"]
     df = df.rename(columns={"ttft_s_sd": "ttft_sd"})

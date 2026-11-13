@@ -120,3 +120,7 @@ def test_report_budgets_speedups_and_overheads():
     assert t.loc["dtd", "overhead_mflops"] == pytest.approx(1000.0) and t.loc["dtd", "overhead_ms"] == pytest.approx(100.0)
     assert t.loc["ours", "accuracy"] == 44.0 and t.loc["ours", "ve_gflops"] == 50.0
     assert rp.latex_rows(t.reset_index(), "Qwen2.5-VL-3B").count(r"\\") == 3
+    assert t.loc["uniform", "combined_gflops"] == pytest.approx(150.0) and t.loc["ours", "combined_gflops"] == pytest.approx(55.0)
+    ours = next(line for line in rp.latex_rows(t.reset_index(), "Qwen2.5-VL-3B").splitlines() if "Ours" in line)
+    cells = [c.strip() for c in ours.rstrip(" \\").split(" & ")]
+    assert cells[4:7] == ["50", "5", "55"] and cells[13] == "100 / 10.0" and cells[14] == "44.0"     # GFLOPs, power / energy, accuracy

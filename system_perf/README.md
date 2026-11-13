@@ -12,7 +12,9 @@ methods is changed: the measurements come from hooks and counters around them.
 | `report.py` | the table: mean +- s.d. per (row, condition), speed-ups / savings vs Uniform K, overheads, accuracy joined from the accuracy run; writes `system_table.csv` and `system_table.tex` |
 | `probe.py` | the instrumentation: decoder hooks, KV-cache decoding, batch expansion, NVML energy, the in-memory frame cache |
 | `colab_system_perf.ipynb` | Colab (A100): tests, measure, report, for one model |
-| `colab_system_perf_t4.ipynb` | a small check on a T4: SmolVLM2-2.2B in fp16, one video with all its questions, 1 warm-up |
+| `colab_system_perf_t4.ipynb` | a small check on a T4, one model per run (SmolVLM2-2.2B, Qwen2.5-VL-3B or Qwen3-VL-4B), all in fp16, one video with all its questions, 1 warm-up; Qwen3's conditions are made there, as it has no budget-matched run |
+| `t4.py` | the T4 notebook's runner: `python -m system_perf.t4 <step> <its arguments>` converts Qwen3-VL to fp16 in that process only, on a GPU without bf16 |
+| `../tests/test_system_perf_t4.py` | CPU tests of `t4.py` |
 | `../tests/test_system_perf.py` | CPU tests (sampling, hooks, decoding = recomputation on a tiny Llama, frame cache, report arithmetic) |
 
 ## Metrics (per question)
