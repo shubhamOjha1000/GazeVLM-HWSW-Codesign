@@ -307,9 +307,10 @@ def test_the_run_refuses_a_changed_config(tmp_path):
         fr.main(["--config", str(cfg_path), "--plan", str(plan_path), "--out-dir", str(tmp_path)])
 
 
-def test_flops_are_only_planned_for_smolvlm(tmp_path):
+def test_flops_are_only_planned_for_measured_models(tmp_path):
+    """Section 15 measures qwen2.5 and qwen3 too, so the refusal is checked on internvl, which still has no measuring functions."""
     with pytest.raises(SystemExit, match="only measured"):
-        fc.main(["--config", "x", "--model", "qwen2.5", "--out-dir", str(tmp_path)])
+        fc.main(["--config", "x", "--model", "internvl", "--out-dir", str(tmp_path)])
 
 
 # ---------------------------------------------------------------------------- the report

@@ -7,14 +7,13 @@ the project.
 **Everything runs as Slurm jobs, not notebooks.** The Python is already command-line scripts. The job files are in
 `accuracy_tables/hpc/`, and the method detail is in `accuracy_tables/README.md`.
 
-**New task: section 13, Qwen2.5-VL-3B on all 350 videos, split across 3 A100s. Don't pull it until Qwen3's full merge in section 12 has finished.**
-**Also new: section 14, SmolVLM with every row matched on total FLOPs instead of tokens, on one B200. It comes in the same pull as section 13,
-so the same rule applies.** Section 14 hasn't run either.
+**New task: section 15, section 14's FLOPs-matched table on Qwen2.5-VL-3B and Qwen3-VL-4B, each split across 3 A100s. Don't pull it until section
+14's summary exists, and never while a section 12, 13 or 14 job is queued or running.** Section 15 hasn't run. Sections 13 and 14 came in one earlier pull.
 Sections 1 to 7 cover the 12-video run, section 8 the budget rule on those videos, and section 9 gate data for the other 338 videos and SmolVLM on
 Nymeria. Section 10, the budget rule on 4 models, has run up to its pilot, and its step 4 waits for the user. Section 11 is SmolVLM with every row at
-5, 10 and 20%, section 12 is the same on Qwen3, and section 13 is the same on Qwen2.5. Section 13 hasn't run: its job files have only had a bash syntax
-check, and its Python and tests have never been executed, because Python isn't run on the machine they were written on. Expect to fix small problems,
-and report what you change.
+5, 10 and 20%, section 12 is the same on Qwen3, section 13 the same on Qwen2.5, and section 14 SmolVLM with every row matched on total FLOPs.
+Section 15's job files have only had a bash syntax check, and its Python and tests have never been executed, because Python isn't run on the machine
+they were written on. Expect to fix small problems, and report what you change.
 
 ## 1. The task
 
@@ -124,6 +123,10 @@ All are in `accuracy_tables/hpc/`. Submit every one **from the repository root**
 | `smolvlm_flops_tests.SBATCH` | section 14: the CPU tests | no |
 | `smolvlm_flops.SBATCH <calibrate\|full>` | section 14: SmolVLM's FLOPs plan, then every planned condition, on B200 only | yes |
 | `smolvlm_flops_summary.SBATCH` | section 14: GPU use and the FLOPs-matched table | no |
+| `qwen_flops_tests.SBATCH` | section 15: every CPU test in `tests/` | no |
+| `qwen_flops.SBATCH <qwen2.5\|qwen3> calibrate` | section 15: the split and one model's sealed FLOPs plan, on one A100 | yes |
+| `qwen_flops.SBATCH <qwen2.5\|qwen3> full <0\|1\|2>` | section 15: one of a model's 3 FLOPs-matched shards, on one A100 | yes |
+| `qwen_flops_merge.SBATCH <qwen2.5\|qwen3>` | section 15: merges a model's 3 shards, writes its FLOPs table, compares with section 12 or 13 | no |
 
 Paths default to `/scratch/$USER/...`. Set `EGO_ROOT`, `GV_ROOT`, `HF_HOME`, `OVERLAY` or `IMAGE` before `sbatch` to
 override them. The `#SBATCH --output` lines assume `/scratch/<user>/GazeVLM/logs`.
@@ -164,6 +167,7 @@ Layout on the cluster:
   results/qwen3_350_check/   results/qwen3_350_pilot/   results/qwen3_350/                               <- section 12
   results/qwen25_350/                                                                                    <- section 13
   results/smolvlm_flops/                                                                                 <- section 14
+  results/qwen25_flops/   results/qwen3_flops/                                                           <- section 15
   logs/
 ```
 
@@ -1774,6 +1778,326 @@ The log gives each job's GPU mean and lowest 30-minute mean, the units, then a t
     - every step 4 line that isn't exactly 1.00000 on vision or prefill.
 4. For each GPU job: the GPU type and node, its length, its mean and lowest 30-minute GPU use, and any `oom` or `nan` records.
 5. For all 350 videos, AEA and Nymeria, per row and budget:
+    - `n`, accuracy and its interval;
+    - target and measured FLOPs share, and the token share;
+    - GFLOPs, frames, frames encoded and prompt tokens per question.
+
+    **Don't claim a winner.**
+
+## 15. Next task: Qwen2.5-VL-3B and Qwen3-VL-4B on all 350 videos, every row matched on total FLOPs, 3 A100s per model
+
+**Don't pull until section 14's summary exists, and never while a SmolVLM FLOPs, Qwen3 or Qwen2.5 job is queued or running.** Step 1 checks this.
+**The user submits every job, and stops for an OK after each step.** Nothing here has been run. The job files have had a bash syntax check only, and the Python and its tests have never been executed. Expect to fix small problems, and report what you change.
+
+### Why this exists
+
+Section 14 ran on SmolVLM and finished cleanly (`=== 0 failed of 35`, `EVERY n IS COMPLETE`). The user wants the same comparison on Qwen2.5 and Qwen3: **every row given the same total FLOPs per question as ours,** and then its accuracy.
+
+### Scope, set by the user
+
+- **Models:** `qwen2.5` (`Qwen/Qwen2.5-VL-3B-Instruct`, snapshot `66285546d2b821cf421d4f5eb2576359d3770cd3`) and `qwen3` (`Qwen/Qwen3-VL-4B-Instruct`, the one snapshot section 12 ran on). Same model ids, prompts and answer scoring as sections 12 and 13.
+- **Videos:** all 350, 5,985 questions (AEA 2,312 on 25 videos, Nymeria 3,673 on 325), reported as all, AEA and Nymeria.
+- **Design: section 14's, unchanged.** Ours at its token budgets of 5, 10 and 20% sets the FLOPs targets. `uniform_flops` and the 8 baselines get the frame count `K'` whose FLOPs come closest, with section 14's planning rule: `choose_k`, the same knob matching, ours' tokens per frame, `nearest_only` when more than 0.5 points off. `nogate` keeps ours' token budget and has no target.
+- **35 lines per model:** `uniform` (Uniform K), `blind`, then `budget`, `nogate`, `uniform_flops`, `gazevlm`, `streamingtom`, `dycoke`, `fastvid`, `prunevid`, `dtd`, `avgpool` and `gazevlm2`, each at 5, 10 and 20%.
+- **Nothing is reused.** Every condition is rerun, so a model's 35 lines come from one code version on one GPU type (A100).
+- **No winner is claimed.** The gate itself is only compared against `nogate`, the same frames' budget spread evenly. These results can't show more than that about the gate.
+
+### The settled values
+
+None of these changes. They are sections 12 and 13's, from `common.py`'s defaults and `config.all350.yaml`.
+
+| Setting | Value |
+|---|---|
+| `K` | 96 Uniform K frames per video, or all of a shorter video's frames |
+| Stock tokens per frame | 256 (Qwen2.5 448 px, Qwen3 512 px) |
+| Rule's tokens per frame | 51, so frame limits 24, 48 and 96 on a video with 96 or more frames |
+| Fovea | `R=70 a=160`, with the same preference order and slots |
+| Gate | the 5 fold models averaged (`fold1.pt` to `fold5.pt`), counted as 5 models on every video |
+| Baselines | `common.py`'s defaults. Only `K'` and each row's budget parameter are planned |
+
+### What's new on Qwen: how its FLOPs are counted
+
+The counter is section 14's: `torch.utils.flop_counter`, run on the real model, through the code every row scores with.
+
+- **The LLM.** Its answer forward is counted at 5 prompt lengths, and fitted as `c0 + c1 n + c2 n²`. Stop on `aren't a quadratic`.
+    - **New check:** `c2` against `4 x layers x heads x head_dim`, read from the model's config. That's the counter's formula for attention over the whole prompt, and section 14's SmolVLM `c2` matched it exactly.
+    - Expect about **294,912** on Qwen2.5 (36 layers, 16 heads x 128) and **589,824** on Qwen3 (36 layers, 32 heads x 128).
+    - **More than 1% off stops the job with `c DIFFERS FROM CONFIG`.** `c1` is printed against 2 x the LLM's non-embedding parameters, for information only.
+- **The vision encoder.** It is counted as the model runs it, with no closed form assumed.
+    - Every frame is its own image, its picture repeated over the 2 frames of a temporal patch, as sections 12 and 13 send it. So a frame's cost doesn't depend on how many frames there are, odd or even. **Step 4 checks this:** a pairing of frames would cost something other than frames x one frame, and stop the job with `FLOPS DIFFER`.
+    - **A stock frame** costs the same every time. The plan measures it while scoring one question.
+    - **A foveated frame's cost follows its layout, which follows the gaze.** Its cell count changes. On Qwen2.5, so does how its patches fall into the 112 px window-attention blocks (it also has full-attention blocks).
+    - So step 1 counts the encoder on the stock layout and on foveated layouts at 7 gaze points. It fits each frame's count to its layout's terms, which are in `flops.py`:
+        - Qwen2.5: patches, the sum of each window's patches squared, and patches squared;
+        - Qwen3, whose encoder attends over the whole frame in every block, with its DeepStack mergers: patches and patches squared.
+    - **The fit must reproduce every counted layout within 0.01%,** or the job stops (`aren't linear in its patches and attention sizes`, or `don't tell the ... terms apart`).
+    - Ours' and `nogate`'s vision FLOPs and image tokens are then **summed over each video's own frames.** They're stored in the plan, and the report uses them per record.
+- **Attention the counter can't see.** Every count runs under a watch on the ops that execute.
+    - If an attention op runs that has no FLOP formula, every count is redone with eager attention, which runs attention as matrix products the counter sees. Only counting passes use it. Knob counting and all scoring keep the model's own attention.
+    - If one is still missed, `ATTENTION NOT COUNTED` is printed. It doesn't stop the job, but report it.
+- **The baselines' own work** (similarities, clustering, saliency) counts as zero, as in section 14, and step 4 stops if it's more than 2% of their vision FLOPs.
+
+### What each row is expected to reach
+
+**Rough estimates from the models' sizes, not results.** Step 3's plan prints the real values. Show them to the user whatever they are.
+
+| | Qwen2.5 | Qwen3 |
+|---|---|---|
+| One stock frame | about 1,340 GFLOPs | about 780 GFLOPs |
+| One foveated frame | about 260 GFLOPs, varying with the gaze | about 140 GFLOPs, varying with the gaze |
+| Uniform K's prompt, about 25,000 tokens | its `n²` attention is about half the question's FLOPs | about 60% |
+| Targets at 5 / 10 / 20% tokens | about 3 / 6.5 / 13.5% of the FLOPs | about 2.5 / 5 / 10.5% |
+| `K'` of `uniform_flops` | about 5 / 10 / 19 | about 5 / 10 / 19 |
+| `K'` of the 7 single-view baselines | about 8 / 17 / 35 | about 12 / 24 / 50 |
+| `K'` of `gazevlm2` | about 4 / 9 / 18 | about 7 / 15 / 32 |
+
+- **The targets are likely below the token budgets,** unlike SmolVLM's. Uniform K's long prompt pays attention that grows with the square of its length, and ours' short prompts barely do.
+- **`nearest_only` at 5% is likely,** mostly on `uniform_flops` and `gazevlm2`. One frame there is worth a point or more of the FLOPs share. It's a flag, not a failure.
+- **`avgpool` keeps 7 x 7 = 49 tokens per frame, and `gazevlm2` an even count near 51,** as in sections 12 and 13.
+
+### How the split works
+
+- **The split is sections 12 and 13's, read and never recomputed.** The calibrate job reads `results/qwen25_350/manifest/` for Qwen2.5 and `results/qwen3_350/manifest/` for Qwen3. It checks that split against the questions file, copies it byte for byte into this section's folder, and prints it.
+    - Expect **1,995 questions on each shard, on 114, 116 and 120 videos.**
+    - **A wrong or missing split stops the job.**
+- **One calibrate job per model writes the plan once.** It then seals it, recording the plan's and targets' hashes in `flops_plan.sha256`, and makes all three read-only.
+    - A shard refuses to start if the plan is missing, isn't the sealed one, or was made with another config.
+    - Then `shards.py start` runs, as in sections 12 and 13. It checks the commit, code, targets, settings, GPU and library versions against every earlier job of all 3 shards.
+- **Each shard writes only to its own folder.** The final folder is written only by the merge:
+
+```
+results/qwen25_flops/              (results/qwen3_flops/ the same, with qwen3)
+  manifest/manifest.json, shard_<n>.txt, all_videos.txt     copied from results/qwen25_350/manifest/ by calibrate
+  calibrate/qwen2.5/flops_plan.json, flops_targets.csv, flops_plan.sha256, flops_counts_K<n>.jsonl, gpu_types.txt
+  shards/<n>/qwen2.5/<row>.jsonl, gpu_ledger.jsonl, gpu_types.txt, shard_info.jsonl, run_info_flops.json
+  qwen2.5/<row>.jsonl, gpu_types.txt, merge_info.json        written only by the merge
+  summary_flops_by_group.csv                                 written only by the report
+```
+
+- **GPU type per record.** Each shard's `gpu_ledger.jsonl` records the GPU before every condition, and which line of the row's file that condition starts at. That puts every record on one GPU name.
+    - The merge stops if any record isn't on the ledger, or if there's more than one name. It also stops on a name that differs from the calibrate job's, as `check_gpu --same-as` does at every job's start.
+- **Threads** load frames ahead for every Qwen row, as in sections 12 and 13. GPU use is logged every minute to `logs/gpu_<job name>_<job id>.csv`.
+    - **The baselines now encode far fewer frames,** so GPU use may be lower than sections 12 and 13's 67 to 73% mean (lowest 30-minute mean 39.5 to 44%).
+    - **`ga*` nodes cancel jobs below 50% and warn below 70%.** If a job is cancelled or warned for low GPU use, stop and tell the user. Don't move it to another GPU type.
+
+### Answers expected
+
+- **Per model: 2 x 5,985 + 11 x 17,955 = 209,475 answers.** The files for `uniform` and `blind` hold 5,985 lines. Each other row's file holds 17,955, because its 3 budgets share one file, as in section 14.
+- **Per shard: 2 x 1,995 + 11 x 5,985 = 69,825.**
+- **Fewer if two budgets of a row get the same `K'`:** that condition is scored once, and the plan's table shows it.
+
+### What changed in the code
+
+| File | Change |
+|---|---|
+| `accuracy_tables/flops.py` | the user's `choose_k` tie fix, committed as it is on the cluster. Then measuring functions for Qwen2.5 and Qwen3, the vision fit per layout, the attention watch, the eager fallback for counting, and the `c2` check against the config |
+| `accuracy_tables/flops_calibrate.py` | takes the model as an argument, all from section 14's code: per-layout vision for Qwen's foveated rows, counting under the watch, the config check. SmolVLM's plan and table are as before. Its plan file gains 2 fields, and its log 2 lines |
+| `accuracy_tables/flops_run.py` | writes `gpu_ledger.jsonl` |
+| `accuracy_tables/hpc/all350/flops_report.py` | new `--plan`, needed because the merge rewrites `<model>/`. Uses Qwen's per-layout vision, and flags records whose image tokens aren't the plan's. Same columns as section 14 |
+| `accuracy_tables/hpc/all350/flops_shards.py` | new: the split, the seal, each shard's check, and the merge with the ledger check |
+| `accuracy_tables/hpc/all350/flops_progress.py` | new: answers done per shard and row, standard library only |
+| `accuracy_tables/hpc/qwen_flops.SBATCH`, `qwen_flops_merge.SBATCH`, `qwen_flops_tests.SBATCH` | new: the jobs |
+| `tests/test_qwen_flops.py` | new: both models on fake encoders and LLMs, through the real calibrate, split, shard, merge and report code |
+| `tests/test_smolvlm_flops.py` | its test that an unmeasured model is refused now uses `internvl`, because `qwen2.5` is measured now. It tests the same thing |
+
+**Unchanged:** sections 11 to 13's job files, `shards.py`, `merge_shards.py`, `shard_progress.py`, `report.py`, `summarize.py`, `check_gpu.py`, `repair_results.py`, `compare_records.py` and `config.all350.yaml`. The hash tests on Qwen3's and section 11's files still hold.
+
+### Steps
+
+**Job count: 11 `sbatch` jobs: 8 on GPU (2 calibrate, 6 shards) and 3 on CPU,** plus resubmissions after a time limit. All times are estimates.
+
+| Step | Job | Runs on | Time |
+|---|---|---|---|
+| 1. Pull and tests | `qwen_flops_tests.SBATCH` | CPU | 20 minutes to 1 hour |
+| 2. The plans | `qwen_flops.SBATCH <model> calibrate`, both models at once | 2 A100s | 2 to 4 hours each |
+| 3. All 350 videos | `qwen_flops.SBATCH <model> full 0, 1, 2`, both models | 6 A100s | 3.5 to 6 hours per shard, Qwen3 the longer |
+| 4. Merge and table | `qwen_flops_merge.SBATCH <model>`, one model after the other | CPU | 2 to 4 hours each |
+
+- **Time limits:** 8 hours for each GPU job and the merge, 3 hours for the tests.
+- **Shard estimate:** sections 12 and 13's shards took about 5 to 6.5 hours, with every baseline on 96 frames. Here the baselines encode about 60 to 90% as many frames, but each budget separately, and their prompts are shorter.
+
+Set `SBATCH_ACCOUNT` as in section 5. Every command assumes `/scratch/$USER/GazeVLM`.
+
+**Step 1: pull only if it's safe, then run the tests.**
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+FIX='-        if best is None or abs(s - target) < abs(best[1] - target):
++        if best is None or abs(s - target) < abs(best[1] - target) - 1e-12:'
+GOT=$(git diff -U0 -- accuracy_tables/flops.py | grep -E '^[-+]' | grep -vE '^(---|\+\+\+) ')
+if squeue -h -u $USER -o "%j" | grep -Eq "^(smolvlm-flops|qwen3350|qwen25350)"; then
+    echo "STOP: a section 12, 13 or 14 job is still queued or running. Don't pull."
+elif [ ! -s ../results/smolvlm_flops/summary_flops_by_group.csv ]; then
+    echo "STOP: section 14's results/smolvlm_flops/summary_flops_by_group.csv isn't there. Don't pull."
+elif [ -n "$GOT" ] && [ "$GOT" != "$FIX" ]; then
+    echo "STOP: accuracy_tables/flops.py has local changes other than the choose_k fix. Don't pull. Send the user this diff:"
+    git diff -- accuracy_tables/flops.py
+else
+    if [ -n "$GOT" ]; then
+        git checkout -- accuracy_tables/flops.py
+        echo "restored accuracy_tables/flops.py: the same one-line fix comes in the pull"
+    fi
+    git status --short
+    git pull --ff-only origin eyehead-gate
+    git log --oneline | head -3
+    ls ../data/runs/eyehead/fold1.pt
+    ls $HF_HOME/hub/models--Qwen--Qwen2.5-VL-3B-Instruct/snapshots/ $HF_HOME/hub/models--Qwen--Qwen3-VL-4B-Instruct/snapshots/
+    sbatch accuracy_tables/hpc/qwen_flops_tests.SBATCH
+fi
+```
+
+- **`STOP`:** do nothing else, and tell the user.
+- **Expect:**
+    - `git status` showing only your 2 local `--comment` edits;
+    - `fold1.pt`;
+    - exactly one snapshot folder per model, Qwen2.5's being `66285546d2b821cf421d4f5eb2576359d3770cd3`.
+- **Stop and tell the user on** more than one snapshot of a model, or another one.
+- **The test log** is `logs/qwen-flops-tests_<job>.log`. It runs every test in `tests/`. Its last line should be `<n> passed`, with no `failed` or `error`. **Stop on any failure.** Fix it only if it's a small problem in the new code, and never loosen a test to make it pass.
+
+**Step 2: the two plans.** Ask the user first. They can run at the same time:
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+sbatch --job-name=qwen25-flops-calibrate accuracy_tables/hpc/qwen_flops.SBATCH qwen2.5 calibrate
+sbatch --job-name=qwen3-flops-calibrate  accuracy_tables/hpc/qwen_flops.SBATCH qwen3 calibrate
+```
+
+Each log, `logs/qwen25-flops-calibrate_<job>.log` or `logs/qwen3-flops-calibrate_<job>.log`, shows in order:
+
+1. **The GPU's full name, then the split:** `the split sections 12 and 13 ran on ... copied`, and `shard <n>: 1995 questions on <114|116|120> videos` three times.
+2. **The data** (5,985 questions on 350 videos), then **`parity OK`.**
+3. **`--- step 1`:**
+    - the gate's FLOPs per decision;
+    - the LLM's quadratic, then `n^2 term ... from the model's config: +0.000%` and `n term ... for information only`;
+    - `one stock frame ... GFLOPs, one foveated frame ... GFLOPs`;
+    - `the encoder per frame = ...`, with the foveated layouts' range in GFLOPs and tokens.
+4. **`--- step 2`:** the prompt fit and its largest miss.
+5. **`--- step 3`:**
+    - per budget, ours' and the no-gate control's image tokens and GFLOPs per foveated frame;
+    - ours' FLOPs share at each budget, and the no-gate control's;
+    - `counting the baselines' tokens on Uniform K'=<n> frames`, once per frame count;
+    - `the token arithmetic matches the methods' own plans`.
+6. **`--- step 4`:** one `ok` line per condition and question, with its vision and prefill ratios.
+7. **The table of every row and budget,** `PLAN WRITTEN`, `sealed: ...`, then `CALIBRATE DONE: <model>`.
+
+**Stop and tell the user on any of these:**
+- `FLOPS DIFFER`, `aren't a quadratic`, `prefill is ... x the fitted one`, `c DIFFERS FROM CONFIG`;
+- `aren't linear in its patches and attention sizes`, `don't tell the ... terms apart`;
+- `the token arithmetic differs`;
+- the split's `is wrong`, `holds a different assignment` or `no .../manifest.json`;
+- `parity failed`;
+- a GPU other than A100, or another A100 name on a rerun.
+
+**`ATTENTION NOT COUNTED`** doesn't stop the job. Report it with the table, and say whether `redone with eager attention` appeared before it.
+
+- **`TIMEOUT` or a preemption: submit the same line again.** It continues the token counts it has saved.
+- **If it then refuses because `flops_plan.json` exists but there's no `flops_plan.sha256`, stop and tell the user.**
+
+**Show the user both plans' step 1 and step 3 lines and both tables, and wait.** The targets and every `K'` are fixed here, from FLOPs and token counts only, before any answer is read.
+
+**Step 3: all 350 videos, 6 shard jobs from one commit.** Ask the user first. **Don't pull between them, or between a shard and its resubmission.**
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+for N in 0 1 2; do sbatch --job-name=qwen25-flops-full-$N accuracy_tables/hpc/qwen_flops.SBATCH qwen2.5 full $N; done
+for N in 0 1 2; do sbatch --job-name=qwen3-flops-full-$N  accuracy_tables/hpc/qwen_flops.SBATCH qwen3 full $N; done
+```
+
+- **6 A100s at once may wait on `QOSGrpGRES` or `QOSMaxGRESPerUser`,** so they may not all start together. That's fine. If they stay pending for a long time, tell the user. Don't override `--gres`.
+- **Each log starts with** the GPU's full name, `shard <n>: commit ...` and `parity OK`, then `<n> jobs, <m> conditions`. It has one block per condition, then `=== 0 failed of <n>` and **`SHARD DONE: full <n>`.**
+- **The job stops before scoring** if the plan isn't the sealed one, the config changed, a condition's name differs from the plan's, the GPU isn't the calibrate job's, or an earlier job of any shard ran at another commit or code. **Stop and tell the user.**
+- **`TIMEOUT`, or a preemption that didn't requeue: resubmit that shard's same line.** It cuts a half-written last line and skips every record already scored. For example:
+
+```bash
+sbatch --job-name=qwen25-flops-full-1 accuracy_tables/hpc/qwen_flops.SBATCH qwen2.5 full 1
+```
+
+- **Progress,** any time, from a login node (an answer is one line):
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+python3 -m accuracy_tables.hpc.all350.flops_progress --root /scratch/$USER/GazeVLM/results/qwen25_flops --model qwen2.5
+python3 -m accuracy_tables.hpc.all350.flops_progress --root /scratch/$USER/GazeVLM/results/qwen3_flops --model qwen3
+wc -l /scratch/$USER/GazeVLM/results/qwen25_flops/shards/*/qwen2.5/*.jsonl
+python3 -m accuracy_tables.hpc.all350.gpu_summary /scratch/$USER/GazeVLM/logs/gpu_qwen25-flops-full-*_*.csv /scratch/$USER/GazeVLM/logs/gpu_qwen3-flops-full-*_*.csv
+```
+
+**Step 4: merge each model, by hand, once its 3 logs show `SHARD DONE`.**
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+sbatch accuracy_tables/hpc/qwen_flops_merge.SBATCH qwen2.5
+sbatch accuracy_tables/hpc/qwen_flops_merge.SBATCH qwen3
+```
+
+They share a job name, so the second waits for the first. Each log, `logs/qwen-flops-merge_<job>.log`, shows in order:
+
+1. **`oom / nan records: 0`,** or one line per shard and row that has any.
+2. **The merge:**
+    - per shard, its questions, videos, nodes and jobs;
+    - the GPU name, the commit, `GPU per record: {'NVIDIA A100-SXM4-80GB': 209475}`;
+    - `MERGED: 209475 records of 13 rows`.
+3. **Each shard job's GPU mean and lowest 30-minute mean.**
+4. **The units, then the FLOPs table per group** (all, AEA, Nymeria), `GPU types recorded: {'<model>': ['NVIDIA A100-SXM4-80GB']}` and **`EVERY n IS COMPLETE`.** It writes `results/<folder>/summary_flops_by_group.csv`, with section 14's columns.
+5. **The comparison with section 13's (Qwen2.5) or section 12's (Qwen3) records** for `uniform`, `blind` and `budget`, which also ran on A100s and are only read:
+    - per row, `records`, `missing`, `ref_only`, `pred_differs`, `tokens_differ` and `max_prob_diff`;
+    - then `TOKENS MATCH: answers differ on <x> of <y> records compared`.
+    - These are counts to report, not a pass or fail. A difference here never fails the job.
+6. **`MERGE JOB DONE: <model>`.**
+
+- **`MERGE STOPPED, INCOMPLETE`:** nothing was written. Rerun the shard it names, or tell the user if it names an `error record`, the ledger or another GPU.
+- **`INCOMPLETE` from the report:** tell the user.
+- **The merge job is safe to rerun.**
+
+### Expected, not bugs
+
+- **`nogate` above ours' FLOPs:** it always sends the limit, while ours sends fewer frames on a quiet video. It has no target.
+- **`budget` with its planned share equal to its target:** the target is its own share.
+- **`flops_pct` differing slightly from `planned_pct`:** the plan used fitted prompt lengths, and the report uses each answer's real one.
+- **A baseline's vision ratio of 1.000 to about 1.02 in step 4:** that's its own work, counted as zero. StreamingTOM's saliency makes it the largest.
+- **Foveated frames averaging other than 51 tokens:** 51 is the approved budget-rule value. A frame's real count follows its gaze, and the plan and the report use the real count.
+- **Two budgets sharing one condition** in a row, if they get the same `K'`.
+- **`frames_per_q` under `K'`** on `fastvid`, `prunevid` and `dtd`: frames left with no tokens leave the prompt, but `frames_encoded_per_q` still counts them.
+- **About 10 minutes at low GPU use at the start of each job,** loading the data. Step 2 is mostly counting.
+
+### Rules for this task
+
+- **Don't pull** while a `smolvlm-flops*`, `qwen3350*` or `qwen25350*` job is queued or running, or before section 14's summary exists. Never pull between the shard jobs of step 3.
+- **Don't change anything after seeing accuracy:** not `K`, the tokens per frame, the limits, the budgets, the fovea, the preference order, the slots, the gate, the planning rule, any `K'`, or any baseline parameter.
+- **Don't rerun calibrate once a shard has started.** The job refuses to while the plan exists.
+- **Plan on FLOPs and token counts only.** Don't force a target. If a row can't reach one, report the nearest.
+- **Don't add rows, controls, models or videos without asking.** **Don't claim a winner.**
+- **One GPU type, A100.** Don't override `--gres`. If A100s stay busy, ask the user. **Never score with `--no-parity`.**
+- **Write only to `results/qwen25_flops/` and `results/qwen3_flops/`.**
+    - Never write to `data/folds/` or to any results folder of sections 8 to 14: `results/smolvlm_flops/`, `results/qwen3_350/` and `results/qwen25_350/` are only read.
+    - So are `results/hpc_all/`, `hpc_budget/`, `nymeria_smolvlm/`, `hpc350_check/`, `hpc350_pilot/`, `smolvlm_350/`, `smolvlm_350_pilot/` and `smolvlm_350_check/`.
+- **This repo is public:** never commit results, logs, NetIDs, account names, tokens or `*CONTEXT*.md`. Commit only when the user asks.
+- **Nothing runs on the user's Mac.**
+
+### What to report back
+
+1. Any code you changed, and each job's last log line.
+2. **Step 1:**
+    - the test result;
+    - whether `flops.py` was restored;
+    - `git status`;
+    - `fold1.pt` and both snapshot folders.
+3. **Step 2, per model:**
+    - the split;
+    - the 4 units, the `n^2` term against the config, and the `n` term against the parameters;
+    - the encoder fit and its foveated range;
+    - the prompt fit and its largest miss;
+    - ours' and the no-gate control's tokens and FLOPs per foveated frame and FLOPs shares;
+    - the whole table, with every row's target, planned share, `K'`, budget parameter and token share, and which rows are `nearest_only`;
+    - every step 4 line that isn't exactly 1.00000, and any `ATTENTION NOT COUNTED`.
+4. **For each GPU job:**
+    - the GPU type and node, and its length;
+    - its mean and lowest 30-minute GPU use, and any low-use warning;
+    - any `oom` or `nan` records.
+5. **Step 4, per model:**
+    - the `MERGED` line and GPU per record;
+    - the comparison counts and `max_prob_diff` per row.
+6. **For all 350 videos, AEA and Nymeria, per model, row and budget:**
     - `n`, accuracy and its interval;
     - target and measured FLOPs share, and the token share;
     - GFLOPs, frames, frames encoded and prompt tokens per question.

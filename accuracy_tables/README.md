@@ -51,12 +51,14 @@ The models (keys used everywhere in this folder):
 | `hpc/qwen3350*.SBATCH`, `hpc/all350/shards.py`, `merge_shards.py`, `estimate_hours.py` | the same on Qwen3, split across 3 one-GPU jobs and merged into one table; see section 12 of the runbook |
 | `hpc/qwen25350*.SBATCH`, `hpc/all350/shard_progress.py` | the same on Qwen2.5, with no check job or pilot, and answers done per shard; see section 13 of the runbook |
 | `flops.py`, `flops_calibrate.py`, `flops_run.py`, `hpc/all350/flops_report.py`, `hpc/smolvlm_flops*.SBATCH` | SmolVLM with every row matched on total FLOPs per question instead of tokens: ours' FLOPs at its token budgets are the targets, and each baseline gets the frame count that reaches them; see section 14 of the runbook |
+| `hpc/qwen_flops*.SBATCH`, `hpc/all350/flops_shards.py`, `flops_progress.py` | the same FLOPs-matched table on Qwen2.5 and Qwen3, with each foveated frame's encoder cost from its own layout, split across 3 one-GPU jobs per model on sections 12 and 13's split; see section 15 of the runbook |
 | `../tests/test_newvideos.py` | CPU tests of `hpc/newvideos/` and of loading frames on threads |
 | `../tests/test_all350.py` | CPU tests of `hpc/all350/` and of loading frames on threads on Qwen2.5, Qwen3 and Phi |
 | `../tests/test_smolvlm350.py` | CPU tests of section 11: threads on SmolVLM's baseline rows, the knobs, the full-budget check, the report |
 | `../tests/test_qwen3350.py` | CPU tests of section 12: the assignment, threads on Qwen3's baseline rows, resuming, the merge and what it refuses, merged against unsharded |
 | `../tests/test_qwen25350.py` | CPU tests of section 13: threads on Qwen2.5's baseline rows, its shard split, merged against unsharded, and that Qwen3's jobs and merge code are unchanged |
 | `../tests/test_smolvlm_flops.py` | CPU tests of section 14: the FLOPs arithmetic, a whole plan on a fake SmolVLM, the run's jobs against the plan, the report |
+| `../tests/test_qwen_flops.py` | CPU tests of section 15: the Qwen FLOPs counting, whole plans on fake Qwen2.5 and Qwen3, the split, the sealed plan, resuming, the merge and the report |
 | `../tests/test_accuracy_tables.py` | CPU tests of the config, frame selection and budget code |
 | `../vlmeval/budget_rule.py` | the frame budget: the frame limit, the send reasons, the slots and the frame kept per slot |
 | `../tests/test_budget_rule.py` | CPU tests of the frame budget: the rule, the slots, the two rows, the comparison |

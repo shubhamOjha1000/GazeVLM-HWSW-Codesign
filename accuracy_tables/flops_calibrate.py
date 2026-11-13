@@ -1,7 +1,13 @@
-"""Match every row on total FLOPs per question instead of tokens (runbook section 14). SmolVLM only for now.
+"""Match every row on total FLOPs per question instead of tokens (runbook section 14 on SmolVLM, section 15 on Qwen2.5-VL and Qwen3-VL).
 
     python -m accuracy_tables.flops_calibrate --config accuracy_tables/hpc/config.all350.yaml --model smolvlm \
         --out-dir <results folder> --prefetch-workers 8
+
+The model is an argument: any model with measuring functions in flops.MEASURE (smolvlm, qwen2.5, qwen3). On Qwen a foveated frame's
+encoder cost follows its layout, so step 1 also counts the encoder on the stock layout and on foveated layouts at 7 gaze points and fits
+it to the layout's patches and attention sizes (flops.fit_vision, checked on every point), and ours' and the no-gate control's vision
+and image tokens are summed over each video's own frames. All counting runs under flops.AttentionWatch: if an attention op runs that
+the counter has no formula for, every count is redone with eager attention, and ATTENTION NOT COUNTED is printed if one is still missed.
 
 Ours sets the targets and changes nothing. The budget rule at its 3 token budgets (5, 10 and 20%, the smallest fovea) costs some share of
 Uniform K's FLOPs, and those 3 shares are the FLOPs budgets. accuracy_tables/flops.py says what a question's FLOPs are. The other rows:
@@ -13,8 +19,8 @@ Uniform K's FLOPs, and those 3 shares are the FLOPs budgets. accuracy_tables/flo
 Only token counts and FLOPs are used, never an answer.
 
 Steps, all printed:
-  1. parity; one gate decision's FLOPs; the LLM's FLOPs at 5 prompt lengths (a quadratic, checked); one stock frame's and one foveated
-     frame's FLOPs, counted while scoring one question each into a temporary file
+  1. parity; one gate decision's FLOPs; the LLM's FLOPs at 5 prompt lengths (a quadratic, checked, and its n^2 term against the
+     config); one stock frame's and one foveated frame's FLOPs, counted while scoring one question each into a temporary file
   2. each question's blind prompt length, and the intro and per-frame tokens of a video prompt, fitted on 24 questions
   3. ours' FLOPs share at each budget (the targets), K' per row, and each baseline's budget parameter on its K' frames
   4. every planned condition scored on 2 questions under the counter: its vision and prefill FLOPs must match flops.py's (exactly for
@@ -23,6 +29,7 @@ Writes <out>/<model>/flops_plan.json and flops_targets.csv, and ends with PLAN W
 """
 
 import argparse
+import contextlib
 import copy
 import hashlib
 import json
@@ -160,7 +167,8 @@ def verify_qids(qs, n):
 
 def counted(job, qid, decoder, tmp):
     """One question of a job scored through the run's own code under the counter (system_perf's count_flops), into a temporary
-    file -> dict(ve, pf, frames, n_tokens): vision-side FLOPs, prefill FLOPs, images given to the row and the prompt's tokens."""
+    file -> dict(ve, pf, frames, n_tokens, n_image_tokens, video): vision-side FLOPs, prefill FLOPs, images given to the row, the
+    prompt's tokens, its image tokens and the question's video."""
     from system_perf import measure as spm
     item = next(it for it in job["items"] if int(it["qid"]) == qid)
     cond = next(iter(job["conds"]))
@@ -169,15 +177,19 @@ def counted(job, qid, decoder, tmp):
         rec = [json.loads(line) for line in f if line.strip()][-1]
     if rec.get("error"):
         raise RuntimeError(f"{job['row']} {cond}, question {qid}: {rec['error']}")
-    return dict(ve=float(ve), pf=float(pf), frames=len(item["frames"]), n_tokens=int(rec["n_tokens"]))
+    return dict(ve=float(ve), pf=float(pf), frames=len(item["frames"]), n_tokens=int(rec["n_tokens"]),
+                n_image_tokens=rec.get("n_image_tokens"), video=item["video"])
 
 
-def check(row, got, units):
+def check(row, got, units, want_ve=None):
     """got (from counted) against flops.py -> (vision ratio, prefill ratio, ok). A baseline's vision may be up to VISION_TOLERANCE
-    above (its own work, counted as zero); everything else must match within EXACT_TOLERANCE."""
+    above (its own work, counted as zero); everything else must match within EXACT_TOLERANCE. want_ve: the question's vision FLOPs
+    from its frames' layouts (Qwen's foveated rows), instead of frames x one frame's FLOPs. A frame count that the encoder paired
+    into temporal patches would cost other than frames x one frame, and fail here."""
     unit = units["v_fovea"] if row in flops.FOVEA_ROWS else units["v_stock"]
     views = 2 if row in flops.TWO_VIEWS else 1
-    want_ve = views * got["frames"] * unit
+    if want_ve is None:
+        want_ve = views * got["frames"] * unit
     r_ve = got["ve"] / want_ve if want_ve else (1.0 if got["ve"] == 0 else math.inf)
     r_pf = got["pf"] / float(flops.prefill(units["prefill"], got["n_tokens"]))
     hi = 1 + (flops.VISION_TOLERANCE if row in BASELINES else flops.EXACT_TOLERANCE)
@@ -191,9 +203,10 @@ def frames_per_video(job):
     return {it["video"]: len(it["frames"]) for it in job["items"]}
 
 
-def shares(q, units, prompt, ref, tokens_per_frame, decisions):
+def shares(q, units, prompt, ref, tokens_per_frame, decisions, fovea=None):
     """FLOPs share of ours' and the no-gate control's runs: ({name: share of the Uniform K FLOPs}, Uniform K's FLOPs total).
-    ref: {run.py job name ('uniform', 'budget 5%', 'nogate 5%', ...): frames_per_video(job)}; q: per question, video, blind."""
+    ref: {run.py job name ('uniform', 'budget 5%', 'nogate 5%', ...): frames_per_video(job)}; q: per question, video, blind.
+    fovea: {name: {video: (vision FLOPs, image tokens, frames)}} from each frame's layout (Qwen), in place of frames x one foveated frame."""
     fu = q["video"].map(ref["uniform"]).to_numpy()
     stock = units["stock_tokens"]
     total = float(flops.question_flops(units, fu, "v_stock", flops.prompt_tokens(q["blind"], fu, stock * fu, prompt)).sum())
@@ -203,9 +216,32 @@ def shares(q, units, prompt, ref, tokens_per_frame, decisions):
             continue
         f = q["video"].map(per_video).to_numpy()
         dec = q["video"].map(decisions).to_numpy() if name.startswith("budget") else 0
+        if fovea and name in fovea:
+            vision = q["video"].map({v: x[0] for v, x in fovea[name].items()}).to_numpy()
+            tokens = q["video"].map({v: x[1] for v, x in fovea[name].items()}).to_numpy()
+            n = flops.prompt_tokens(q["blind"], f, tokens, prompt)
+            out[name] = float(flops.question_flops_vision(units, vision, n, decisions=dec).sum()) / total
+            continue
         n = flops.prompt_tokens(q["blind"], f, tokens_per_frame * f, prompt)
         out[name] = float(flops.question_flops(units, f, "v_fovea", n, decisions=dec).sum()) / total
     return out, total
+
+
+def fovea_per_video(job, measure, coef):
+    """{video: (vision FLOPs, image tokens, frames)} of one foveated job's frames, summed over each frame's own layout (flops.fit_vision's
+    coefficients). A video's questions all get the same frames."""
+    cond = next(iter(job["conds"]))
+    out = {}
+    for it in job["items"]:
+        if it["video"] in out:
+            continue
+        vision = tokens = 0
+        for fr in it["frames"]:
+            cells, side = measure["layout"](job["conds"], cond, fr)
+            vision += float(np.dot(measure["features"](cells, side), coef))
+            tokens += len(cells)
+        out[it["video"]] = (vision, int(tokens), len(it["frames"]))
+    return out
 
 
 def plan_frame_counts(q, units, prompt, total, targets, k_max, families):
@@ -242,21 +278,72 @@ def make_plan(ad, cfg, data, out_model_dir, verify_n=VERIFY_QUESTIONS, log=print
     log("\n--- step 1: FLOPs units")
     gate = flops.measure_gate_ckpt(os.path.join(cfg["paths"]["gate_ckpt_dir"], "fold1.pt"))
     log(f"gate: {gate:,} FLOPs per decision per fold model, counted as {flops.GATE_MODELS} fold models")
-    points = [(n, measure["prefill"](ad, n)) for n in PREFILL_LENGTHS]
+    ref_jobs = {job.get("name", job["row"]): job for job in run.row_jobs(ad, cfg, data, ["uniform", "budget", "nogate"])}
+    top = f"budget {100 * max(fractions):g}%"
+    per_layout = "features" in measure                 # a foveated frame's encoder cost follows its layout (Qwen)
+    impl, missed = [None], set()
+
+    @contextlib.contextmanager
+    def counting():
+        """Every count runs in here: at the attention implementation in impl, watching for attention the counter can't see."""
+        with flops.attention_implementation(ad.model, impl[0]), flops.AttentionWatch() as watch:
+            yield
+        missed.update(watch.missed)
+
+    def count_units():
+        with counting():
+            pts = [(n, measure["prefill"](ad, n)) for n in PREFILL_LENGTHS]
+            u_ = counted(ref_jobs["uniform"], qids[0], decoder, tmp)
+            o_ = counted(ref_jobs[top], qids[0], decoder, tmp)
+            lay = []
+            if per_layout:
+                conds = dict(fovea=ad.fovea_condition(ad.fovea_settings(cfg["ours"])[0]))
+                shapes = [measure["stock"]()] + [measure["layout"](conds, "fovea", dict(gaze=g)) for g in flops.VISION_FIT_GAZES]
+                lay = [(measure["features"](cells, side), float(measure["vision"](ad, cells, side)), len(cells)) for cells, side in shapes]
+        return pts, u_, o_, lay
+
+    points, u, o, layouts = count_units()
+    if missed:
+        log(f"the counter has no FLOP formula for {sorted(missed)} under the model's own attention, so every count is redone with "
+            "eager attention, which runs attention as matrix products it counts")
+        impl[0] = "eager"
+        missed.clear()
+        points, u, o, layouts = count_units()
+    if missed:
+        log(f"ATTENTION NOT COUNTED: {sorted(missed)} ran without a FLOP formula, even with eager attention. Tell the user.")
     c = flops.fit_prefill(points)
     log(f"LLM forward: {c[0]:.4g} + {c[1]:.4g} n + {c[2]:.4g} n^2 FLOPs for n tokens; at "
         + ", ".join(f"{n}: {f / 1e9:,.1f} G" for n, f in points))
     if c[2] <= 0:
         log("ATTENTION NOT COUNTED: the counter saw no n^2 term, so this torch's attention kernel has no FLOP formula. "
             "Every row is still counted the same way. Tell the user.")
-    ref_jobs = {job.get("name", job["row"]): job for job in run.row_jobs(ad, cfg, data, ["uniform", "budget", "nogate"])}
-    top = f"budget {100 * max(fractions):g}%"
-    u = counted(ref_jobs["uniform"], qids[0], decoder, tmp)
-    o = counted(ref_jobs[top], qids[0], decoder, tmp)
+    llm_check = None
+    if "llm_shape" in measure:
+        shape = measure["llm_shape"](ad)
+        llm_check = dict(shape, **flops.llm_shape_check(c, shape))
+        log(f"n^2 term {c[2]:,.0f} against 4 x {shape['layers']} layers x {shape['heads']} heads x {shape['head_dim']} = "
+            f"{llm_check['want_c']:,} from the model's config: {100 * llm_check['c_off']:+.3f}%")
+        log(f"n term {c[1]:.4g} against 2 x {shape['non_embedding_params']:,} non-embedding parameters = {llm_check['want_b']:.4g}: "
+            f"{100 * llm_check['b_off']:+.2f}%, for information only")
+        if abs(llm_check["c_off"]) > flops.LLM_SHAPE_TOLERANCE:
+            sys.exit(f"c DIFFERS FROM CONFIG by {100 * llm_check['c_off']:+.2f}%: the counter doesn't see the LLM's attention as its "
+                     "config describes it. Stop and tell the user.")
     units = dict(v_stock=u["ve"] / u["frames"], v_fovea=o["ve"] / o["frames"], prefill=c, gate_per_decision=float(gate),
                  stock_tokens=stock, tokens_per_frame=tpf)
     log(f"one stock frame {units['v_stock'] / 1e9:,.2f} GFLOPs ({u['frames']} frames), one foveated frame "
         f"{units['v_fovea'] / 1e9:,.2f} GFLOPs ({o['frames']} frames)")
+    coef = None
+    if per_layout:
+        coef = flops.fit_vision([(f, v) for f, v, _ in layouts])
+        units["vision_coef"] = coef
+        fov = layouts[1:]
+        log(f"the encoder per frame = {' + '.join(f'{x:.6g} x{i}' for i, x in enumerate(coef))} FLOPs over its layout's terms "
+            f"x0, x1, ... (flops.py's features), exact on all {len(layouts)} layouts counted; at {len(fov)} gaze points a foveated "
+            f"frame costs {min(v for _, v, _ in fov) / 1e9:,.2f} to {max(v for _, v, _ in fov) / 1e9:,.2f} GFLOPs with "
+            f"{min(n for *_, n in fov)} to {max(n for *_, n in fov)} tokens")
+        r = units["v_stock"] / layouts[0][1]
+        if abs(r - 1) > flops.EXACT_TOLERANCE:
+            sys.exit(f"FLOPS DIFFER: a scored stock frame costs {r:.6f} x the stock layout counted alone. Stop and tell the user.")
     for name, got in (("uniform", u), (top, o)):
         r = got["pf"] / float(flops.prefill(c, got["n_tokens"]))
         if abs(r - 1) > flops.EXACT_TOLERANCE:
@@ -281,7 +368,16 @@ def make_plan(ad, cfg, data, out_model_dir, verify_n=VERIFY_QUESTIONS, log=print
                           video_frames=[int(data["metas"][v]["n"]) for v in qs.video]))
     decisions = {v: len(data["labels"][v]) for v in data["videos"]}
     ref = {name: frames_per_video(job) for name, job in ref_jobs.items()}
-    got, total = shares(q, units, prompt, ref, tpf, decisions)
+    fovea = {}
+    if per_layout:
+        for name, job in ref_jobs.items():
+            if job["row"] in flops.FOVEA_ROWS:
+                fovea[name] = fovea_per_video(job, measure, coef)
+                n_frames = sum(ref[name][v] for v in fovea[name])
+                log(f"{name}: {sum(x[1] for x in fovea[name].values()) / max(1, n_frames):.2f} image tokens and "
+                    f"{sum(x[0] for x in fovea[name].values()) / max(1, n_frames) / 1e9:,.2f} GFLOPs per foveated frame over "
+                    f"{n_frames} frames, from each frame's own layout")
+    got, total = shares(q, units, prompt, ref, tpf, decisions, fovea)
     targets = {b: got[f"budget {100 * b:g}%"] for b in fractions}
     for b in fractions:
         log(f"budget {100 * b:g}% (tokens): ours costs {100 * targets[b]:.3f}% of Uniform K's FLOPs, the no-gate control "
@@ -324,34 +420,49 @@ def make_plan(ad, cfg, data, out_model_dir, verify_n=VERIFY_QUESTIONS, log=print
 
     log(f"\n--- step 4: every planned condition on questions {qids}, under the counter")
     seen, bad = {}, []
-    for ln in lines:
-        if ln["row"] == "blind":
-            continue
-        if (ln["row"], ln["condition"]) in seen:                  # two budgets sharing a condition: checked once
-            ln["verified"] = seen[ln["row"], ln["condition"]]
-            continue
-        if ln["row"] in REF_ROWS:
-            job = ref_jobs["uniform" if ln["row"] == "uniform" else f"{ln['row']} {ln['budget_pct']:g}%"]
-        else:
-            job = planned_job(ad, cfg, inputs(ln["K"]), ln)
-        ln["verified"] = seen[ln["row"], ln["condition"]] = []
-        for qid in qids:
-            got_q = counted(job, qid, decoder, tmp)
-            r_ve, r_pf, ok = check(ln["row"], got_q, units)
-            ln["verified"].append(dict(qid=qid, vision_ratio=r_ve, prefill_ratio=r_pf, ok=ok))
-            log(f"   {'ok ' if ok else 'BAD'} {ln['row']:<13} {ln['budget_pct']:>5g}%  q{qid}: vision {r_ve:.5f}, prefill {r_pf:.6f} "
-                f"x flops.py ({got_q['frames']} images, {got_q['n_tokens']} tokens)")
-            if not ok:
-                bad.append(f"{ln['row']} {ln['condition']} q{qid}: vision {r_ve:.5f}, prefill {r_pf:.6f}")
+    with counting():
+        for ln in lines:
+            if ln["row"] == "blind":
+                continue
+            if (ln["row"], ln["condition"]) in seen:                  # two budgets sharing a condition: checked once
+                ln["verified"] = seen[ln["row"], ln["condition"]]
+                continue
+            name = None
+            if ln["row"] in REF_ROWS:
+                name = "uniform" if ln["row"] == "uniform" else f"{ln['row']} {ln['budget_pct']:g}%"
+                job = ref_jobs[name]
+            else:
+                job = planned_job(ad, cfg, inputs(ln["K"]), ln)
+            ln["verified"] = seen[ln["row"], ln["condition"]] = []
+            for qid in qids:
+                got_q = counted(job, qid, decoder, tmp)
+                want = fovea[name][got_q["video"]] if name in fovea else None
+                r_ve, r_pf, ok = check(ln["row"], got_q, units, None if want is None else want[0])
+                tokens_ok = want is None or got_q.get("n_image_tokens") == want[1]
+                ln["verified"].append(dict(qid=qid, vision_ratio=r_ve, prefill_ratio=r_pf, ok=bool(ok and tokens_ok)))
+                log(f"   {'ok ' if ok and tokens_ok else 'BAD'} {ln['row']:<13} {ln['budget_pct']:>5g}%  q{qid}: vision {r_ve:.5f}, "
+                    f"prefill {r_pf:.6f} x flops.py ({got_q['frames']} images, {got_q['n_tokens']} tokens)")
+                if not ok:
+                    bad.append(f"{ln['row']} {ln['condition']} q{qid}: vision {r_ve:.5f}, prefill {r_pf:.6f}")
+                if not tokens_ok:
+                    bad.append(f"{ln['row']} {ln['condition']} q{qid}: {got_q.get('n_image_tokens')} image tokens scored, {want[1]} "
+                               "from the frames' layouts")
+    if missed:
+        log(f"ATTENTION NOT COUNTED: {sorted(missed)} ran without a FLOP formula while scoring. Tell the user.")
     if bad:
         for b_ in bad:
             log("   " + b_)
         sys.exit(f"FLOPS DIFFER on {len(bad)} counts: flops.py doesn't describe these rows. Stop and tell the user.")
 
     videos = {v: dict(frames=int(data["metas"][v]["n"]), decisions=int(decisions[v])) for v in data["videos"]}
-    return dict(model=key, model_id=ad.model_id, share=share, tokens_per_frame=tpf, stock_tokens=stock, K_reference=k_ref,
+    plan = dict(model=key, model_id=ad.model_id, share=share, tokens_per_frame=tpf, stock_tokens=stock, K_reference=k_ref,
                 fractions=fractions, units=units, prompt=prompt, targets={f"{100 * b:g}": targets[b] for b in fractions},
-                videos=videos, verify_qids=qids, lines=lines)
+                videos=videos, verify_qids=qids, lines=lines,
+                attention=dict(implementation=impl[0] or "the model's own", missed=sorted(missed)), llm_check=llm_check)
+    if per_layout:      # ours' and the no-gate control's vision FLOPs and image tokens per question, by condition and video
+        plan["fovea"] = {names[name]: {v: list(x) for v, x in per_video.items()} for name, per_video in fovea.items()}
+        plan["vision_layouts"] = [dict(features=list(f), flops=v, tokens=n) for f, v, n in layouts]
+    return plan
 
 
 def targets_table(plan):
@@ -373,7 +484,7 @@ def main(argv=None):
     ap.add_argument("--verify-questions", type=int, default=VERIFY_QUESTIONS, help="questions per condition counted in step 4")
     a = ap.parse_args(argv)
     if a.model not in flops.MEASURE:
-        sys.exit(f"{a.model}: FLOPs are only measured for {sorted(flops.MEASURE)} so far: its LLM call and prompt need their own "
+        sys.exit(f"{a.model}: FLOPs are only measured for {sorted(flops.MEASURE)}: its LLM call, prompt and encoder need their own "
                  "functions in accuracy_tables/flops.py")
     cfg = common.load_config(a.config)
     if a.prefetch_workers is not None:

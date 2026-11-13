@@ -1,11 +1,13 @@
-"""The FLOPs-matched table (runbook section 14): per row and budget, for all videos, AEA and Nymeria. CPU only.
+"""The FLOPs-matched table (runbook sections 14 and 15): per row and budget, for all videos, AEA and Nymeria. CPU only.
 
-    python -u -m accuracy_tables.hpc.all350.flops_report --out-dir <results folder> [--model smolvlm] [--list all350_pilot]
+    python -u -m accuracy_tables.hpc.all350.flops_report --out-dir <results folder> [--model smolvlm] [--plan <flops_plan.json>] [--list all350_pilot]
 
-Reads <out-dir>/<model>/flops_plan.json and every row's results. Each question's FLOPs come from its own record (its frames and its
+Reads the plan (default <out-dir>/<model>/flops_plan.json; section 15 keeps it in <out-dir>/calibrate/<model>/, because the merge
+rewrites <out-dir>/<model>/) and every row's results. Each question's FLOPs come from its own record (its frames and its
 prompt's tokens) and the plan's measured units, as accuracy_tables/flops.py counts them; a baseline is charged every frame it encoded,
 also those it left out of the prompt. Per row and budget: n, accuracy with its 95% interval from resampling whole videos, the FLOPs
-share of Uniform K on the same questions against its target, the token share, GFLOPs, frames and prompt tokens per question. Writes
+share of Uniform K on the same questions against its target (on Qwen,
+ours' and the no-gate control's vision is the plan's sum over each video's own frame layouts, and their image tokens must be the plan's), the token share, GFLOPs, frames and prompt tokens per question. Writes
 <out-dir>/summary_flops_by_group.csv. Declares no winner. Fails if a planned condition isn't complete, after writing the file.
 """
 import argparse
@@ -61,8 +63,26 @@ def add_flops(res, plan):
     views = np.where(res.row.isin(flops.TWO_VIEWS), 2, 1)
     decisions = res.video.map({v: x["decisions"] for v, x in videos.items()}).fillna(0).to_numpy()
     gate = np.where(res.row.isin(flops.GATE_ROWS), flops.GATE_MODELS * units["gate_per_decision"] * decisions, 0.0)
-    res["flops"] = gate + views * res["frames_encoded"].to_numpy() * unit + flops.prefill(units["prefill"], res["n_tokens"].to_numpy())
+    vision = views * res["frames_encoded"].to_numpy() * unit
+    fovea = plan.get("fovea")
+    if fovea:
+        planned = [fovea.get(c, {}).get(v, [np.nan])[0] if r in flops.FOVEA_ROWS else 0.0
+                   for r, c, v in zip(res.row, res.condition, res.video)]
+        vision = np.where(res.row.isin(flops.FOVEA_ROWS).to_numpy(), np.asarray(planned, dtype=np.float64), vision)
+    res["flops"] = gate + vision + flops.prefill(units["prefill"], res["n_tokens"].to_numpy())
     return res
+
+
+def fovea_problems(res, plan):
+    """Ours' and the no-gate control's records whose image tokens aren't what the plan's layouts give (Qwen only) -> messages."""
+    fovea = plan.get("fovea")
+    if not fovea or not len(res):
+        return []
+    out = {}
+    for r, c, v, n in zip(res.row, res.condition, res.video, res.n_image_tokens):
+        if r in flops.FOVEA_ROWS and fovea.get(c, {}).get(v, [None, None])[1] != n:
+            out[r, c] = out.get((r, c), 0) + 1
+    return [f"{r} {c}: {n} records whose image tokens aren't the plan's" for (r, c), n in out.items()]
 
 
 def condition_stats(res, ref_condition):
@@ -121,10 +141,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--model", default="smolvlm")
+    ap.add_argument("--plan", help="the plan, if not <out-dir>/<model>/flops_plan.json")
     ap.add_argument("--list", help="only these videos: a list written by the earlier steps (default: every video with questions)")
     a = ap.parse_args()
     out_dir = os.path.abspath(os.path.expanduser(a.out_dir))
-    with open(os.path.join(out_dir, a.model, "flops_plan.json")) as f:
+    with open(a.plan or os.path.join(out_dir, a.model, "flops_plan.json")) as f:
         plan = json.load(f)
     counts = prepare.question_counts()
     groups = report.video_groups(paths.read_list(a.list) if a.list else counts)
@@ -158,7 +179,7 @@ def main():
             print(rows[show].round(3).to_string(index=False), flush=True)
     print(f"\nwritten {path}", flush=True)
 
-    found = problems(table, plan, expected, stats_by_group)
+    found = problems(table, plan, expected, stats_by_group) + fovea_problems(res, plan)
     if errors:
         print(f"records with an error: {errors}", flush=True)
     types = report.gpu_types(out_dir, [a.model])

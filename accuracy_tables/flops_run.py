@@ -1,4 +1,4 @@
-"""Score the FLOPs-matched table that flops_calibrate.py planned (runbook section 14).
+"""Score the FLOPs-matched table that flops_calibrate.py planned (runbook sections 14 and 15).
 
     python -m accuracy_tables.flops_run --config accuracy_tables/hpc/config.all350.yaml --model smolvlm \
         --plan <results folder>/smolvlm/flops_plan.json --out-dir <results folder> --prefetch-workers 8 --keep-going
@@ -8,7 +8,9 @@ Every condition goes through run.py's own jobs, with nothing changed but its fra
   uniform_flops and the baselines  run.py's job for that row on Uniform K' frames, at the plan's K' and budget parameter
 Results are appended one question at a time to <out-dir>/<model>/<row>.jsonl (Uniform K' to uniform_flops.jsonl), so a rerun
 continues where it stopped. The job stops before scoring if the config isn't the one the plan was made with, or if a condition's
-name here differs from the plan's.
+name here differs from the plan's. Before each condition it adds a line to <out-dir>/<model>/gpu_ledger.jsonl: the row, the line its
+file had reached and the GPU, so every record's GPU is on file (record i of a row was written on the last entry's GPU with
+first_line <= i). With --videos, one shard's videos: section 15 runs it once per shard.
 """
 
 import argparse
@@ -26,6 +28,27 @@ from accuracy_tables import flops_calibrate as fc  # noqa: E402
 from accuracy_tables.models import ADAPTERS  # noqa: E402
 
 REF_ROWS = fc.REF_ROWS
+LEDGER = "gpu_ledger.jsonl"
+
+
+def gpu_name():
+    return torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu"
+
+
+def count_lines(path):
+    """Complete lines of a results file (repair_results has cut any half-written one)."""
+    if not os.path.exists(path):
+        return 0
+    with open(path) as f:
+        return sum(1 for line in f if line.strip())
+
+
+def note_gpu(out_dir, job, path, gpu):
+    """One ledger line before a condition is scored: the records it writes into path start at first_line."""
+    line = dict(row=job["row"], condition=next(iter(job["conds"])), first_line=count_lines(path), gpu=gpu,
+                job=os.environ.get("SLURM_JOB_ID"), node=os.environ.get("SLURMD_NODENAME"))
+    with open(os.path.join(out_dir, LEDGER), "a") as f:
+        f.write(json.dumps(line) + "\n")
 
 
 def reference_jobs(ad, cfg, data, plan):
@@ -95,8 +118,10 @@ def main(argv=None):
         info["parity"] = dict(ok=True, report=run.check_parity(ad, data, a.model))
         jobs = reference_jobs(ad, cfg, data, plan) + plan_jobs(ad, cfg, data, plan)
         print(f"{len(jobs)} jobs, {sum(len(j['conds']) for j in jobs)} conditions", flush=True)
+        gpu = info["gpu"] = gpu_name()
         for job in jobs:
             path = os.path.join(out_dir, f"{job['row']}.jsonl")
+            note_gpu(out_dir, job, path, gpu)
             with run._row(job.get("name", job["row"]), status, a.keep_going, path):
                 print("\n" + job["msg"], flush=True)
                 job["score"](job["items"], job["conds"], path)
