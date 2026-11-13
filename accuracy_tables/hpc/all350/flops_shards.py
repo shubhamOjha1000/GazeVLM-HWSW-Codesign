@@ -143,7 +143,7 @@ def ledger_gpus(root, model, rows, manifest):
                 continue
             for i, e in enumerate(mine):
                 end = mine[i + 1]["first_line"] if i + 1 < len(mine) else n
-                if end > e["first_line"]:
+                if min(end, n) > e["first_line"]:
                     gpus[e["gpu"]] += min(end, n) - e["first_line"]
     if len(gpus) > 1:
         found.append(f"records from more than one GPU on the ledger: {dict(gpus)}")

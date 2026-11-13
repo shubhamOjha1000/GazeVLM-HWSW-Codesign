@@ -167,6 +167,49 @@ class AttentionWatch:
         return self._mode.__exit__(*exc)
 
 
+SDPA_OPS = ("_scaled_dot_product_flash_attention", "_scaled_dot_product_efficient_attention", "_scaled_dot_product_cudnn_attention")
+
+
+def sdpa_gqa_flops(q, k, v):
+    """FLOPs of attention with fewer key/value heads than query heads (grouped-query attention): Q K^T and A V over the query's heads,
+    as if the keys and values were repeated, which is what eager attention (repeat_kv) does and what 4 x layers x heads x head_dim
+    assumes."""
+    b, h, s_q, d_q = q.shape
+    return 2 * b * h * s_q * k.shape[2] * d_q + 2 * b * h * s_q * k.shape[2] * v.shape[3]
+
+
+@contextlib.contextmanager
+def gqa_attention():
+    """torch's FLOP formulas for its fused attention kernels, made to take grouped-query attention while inside: Qwen2.5-VL's and
+    Qwen3-VL's LLMs have fewer key/value heads than query heads (16 / 2 and 32 / 8), and transformers can pass them to SDPA unrepeated
+    (enable_gqa), which the stock formula asserts against. Equal head counts go to torch's own formula, unchanged. Counters made
+    inside use these formulas (FlopCounterMode copies the registry when it is made)."""
+    from torch.utils.flop_counter import flop_registry
+    saved = {}
+    for name in SDPA_OPS:
+        try:
+            op = getattr(torch.ops.aten, name)
+        except (AttributeError, RuntimeError):
+            continue
+        if op not in flop_registry:
+            continue
+        saved[op] = own = flop_registry[op]
+
+        def formula(*args, out_val=None, _own=own, **kwargs):
+            if len(args) >= 3:
+                q, k, v = args[:3]
+            else:
+                q, k, v = kwargs.get("query"), kwargs.get("key"), kwargs.get("value")
+            if all(torch.is_tensor(t) and t.dim() == 4 for t in (q, k, v)) and q.shape[1] != k.shape[1]:
+                return sdpa_gqa_flops(q, k, v)
+            return _own(*args, out_val=out_val, **kwargs)
+        flop_registry[op] = formula
+    try:
+        yield
+    finally:
+        flop_registry.update(saved)
+
+
 def module_configs(model):
     """Every config object the model's modules read: its own and its text and vision sub-configs."""
     out = {}

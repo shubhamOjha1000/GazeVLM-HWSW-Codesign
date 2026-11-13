@@ -301,8 +301,9 @@ def make_plan(ad, cfg, data, out_model_dir, verify_n=VERIFY_QUESTIONS, log=print
 
     @contextlib.contextmanager
     def counting():
-        """Every count runs in here: at the attention implementation in impl, watching for attention the counter can't see."""
-        with flops.attention_implementation(ad.model, impl[0]), flops.AttentionWatch() as watch:
+        """Every count runs in here: at the attention implementation in impl, with torch's attention formulas taking grouped-query
+        attention, watching for attention the counter can't see."""
+        with flops.attention_implementation(ad.model, impl[0]), flops.gqa_attention(), flops.AttentionWatch() as watch:
             yield
         missed.update(watch.missed)
 

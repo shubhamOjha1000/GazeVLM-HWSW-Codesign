@@ -278,6 +278,20 @@ def test_frames_paired_into_temporal_patches_fail_the_check():
     assert not fc.check("dtd", paired, units)[2]
 
 
+def test_grouped_query_attention_is_counted_over_the_querys_heads():
+    """Qwen's LLMs pass SDPA 16 (or 32) query heads against 2 (or 8) key/value heads. Inside gqa_attention that counts as the repeated
+    keys and values would, 4 b h s_q s_k d; equal heads keep torch's own formula; outside, the registry is as it was."""
+    from torch.utils.flop_counter import flop_registry
+    op = torch.ops.aten._scaled_dot_product_flash_attention
+    before = flop_registry[op]
+    q, k_same, k_gqa = torch.zeros(1, 16, 10, 128), torch.zeros(1, 16, 7, 128), torch.zeros(1, 2, 7, 128)
+    with flops.gqa_attention():
+        f = flop_registry[op]
+        assert f(q, k_gqa, k_gqa, out_val=None) == 4 * 1 * 16 * 10 * 7 * 128
+        assert f(q, k_same, k_same, out_val=None) == before(q, k_same, k_same, out_val=None) == 4 * 1 * 16 * 10 * 7 * 128
+    assert flop_registry[op] is before
+
+
 def test_the_watch_sees_attention_with_no_flop_formula():
     with flops.AttentionWatch() as w:
         torch.zeros(2, 3) @ torch.zeros(3, 4)

@@ -1823,6 +1823,10 @@ The counter is section 14's: `torch.utils.flop_counter`, run on the real model, 
     - **New check:** `c2` against `4 x layers x heads x head_dim`, read from the model's config. That's the counter's formula for attention over the whole prompt, and section 14's SmolVLM `c2` matched it exactly.
     - Expect about **294,912** on Qwen2.5 (36 layers, 16 heads x 128) and **589,824** on Qwen3 (36 layers, 32 heads x 128).
     - **More than 1% off stops the job with `c DIFFERS FROM CONFIG`.** `c1` is printed against 2 x the LLM's non-embedding parameters, for information only.
+    - **Grouped-query attention.** Both LLMs have fewer key/value heads than query heads (16 / 2 and 32 / 8), and transformers can pass them to SDPA unrepeated. torch's own FLOP formula for SDPA expects equal head counts.
+        - While counting, `flops.gqa_attention` counts those calls over the query's heads, as if the keys and values were repeated, which is what eager attention does.
+        - Calls with equal heads keep torch's formula unchanged, so SmolVLM's count is as in section 14.
+        - If a count still fails with an `AssertionError` from `torch/utils/flop_counter.py`, stop and send the user the traceback.
 - **The vision encoder.** It is counted as the model runs it, with no closed form assumed.
     - Every frame is its own image, its picture repeated over the 2 frames of a temporal patch, as sections 12 and 13 send it. So a frame's cost doesn't depend on how many frames there are, odd or even. **Step 4 checks this:** a pairing of frames would cost something other than frames x one frame, and stop the job with `FLOPS DIFFER`.
     - **A stock frame** costs the same every time. The plan measures it while scoring one question.
