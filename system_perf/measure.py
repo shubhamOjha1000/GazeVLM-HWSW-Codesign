@@ -79,7 +79,16 @@ def measure_once(model, decoder, job, cond, item, path, decode_tokens=64):
     pr.reset_peak()
     with probe, pr.Energy() as e:
         t0 = time.perf_counter()
-        rec = _score_once(job, cond, item, path)
+        try:
+            rec = _score_once(job, cond, item, path)
+        except torch.cuda.OutOfMemoryError:                 # raised past the scorer (e.g. on the vision side)
+            rec = dict(error="oom")
+    if rec.get("error") == "oom":                           # out of memory (16 GB on a T4): recorded, no timings
+        del probe
+        torch.cuda.empty_cache()
+        return dict(row=job["row"], condition=cond, qid=int(item["qid"]), video=item["video"],
+                    frames_encoded=frames_encoded(job["row"], item), n_frames=rec.get("n_frames"), error="oom",
+                    ttft_s=None, ve_s=None, prefill_s=None, ve_peak_gb=None, ld_peak_gb=None, overall_gb=None, tps=None), None
     if probe.t_start is None:
         raise RuntimeError(f"{job['row']} / {cond}: the language model was never called")
     out = dict(row=job["row"], condition=cond, qid=int(item["qid"]), video=item["video"],
@@ -113,6 +122,26 @@ def count_flops(decoder, job, cond, item, path):
         total = fc.get_total_flops()
     before = probe.flops_before if probe.flops_before is not None else total
     return before, total - before
+
+
+def count_flops_checked(decoder, job, cond, item, path):
+    """count_flops with torch's fused-attention formulas taking grouped-query attention (Qwen's LLMs pass SDPA fewer key / value
+    heads than query heads, 16 / 2 and 32 / 8, which torch's own formula asserts against: accuracy_tables.flops.gqa_attention) and
+    a watch for attention ops the counter has no formula for. -> (vision side, prefill, problem): both None, and problem set, when
+    the question ran out of memory (a partial count) or attention went uncounted."""
+    from accuracy_tables import flops as fl
+    try:
+        with fl.gqa_attention(), fl.AttentionWatch() as watch:
+            ve, pf = count_flops(decoder, job, cond, item, path)
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        return None, None, "oom"
+    lines = [json.loads(l) for l in open(path) if l.strip()] if os.path.exists(path) else []
+    if lines and lines[-1].get("error") == "oom":
+        return None, None, "oom"
+    if watch.missed:
+        return None, None, "attention not counted: " + ", ".join(sorted(watch.missed))
+    return ve, pf, None
 
 
 @torch.no_grad()
@@ -182,15 +211,16 @@ def main(argv=None):
     ap.add_argument("--out-dir", required=True, help="results: <out-dir>/<model>/{system,flops,batch}.jsonl, gate.json")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dtype", default="auto", choices=("auto", "bfloat16", "float16"),
-                    help="weights' dtype: auto = bf16 on GPUs with bf16 (A100), fp16 otherwise (e.g. T4); fp16 is "
-                         "honoured by SmolVLM2 (VLMEVAL_DTYPE), the other models load bf16")
+                    help="weights' dtype: auto = bf16 on GPUs with bf16 (A100), fp16 otherwise (e.g. T4); it sets "
+                         "SmolVLM2's weights (VLMEVAL_DTYPE); Qwen2.5-VL picks fp16 itself without bf16; the others load bf16 "
+                         "(Qwen3-VL fp16 through system_perf.t4); the loaded weights' dtype is printed and recorded")
     a = ap.parse_args(argv)
     dtype = a.dtype
     if dtype == "auto":
         dtype = "bfloat16" if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else "float16"
     os.environ["VLMEVAL_DTYPE"] = dtype
     if dtype == "float16" and a.model != "smolvlm":
-        print(f"note: {a.model} loads bf16 whatever --dtype says (only SmolVLM2 honours float16)")
+        print(f"note: --dtype sets SmolVLM2's weights only; {a.model} picks its own (printed once it's loaded)")
 
     cfg = common.load_config(a.config)
     if a.videos:
@@ -211,6 +241,9 @@ def main(argv=None):
         print(f"   gate {v}: {g['decisions']} decisions x {g['models']} model(s), {g['flops'] / 1e6:.2f} MFLOPs, {g['ms']:.1f} ms")
 
     ad = ADAPTERS[a.model](cfg["models"].get(a.model), cfg).load()
+    weights = getattr(ad, "model", None)
+    weights = str(next(weights.parameters()).dtype).replace("torch.", "") if isinstance(weights, torch.nn.Module) else None
+    print(f"{a.model} weights: {weights}")
     try:
         acc_run.check_parity(ad, data, a.model)
         decoder = pr.find_decoder(ad.model)
@@ -231,24 +264,34 @@ def main(argv=None):
                     print(f"\n--- {job['row']}: {cond}")
                     first = by_q[qids[0]]
                     for _ in range(a.warmup):
-                        _score_once(job, cond, first, tmp)
+                        try:
+                            _score_once(job, cond, first, tmp)
+                        except torch.cuda.OutOfMemoryError:
+                            torch.cuda.empty_cache()
                     kwargs0 = None
                     for q in qids:
                         rec, kw = measure_once(ad.model, decoder, job, cond, by_q[q], tmp, a.decode_tokens)
                         kwargs0 = kwargs0 if kwargs0 is not None else kw
-                        rec.update(model=a.model, dtype=dtype,
+                        rec.update(model=a.model, dtype=dtype, weights_dtype=weights,
                                    device=torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu")
                         fs.write(json.dumps(rec) + "\n")
                         fs.flush()
+                        if rec["ttft_s"] is None:
+                            print(f"   q{q}: {rec['error']} ({rec['frames_encoded']} frames encoded): recorded, left out of the report")
+                            continue
                         print(f"   q{q}: ttft {rec['ttft_s']:.2f} s (vision {rec['ve_s']:.2f}), tps {rec.get('tps') or 0:.1f}, "
                               f"VE {rec['ve_peak_gb']:.2f} GB, LD {rec.get('ld_peak_gb') or 0:.2f} GB, "
-                              f"{rec['frames_encoded']} frames encoded, {rec['n_image_tokens']} tokens")
+                              f"{rec['frames_encoded']} frames encoded, {rec['n_image_tokens']} tokens"
+                              + (f", error {rec['error']}" if rec.get("error") else "")
+                              + (f", decode {rec['decode_error']}" if rec.get("decode_error") else ""))
                     if not a.no_flops:
-                        ve, pf = count_flops(decoder, job, cond, first, tmp)
+                        ve, pf, problem = count_flops_checked(decoder, job, cond, first, tmp)
                         ff.write(json.dumps(dict(model=a.model, row=job["row"], condition=cond, qid=qids[0],
-                                                 ve_gflops=ve / 1e9, prefill_gflops=pf / 1e9)) + "\n")
+                                                 ve_gflops=None if problem else ve / 1e9,
+                                                 prefill_gflops=None if problem else pf / 1e9, problem=problem)) + "\n")
                         ff.flush()
-                        print(f"   FLOPs (q{qids[0]}): vision side {ve / 1e9:.1f} G, prefill {pf / 1e9:.1f} G")
+                        print(f"   FLOPs (q{qids[0]}): " + (f"NOT COUNTED, {problem}" if problem else
+                                                            f"vision side {ve / 1e9:.1f} G, prefill {pf / 1e9:.1f} G"))
                     if a.batch_sizes and kwargs0 is not None:
                         sizes = [int(b) for b in a.batch_sizes.split(",") if b.strip()]
                         mem = batch_memory(ad.model, decoder, kwargs0, sizes)
@@ -260,7 +303,7 @@ def main(argv=None):
                     torch.cuda.empty_cache()
     finally:
         info = dict(model=a.model, model_id=getattr(ad, "model_id", None), config=a.config, questions=qids,
-                    rows=rows, warmup=a.warmup, decode_tokens=a.decode_tokens, dtype=dtype,
+                    rows=rows, warmup=a.warmup, decode_tokens=a.decode_tokens, dtype=dtype, weights_dtype=weights,
                     device=torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu",
                     torch=torch.__version__)
         try:

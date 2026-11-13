@@ -5,6 +5,8 @@
   3. decode_benchmark: KV-cache greedy decoding from the captured prefill inputs = recomputing every step
   4. the frame cache; the report's budgets, speed-ups, savings and overheads
 """
+import json
+
 import pandas as pd
 import pytest
 import torch
@@ -55,6 +57,64 @@ def test_expand_batch():
     assert out["visual_pos_masks"].shape == (3, 5) and out["deepstack_visual_embeds"][0].shape == (6, 4)
     assert "attention_mask" not in out and out["use_cache"] is False
     assert pr.expand_batch(dict(position_ids=torch.zeros(1, 5)), 2)["position_ids"].shape == (2, 5)
+
+
+ITEM = dict(qid=1, video="v", frames=[dict(path="f")] * 3)
+
+
+def _job(score):
+    return dict(row="uniform", conds={"c": ("uniform", 1)}, score=score)
+
+
+def _write(out, **rec):
+    with open(out, "a") as f:
+        f.write(json.dumps(dict(condition="c", qid=1, **rec)) + "\n")
+
+
+def test_out_of_memory_is_recorded_not_raised(tmp_path):
+    """Uniform K's ~25,000-token prompt can run out of a T4's 16 GB: raised past the scorer (vision side) or recorded by it (its
+    LLM). Either way the question is an 'oom' record with no timings, and its FLOPs aren't counted (a partial count)."""
+    dec, path = Dec(), str(tmp_path / "rec.jsonl")
+
+    def raises(items, conds, out):
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    def records(items, conds, out):
+        dec(inputs_embeds=torch.zeros(1, 3, 4))
+        _write(out, error="oom", n_frames=3)
+
+    for score in (raises, records):
+        rec, kw = ms.measure_once(None, dec, _job(score), "c", ITEM, path)
+        assert kw is None and rec["error"] == "oom" and rec["ttft_s"] is None and rec["frames_encoded"] == 3
+        assert ms.count_flops_checked(dec, _job(score), "c", ITEM, path) == (None, None, "oom")
+
+
+def test_flops_take_grouped_query_attention_and_refuse_uncounted_attention(tmp_path):
+    """Qwen3-VL's LLM passes SDPA 32 query heads against 8 key/value heads, which torch's own formula asserts against: counted
+    over the query's heads while measuring. An attention op with no formula leaves the FLOPs out (None), never undercounted."""
+    from torch.utils.flop_counter import flop_registry
+    dec, path = Dec(), str(tmp_path / "rec.jsonl")
+    ops = (torch.ops.aten._scaled_dot_product_flash_attention, torch.ops.aten._scaled_dot_product_efficient_attention)
+    q, kv, seen = torch.zeros(1, 32, 10, 128), torch.zeros(1, 8, 7, 128), []
+
+    def score(items, conds, out):
+        seen.extend(flop_registry[op](q, kv, kv, out_val=None) for op in ops)
+        torch.zeros(2, 3) @ torch.zeros(3, 4)                                       # the vision side: 2 * 2 * 3 * 4
+        dec(inputs_embeds=torch.zeros(1, 3, 4))                                      # the prefill: 2 * 3 * 4 * 4
+        _write(out, error=None)
+
+    assert ms.count_flops_checked(dec, _job(score), "c", ITEM, path) == (48, 96, None)
+    assert seen == [4 * 32 * 10 * 7 * 128] * 2
+    lib = torch.library.Library("gvtest_sysperf", "DEF")
+    lib.define("fake_attention(Tensor q) -> Tensor")
+    lib.impl("fake_attention", lambda x: x.clone(), "CompositeExplicitAutograd")
+
+    def uncounted(items, conds, out):
+        torch.ops.gvtest_sysperf.fake_attention(torch.zeros(2))
+        dec(inputs_embeds=torch.zeros(1, 3, 4))
+
+    ve, pf, problem = ms.count_flops_checked(dec, _job(uncounted), "c", ITEM, path)
+    assert ve is None and pf is None and "gvtest_sysperf.fake_attention" in problem
 
 
 @pytest.mark.parametrize("with_positions", [False, True])

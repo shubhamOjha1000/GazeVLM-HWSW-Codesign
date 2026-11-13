@@ -48,6 +48,9 @@ def table(sysdf, flops, gate, acc=None):
             sysdf[m] = np.nan
         sysdf[m] = pd.to_numeric(sysdf[m], errors="coerce")
     uni = sysdf[sysdf.row == "uniform"].set_index("qid")
+    for m in ("ve_gflops", "prefill_gflops"):                         # null where measure.py couldn't count (out of memory)
+        if len(flops):
+            flops[m] = pd.to_numeric(flops[m], errors="coerce") if m in flops else np.nan
     fl = flops.drop_duplicates(["row", "condition"], keep="last").set_index("condition") if len(flops) else pd.DataFrame()
     uni_flops = fl[fl.row == "uniform"].ve_gflops.mean() if len(fl) and (fl.row == "uniform").any() else np.nan
     u = {m: uni[m].mean() for m in METRICS} if len(uni) else {}

@@ -8,14 +8,20 @@ from vlmeval import qwen3_fovea as q3
 
 
 def fake_load(model_id):
-    return torch.nn.Linear(2, 2).to(torch.bfloat16), "proc", [1, 2]
+    m = torch.nn.Linear(2, 2).to(torch.bfloat16)
+    m.register_buffer("inv_freq", torch.tensor([1.0, 0.9, 1.3e-7]), persistent=False)        # float32, like the rotary's
+    m.register_buffer("scale", torch.ones(2, dtype=torch.bfloat16))
+    m.register_buffer("ids", torch.arange(3))
+    return m, "proc", [1, 2]
 
 
 def test_qwen3_is_converted_to_fp16_once(monkeypatch):
     monkeypatch.setattr(q3, "load_model", fake_load)
     t4.fp16_qwen3()
     model, proc, letters = q3.load_model("x")
-    assert next(model.parameters()).dtype == torch.float16 and proc == "proc" and letters == [1, 2]
+    assert all(p.dtype == torch.float16 for p in model.parameters()) and proc == "proc" and letters == [1, 2]
+    assert model.scale.dtype == torch.float16 and model.ids.dtype == torch.int64
+    assert model.inv_freq.dtype == torch.float32 and model.inv_freq.tolist() == torch.tensor([1.0, 0.9, 1.3e-7]).tolist()   # not rounded
     wrapped = q3.load_model
     t4.fp16_qwen3()
     assert q3.load_model is wrapped                                     # not wrapped twice

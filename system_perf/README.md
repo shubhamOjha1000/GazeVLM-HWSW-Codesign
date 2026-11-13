@@ -56,8 +56,9 @@ python -m system_perf.report --results /content/drive/MyDrive/GazeVLM/system_per
 ```
 
 Options of `measure.py`: `--rows` (default: every row), `--conditions` (substrings), `--videos`, `--decode-tokens`,
-`--no-flops`, `--dtype` (`auto`: bf16 where the GPU has it, fp16 otherwise, e.g. a T4; fp16 is honoured by SmolVLM2,
-the other models load bf16). Results append; `report.py` keeps the last record per (row, condition, question).
+`--no-flops`, `--dtype` (`auto`: bf16 where the GPU has it, fp16 otherwise, e.g. a T4; it sets SmolVLM2's weights;
+Qwen2.5-VL picks fp16 itself without bf16, the others load bf16, Qwen3-VL fp16 through `system_perf/t4.py`; each record has the
+loaded `weights_dtype`). Results append; `report.py` keeps the last record per (row, condition, question).
 
 ## Not covered yet
 
