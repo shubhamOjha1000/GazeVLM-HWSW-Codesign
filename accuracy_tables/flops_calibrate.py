@@ -227,6 +227,22 @@ def shares(q, units, prompt, ref, tokens_per_frame, decisions, fovea=None):
     return out, total
 
 
+def vision_fit_layouts(ad, cfg, measure):
+    """[(kind, label, cells, side)] the encoder is counted on to fit and check its cost per layout, the stock layout first: 'uniform'
+    layouts at measure['fit_sides'], the run's fovea (cfg['ours'] setting 0, the budget rule's) at flops.VISION_FIT_GAZES as 'fovea',
+    and the other settings at flops.VISION_FIT_OTHER_GAZES as 'other fovea'. Only counted: nothing is scored at them, and the run's
+    settings don't change. 16 layouts on Qwen2.5 and Qwen3."""
+    out = [("stock", "stock") + tuple(measure["stock"]())]
+    out += [("uniform", f"uniform {s} px") + tuple(measure["uniform"](s)) for s in measure["fit_sides"]]
+    for i, setting in enumerate(ad.fovea_settings(cfg["ours"])):
+        conds = dict(fovea=ad.fovea_condition(setting))
+        kind = "fovea" if i == 0 else "other fovea"
+        for g in (flops.VISION_FIT_GAZES if i == 0 else flops.VISION_FIT_OTHER_GAZES):
+            cells, side = measure["layout"](conds, "fovea", dict(gaze=g))
+            out.append((kind, f"{ad.setting_label(setting)} at gaze {g}", cells, side))
+    return out
+
+
 def fovea_per_video(job, measure, coef):
     """{video: (vision FLOPs, image tokens, frames)} of one foveated job's frames, summed over each frame's own layout (flops.fit_vision's
     coefficients). A video's questions all get the same frames."""
@@ -297,9 +313,9 @@ def make_plan(ad, cfg, data, out_model_dir, verify_n=VERIFY_QUESTIONS, log=print
             o_ = counted(ref_jobs[top], qids[0], decoder, tmp)
             lay = []
             if per_layout:
-                conds = dict(fovea=ad.fovea_condition(ad.fovea_settings(cfg["ours"])[0]))
-                shapes = [measure["stock"]()] + [measure["layout"](conds, "fovea", dict(gaze=g)) for g in flops.VISION_FIT_GAZES]
-                lay = [(measure["features"](cells, side), float(measure["vision"](ad, cells, side)), len(cells)) for cells, side in shapes]
+                lay = [dict(kind=kind, label=label, features=list(measure["features"](cells, side)),
+                            flops=float(measure["vision"](ad, cells, side)), tokens=len(cells))
+                       for kind, label, cells, side in vision_fit_layouts(ad, cfg, measure)]
         return pts, u_, o_, lay
 
     points, u, o, layouts = count_units()
@@ -334,14 +350,16 @@ def make_plan(ad, cfg, data, out_model_dir, verify_n=VERIFY_QUESTIONS, log=print
         f"{units['v_fovea'] / 1e9:,.2f} GFLOPs ({o['frames']} frames)")
     coef = None
     if per_layout:
-        coef = flops.fit_vision([(f, v) for f, v, _ in layouts])
+        coef = flops.fit_vision([(x["features"], x["flops"]) for x in layouts])
         units["vision_coef"] = coef
-        fov = layouts[1:]
+        fov = [x for x in layouts if x["kind"] == "fovea"]
+        kinds = {k: sum(x["kind"] == k for x in layouts) for k in ("stock", "uniform", "fovea", "other fovea")}
         log(f"the encoder per frame = {' + '.join(f'{x:.6g} x{i}' for i, x in enumerate(coef))} FLOPs over its layout's terms "
-            f"x0, x1, ... (flops.py's features), exact on all {len(layouts)} layouts counted; at {len(fov)} gaze points a foveated "
-            f"frame costs {min(v for _, v, _ in fov) / 1e9:,.2f} to {max(v for _, v, _ in fov) / 1e9:,.2f} GFLOPs with "
-            f"{min(n for *_, n in fov)} to {max(n for *_, n in fov)} tokens")
-        r = units["v_stock"] / layouts[0][1]
+            f"x0, x1, ... (flops.py's features), exact on all {len(layouts)} layouts counted {kinds}, with "
+            f"{len({x['tokens'] for x in layouts})} different token counts; at {len(fov)} gaze points the run's foveated frame costs "
+            f"{min(x['flops'] for x in fov) / 1e9:,.2f} to {max(x['flops'] for x in fov) / 1e9:,.2f} GFLOPs with "
+            f"{min(x['tokens'] for x in fov)} to {max(x['tokens'] for x in fov)} tokens")
+        r = units["v_stock"] / layouts[0]["flops"]
         if abs(r - 1) > flops.EXACT_TOLERANCE:
             sys.exit(f"FLOPS DIFFER: a scored stock frame costs {r:.6f} x the stock layout counted alone. Stop and tell the user.")
     for name, got in (("uniform", u), (top, o)):
@@ -461,7 +479,7 @@ def make_plan(ad, cfg, data, out_model_dir, verify_n=VERIFY_QUESTIONS, log=print
                 attention=dict(implementation=impl[0] or "the model's own", missed=sorted(missed)), llm_check=llm_check)
     if per_layout:      # ours' and the no-gate control's vision FLOPs and image tokens per question, by condition and video
         plan["fovea"] = {names[name]: {v: list(x) for v, x in per_video.items()} for name, per_video in fovea.items()}
-        plan["vision_layouts"] = [dict(features=list(f), flops=v, tokens=n) for f, v, n in layouts]
+        plan["vision_layouts"] = layouts
     return plan
 
 

@@ -87,9 +87,20 @@ def fake_counted(m, extra=None, pair=False):
     return counted
 
 
+def write_frames(base, video):
+    """test_qwen3350's frames, with every gaze inside the frame: its gaze (0.2 + 0.15 i, 0.6) is made for 5 frames, and on 40 it runs
+    6 frame widths off the frame, where GazeVLM's heatmap underflows to 0 and divides 0 by 0. Frame 1 keeps no gaze."""
+    frames = shared.write_frames(base, video, N)
+    for i, fr in enumerate(frames):
+        if fr["gaze"] is not None:
+            fr["gaze"] = (0.05 + 0.9 * ((7 * i) % N) / (N - 1), 0.3 + 0.2 * (i % 3))
+    return frames
+
+
 def data_of(w, videos):
+    """What common.load_data gives. gate: no gate frames per video (no row here reads them), so describe() has something to average."""
     qs = w.qs[w.qs.video.isin(set(videos))].reset_index(drop=True)
-    return dict(qs=qs, videos=list(videos), test_videos=set(), metas={v: dict(n=N) for v in videos}, gate={},
+    return dict(qs=qs, videos=list(videos), test_videos=set(), metas={v: dict(n=N) for v in videos}, gate={v: [] for v in videos},
                 uniform={v: [w.frames[v][f] for f in common.uniform_indices(N, 96)] for v in videos},
                 clips=[dict(sequence=v, frame_no=np.arange(N)) for v in videos], labels={v: w.labels[v] for v in videos},
                 frame=lambda v, f: w.frames[v][f])
@@ -115,7 +126,7 @@ def build(base, mp, m):
     rng = np.random.default_rng(1)
     w = type("World", (), {})()
     w.model, w.base = m, base
-    w.frames = {v: shared.write_frames(base, v, N) for v in VIDEOS}
+    w.frames = {v: write_frames(base, v) for v in VIDEOS}
     w.labels = {v: rng.integers(0, 4, N - 1) for v in VIDEOS}
     w.qs = pd.DataFrame(dict(qid=range(len(ORDER)), video=ORDER, question=[f"q{i}" for i in range(len(ORDER))],
                              options=[list("abcde")] * len(ORDER), answer=["A", "B"] * 4 + ["A"]))
@@ -204,14 +215,47 @@ def test_qwen3s_layout_terms_are_patches_and_their_square():
     assert side == 512 and flops.features_qwen3(cells, side) == [1024.0, 1024.0 ** 2]
 
 
-def test_the_vision_fit_is_exact_and_checked():
-    m = "qwen2.5"
-    conds = dict(f=("fovea", dict(a=160, R=70, img=448, gaze="gaze")))
-    lay = [REAL[m]["stock"]()] + [qf.frame_layout(conds, "f", dict(gaze=g))[:2] for g in flops.VISION_FIT_GAZES]
-    pts = [(flops.features_qwen25(c, s), true_vision(m, c, s)) for c, s in lay]
+def fit_layouts(m):
+    """The layouts calibrate counts the encoder on, as (kind, cells, side)."""
+    return [(kind, c, s) for kind, _, c, s in fc.vision_fit_layouts(ADAPTER[m](), dict(ours=common.DEFAULTS["ours"]), REAL[m])]
+
+
+@pytest.mark.parametrize("m", ["qwen2.5", "qwen3"])
+def test_calibrate_counts_more_layouts_than_terms_and_enough_patch_counts(m):
+    lay = fit_layouts(m)
+    n_terms = len(TRUE[m])
+    assert [k for k, _, _ in lay] == ["stock"] + ["uniform"] * 2 + ["fovea"] * 7 + ["other fovea"] * 6 and len(lay) == 16
+    assert lay[0][2] == {"qwen2.5": 448, "qwen3": 512}[m] and [s for k, _, s in lay if k == "uniform"] == list(REAL[m]["fit_sides"])
+    patches = sorted({4 * len(c) for _, c, _ in lay})
+    assert len(patches) > 2 * n_terms and patches[-1] == 1024           # spread from the run's fovea up to the stock frame
+    fovea = {len(c) for k, c, _ in lay if k == "fovea"}
+    assert len(fovea) > 1 and max(fovea) < 256                          # the run's fovea: its cell count follows the gaze
+
+
+@pytest.mark.parametrize("m", ["qwen2.5", "qwen3"])
+def test_the_vision_fit_is_exact_and_stops_on_a_cost_that_isnt_linear(m):
+    """The section 15 run's failure: + P^3 (about 0.1% of a stock frame) is non-linear, but least squares absorbs most of it into P
+    and P^2, leaving under the 0.01% the check allows. 10 P^3 (about 1% of a stock frame) leaves over 10 times that on calibrate's
+    16 layouts."""
+    feats = REAL[m]["features"]
+    pts = [(feats(c, s), true_vision(m, c, s)) for _, c, s in fit_layouts(m)]
     assert flops.fit_vision(pts) == pytest.approx(TRUE[m], rel=1e-6)
-    with pytest.raises(SystemExit, match="aren't linear"):
-        flops.fit_vision([(f, v + f[0] ** 3) for f, v in pts])
+    with pytest.raises(SystemExit, match="aren't linear"):              # cubic in the patches: not in P and P^2
+        flops.fit_vision([(f, v + 10 * f[0] ** 3) for f, v in pts])
+    with pytest.raises(SystemExit, match="aren't linear"):              # a cost that follows where the cells are
+        flops.fit_vision([(feats(c, s), true_vision(m, c, s) * (1 + float(np.asarray(c)[:, 0].mean()) / 1e4))
+                          for _, c, s in fit_layouts(m)])
+
+
+def test_the_vision_fit_refuses_layouts_that_cant_check_it():
+    m = "qwen2.5"
+    lay = fit_layouts(m)
+    two_counts = [([200.0, w, 200.0 ** 2], 1e11 + w) for w in (3000.0, 5000.0, 7000.0, 9000.0)] + [([1024.0, 65536.0, 1024.0 ** 2], 1e12)]
+    with pytest.raises(SystemExit, match="can't be checked"):           # 5 layouts but 2 patch counts: any cost in P would fit
+        flops.fit_vision(two_counts)
+    exact = [(flops.features_qwen25(c, s), true_vision(m, c, s)) for _, c, s in lay[:1] + lay[3:5]]
+    with pytest.raises(SystemExit, match="can't be checked"):           # as many layouts as terms
+        flops.fit_vision(exact)
     uniform = [(flops.features_qwen25(qf.uniform_cells(s), s), 1.0e12 * s) for s in (224, 336, 448)]
     with pytest.raises(SystemExit, match="don't tell"):                 # uniform layouts alone: windows grow with patches
         flops.fit_vision(uniform)

@@ -33,7 +33,14 @@ FOVEA_ROWS = ("budget", "nogate")
 GATE_ROWS = ("budget",)
 LLM_SHAPE_TOLERANCE = 0.01       # the fitted n^2 term against 4 x layers x heads x head_dim from the config, before the job stops
 ATTENTION_WORDS = ("attention", "attn", "sdpa", "flash")
+# The layouts the encoder is counted on, to fit and check its cost per frame (flops_calibrate.vision_fit_layouts): the stock layout,
+# uniform layouts at 2 other sides, the run's fovea at VISION_FIT_GAZES and the other fovea settings of common.py's `ours` at
+# VISION_FIT_OTHER_GAZES. Nothing is scored at them. The run's fovea alone puts the patch count in a narrow band (about 160 to 232
+# patches on Qwen2.5's 448 px frame, following the gaze) far from the stock frame's 1,024, so a cost that curves in the patch count is
+# mostly absorbed by P and P^2. The 2 uniform sides and the 3 other settings spread it over 14 values from 160 to 1,024, which makes
+# such a cost about 6 times more visible, and fit_vision stops unless every term takes more values than there are terms.
 VISION_FIT_GAZES = ((0.5, 0.5), (0.12, 0.18), (0.88, 0.3), (0.35, 0.92), (0.7, 0.66), (0.03, 0.97), (0.95, 0.05))
+VISION_FIT_OTHER_GAZES = ((0.5, 0.5), (0.12, 0.18))
 
 
 # ---------------------------------------------------------------------------- counting
@@ -102,12 +109,20 @@ def question_flops_vision(units, vision, n_tokens, decisions=0):
 
 def fit_vision(points):
     """[(layout features, counted FLOPs)] -> coefficients, so that one frame's vision FLOPs = features . coefficients. Least squares,
-    which must use every feature and reproduce every counted point within EXACT_TOLERANCE, or the job stops."""
+    which must use every feature and reproduce every counted point within EXACT_TOLERANCE, or the job stops. The check only means
+    something with more distinct layouts than terms, each term taking more distinct values than there are terms: with fewer, any
+    cost fits (two patch counts fit any function of the patch count with P and P^2), so the job stops there too."""
     x = np.array([f for f, _ in points], dtype=np.float64)
     y = np.array([v for _, v in points], dtype=np.float64)
     coef, _, rank, _ = np.linalg.lstsq(x, y, rcond=None)
     if rank < x.shape[1]:
         raise SystemExit(f"the vision layouts don't tell the {x.shape[1]} terms apart (rank {rank}). Stop and tell the user.")
+    n_terms = x.shape[1]
+    distinct = len({tuple(r) for r in x.tolist()})
+    values = [len(set(x[:, j].tolist())) for j in range(n_terms)]
+    if distinct <= n_terms or min(values) <= n_terms:
+        raise SystemExit(f"{distinct} distinct vision layouts, with {values} distinct values per term, for {n_terms} terms: the fit "
+                         "can't be checked. Stop and tell the user.")
     off = [(list(f), v, float(np.dot(f, coef))) for f, v in points if abs(float(np.dot(f, coef)) - v) > EXACT_TOLERANCE * v]
     if off:
         raise SystemExit(f"the vision encoder's FLOPs aren't linear in its patches and attention sizes: (features, counted, fitted) "
@@ -323,15 +338,26 @@ def layout_qwen3(conditions, cond, fr):
     return q3.frame_layout(conditions, cond, fr)[:2]
 
 
-def stock_qwen25():
+def uniform_qwen25(side):
+    """Qwen2.5-VL's own tokenization of a side x side frame: all 28 px cells."""
     from vlmeval import qwen_fovea as qf
+    return qf.uniform_cells(int(side)), int(side)
+
+
+def uniform_qwen3(side):
+    """Qwen3-VL's own tokenization of a side x side frame: all 32 px cells."""
+    from vlmeval import qwen3_fovea as q3
+    return q3.uniform_cells(int(side)), int(side)
+
+
+def stock_qwen25():
     from accuracy_tables.models import Qwen25
-    return qf.uniform_cells(Qwen25.SIDE), Qwen25.SIDE
+    return uniform_qwen25(Qwen25.SIDE)
 
 
 def stock_qwen3():
     from vlmeval import qwen3_fovea as q3
-    return q3.uniform_cells(q3.IMG), q3.IMG
+    return uniform_qwen3(q3.IMG)
 
 
 # Per model: prefill(ad, n) and prompt_len(...) always; llm_shape(ad) for the check against the config; and, where a foveated frame's
@@ -340,7 +366,7 @@ def stock_qwen3():
 MEASURE = {
     "smolvlm": dict(prefill=measure_prefill_smolvlm, prompt_len=prompt_len_smolvlm, llm_shape=llm_shape),
     "qwen2.5": dict(prefill=measure_prefill_qwen25, prompt_len=prompt_len_qwen, llm_shape=llm_shape, layout=layout_qwen25,
-                    stock=stock_qwen25, features=features_qwen25, vision=vision_qwen25),
+                    stock=stock_qwen25, uniform=uniform_qwen25, fit_sides=(224, 336), features=features_qwen25, vision=vision_qwen25),
     "qwen3": dict(prefill=measure_prefill_qwen3, prompt_len=prompt_len_qwen, llm_shape=llm_shape, layout=layout_qwen3,
-                  stock=stock_qwen3, features=features_qwen3, vision=vision_qwen3),
+                  stock=stock_qwen3, uniform=uniform_qwen3, fit_sides=(256, 384), features=features_qwen3, vision=vision_qwen3),
 }

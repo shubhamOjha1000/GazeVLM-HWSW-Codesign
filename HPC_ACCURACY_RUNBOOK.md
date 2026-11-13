@@ -1827,10 +1827,13 @@ The counter is section 14's: `torch.utils.flop_counter`, run on the real model, 
     - Every frame is its own image, its picture repeated over the 2 frames of a temporal patch, as sections 12 and 13 send it. So a frame's cost doesn't depend on how many frames there are, odd or even. **Step 4 checks this:** a pairing of frames would cost something other than frames x one frame, and stop the job with `FLOPS DIFFER`.
     - **A stock frame** costs the same every time. The plan measures it while scoring one question.
     - **A foveated frame's cost follows its layout, which follows the gaze.** Its cell count changes. On Qwen2.5, so does how its patches fall into the 112 px window-attention blocks (it also has full-attention blocks).
-    - So step 1 counts the encoder on the stock layout and on foveated layouts at 7 gaze points. It fits each frame's count to its layout's terms, which are in `flops.py`:
-        - Qwen2.5: patches, the sum of each window's patches squared, and patches squared;
-        - Qwen3, whose encoder attends over the whole frame in every block, with its DeepStack mergers: patches and patches squared.
-    - **The fit must reproduce every counted layout within 0.01%,** or the job stops (`aren't linear in its patches and attention sizes`, or `don't tell the ... terms apart`).
+    - So step 1 counts the encoder on 16 layouts, nothing scored at them, and fits each frame's count to its layout's terms:
+        - the layouts: the stock frame; uniform frames at 2 other sides (224 and 336 px on Qwen2.5, 256 and 384 px on Qwen3); the run's fovea `R=70 a=160` at 7 gaze points; the other 3 fovea settings of `common.py` at 2 gaze points each;
+        - why 16: the run's fovea alone keeps the patch count in a narrow band (about 160 to 232 patches, following the gaze), far from the stock frame's 1,024. Over that band a cost that curves in the patch count is mostly absorbed by the fit. The extra layouts spread it over about 14 values, which makes such a cost about 6 times more visible;
+        - the terms, which are in `flops.py`:
+            - Qwen2.5: patches, the sum of each window's patches squared, and patches squared;
+            - Qwen3, whose encoder attends over the whole frame in every block, with its DeepStack mergers: patches and patches squared.
+    - **The fit must reproduce every counted layout within 0.01%,** or the job stops: `aren't linear in its patches and attention sizes`, `don't tell the ... terms apart`, or `the fit can't be checked` (too few layouts or term values for the check to mean anything).
     - Ours' and `nogate`'s vision FLOPs and image tokens are then **summed over each video's own frames.** They're stored in the plan, and the report uses them per record.
 - **Attention the counter can't see.** Every count runs under a watch on the ops that execute.
     - If an attention op runs that has no FLOP formula, every count is redone with eager attention, which runs attention as matrix products the counter sees. Only counting passes use it. Knob counting and all scoring keep the model's own attention.
@@ -1970,7 +1973,7 @@ Each log, `logs/qwen25-flops-calibrate_<job>.log` or `logs/qwen3-flops-calibrate
     - the gate's FLOPs per decision;
     - the LLM's quadratic, then `n^2 term ... from the model's config: +0.000%` and `n term ... for information only`;
     - `one stock frame ... GFLOPs, one foveated frame ... GFLOPs`;
-    - `the encoder per frame = ...`, with the foveated layouts' range in GFLOPs and tokens.
+    - `the encoder per frame = ...`, exact on all 16 layouts, with the run's foveated range in GFLOPs and tokens (about 40 to 58 tokens at the 7 gaze points).
 4. **`--- step 2`:** the prompt fit and its largest miss.
 5. **`--- step 3`:**
     - per budget, ours' and the no-gate control's image tokens and GFLOPs per foveated frame;
@@ -1982,7 +1985,7 @@ Each log, `logs/qwen25-flops-calibrate_<job>.log` or `logs/qwen3-flops-calibrate
 
 **Stop and tell the user on any of these:**
 - `FLOPS DIFFER`, `aren't a quadratic`, `prefill is ... x the fitted one`, `c DIFFERS FROM CONFIG`;
-- `aren't linear in its patches and attention sizes`, `don't tell the ... terms apart`;
+- `aren't linear in its patches and attention sizes`, `don't tell the ... terms apart`, `the fit can't be checked`;
 - `the token arithmetic differs`;
 - the split's `is wrong`, `holds a different assignment` or `no .../manifest.json`;
 - `parity failed`;
