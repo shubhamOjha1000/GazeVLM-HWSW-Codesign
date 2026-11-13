@@ -101,7 +101,7 @@ def choose_k(share_of_k, target, k_max):
     best = None
     for k in range(1, int(k_max) + 1):
         s = share_of_k(k)
-        if best is None or abs(s - target) < abs(best[1] - target):
+        if best is None or abs(s - target) < abs(best[1] - target) - 1e-12:
             best = (k, s)
     return best
 
