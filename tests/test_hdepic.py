@@ -2,6 +2,7 @@
 exploration report, on a small fake HD-EPIC folder. CPU only, no video decoding, no real HD-EPIC data."""
 import json
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -256,12 +257,38 @@ def synthetic_streams(hz=10.0, seconds=6, seed=0):
     return g_ts, yaw, pit, build_rows.lookup_projector(yaw, pit, x, y, oof), imu_ts, imu
 
 
+def nan_aware_differences(old, new):
+    """Where two lists of row dicts differ: the same keys, NaN in exactly the same places, every other value exactly equal (same
+    type and ==). A plain == can't compare rows holding NaN, since nan != nan."""
+    isnan = lambda v: isinstance(v, (float, np.floating)) and bool(np.isnan(v))
+    if len(old) != len(new):
+        return [f"{len(old)} rows against {len(new)}"]
+    out = []
+    for i, (a, b) in enumerate(zip(old, new)):
+        if a.keys() != b.keys():
+            out.append(f"row {i}: keys {sorted(set(a) ^ set(b))}")
+            continue
+        for k in a:
+            if isnan(a[k]) or isnan(b[k]):
+                if not (isnan(a[k]) and isnan(b[k])):
+                    out.append(f"row {i} {k}: NaN in only one ({a[k]!r} against {b[k]!r})")
+            elif type(a[k]) is not type(b[k]) or a[k] != b[k]:
+                out.append(f"row {i} {k}: {a[k]!r} against {b[k]!r}")
+    return out
+
+
 def test_a_1s_window_at_1_fps_is_section_9s_pair_window():
     g_ts, yaw, pit, project, imu_ts, imu = synthetic_streams()
     f_ts = np.array([1e6, 2e6, 3e6, 4e6])
     old = build_rows.pair_rows("v", f_ts, g_ts, yaw, pit, project, imu_ts, imu)
     new = build_rows.pair_rows("v", f_ts, g_ts, yaw, pit, project, imu_ts, imu, window_us=1e6)
-    assert old == new
+    assert len(old) == 3
+    assert nan_aware_differences(old, new) == []
+    bent = [dict(r) for r in new]                                            # the comparison itself catches each kind of difference
+    bent[0]["n_velocities"] += 1
+    bent[1]["frame_similarity"] = 0.0
+    bent[2]["imu_accel_mag_mean"] = float("nan")
+    assert len(nan_aware_differences(old, bent)) == 3
 
 
 def test_close_candidates_still_get_the_gates_1s_window():
@@ -506,15 +533,37 @@ def hjob(name):
 
 HD_JOBS = ["hdepic_prep.SBATCH", "hdepic_frames.SBATCH", "hdepic_tests.SBATCH", "hdepic_checks.SBATCH", "hdepic_flops.SBATCH",
            "hdepic_summary.SBATCH"]
+OUR_RESULTS = "$GV_ROOT/results/hdepic_gaze_smolvlm_flops"
+# The one results/ path outside ours the rules allow on a writing line: section 14's table, which the summary job's report only reads.
+READ_ONLY_REFERENCE = re.compile(re.escape("--reference $GV_ROOT/results/smolvlm_flops/summary_flops_by_group.csv") + r"(?=[\s\"']|$)")
+
+
+def expand(value, assigned):
+    """$NAME and ${NAME} replaced by the job's own NAME=... lines, until nothing the job assigns is left."""
+    for _ in range(10):
+        new = re.sub(r"\$\{?([A-Z_][A-Z_0-9]*)\}?", lambda m: assigned.get(m.group(1), m.group(0)), value)
+        if new == value:
+            break
+        value = new
+    return value
+
+
+def ours(path):
+    return path == OUR_RESULTS or path.startswith(OUR_RESULTS + "/")
 
 
 @pytest.mark.parametrize("name", HD_JOBS)
 def test_the_hdepic_jobs_keep_the_rules(name):
     text = hjob(name)
     assert "--no-parity" not in text and "SBATCH_ACCOUNT" not in text and "data/folds" not in text and "HF_HOME=" not in text
+    assigned = dict(re.findall(r"(?m)^\s*([A-Z_][A-Z_0-9]*)=(\S+)", text))
     for line in text.splitlines():
-        if "--out-dir" in line and "$GV_ROOT/results/" in line:
-            assert "results/hdepic_gaze_smolvlm_flops" in line, line
+        rest = READ_ONLY_REFERENCE.sub("", line)
+        for out in re.findall(r"--out-dir\s+(\S+)", rest):                  # every write, resolved through the job's variables
+            assert ours(expand(out.replace("\\$", "$"), assigned)), line
+        if "--out-dir" in rest:                                              # and no other results/ path on a writing line
+            for path in re.findall(r"\$GV_ROOT/results/[^\s\"']*", rest):
+                assert ours(path), line
     for folder in ("qwen3_350", "qwen25_350", "smolvlm256_flops", "hpc_all", "nymeria_smolvlm"):
         assert folder not in text, folder
     if "HDEPIC_ROOT" in text:
