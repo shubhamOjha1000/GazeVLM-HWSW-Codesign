@@ -63,6 +63,8 @@ The models (keys used everywhere in this folder):
 | `../tests/test_qwen_flops.py` | CPU tests of section 15: the Qwen FLOPs counting, whole plans on fake Qwen2.5 and Qwen3, the split, the sealed plan, resuming, the merge and the report |
 | `../tests/test_smolvlm256_flops.py` | CPU tests of section 16: the 256M's geometry and fovea, its backends with threads, gaze on its grid, a whole plan, the checks, the jobs, and SmolVLM2-2.2B's files unchanged |
 | `../tests/test_smolvlm256_flops.py` | CPU tests of section 16: the 256M's geometry and fovea, its backends and gaze, its FLOPs, a whole fake run, the checks, the jobs |
+| `hpc/hdepic/`, `hpc/hdepic_explore.SBATCH` | HD-EPIC's gaze questions: the read-only loaders and step 0's report for decisions D1 to D5; see section 17 of the runbook |
+| `../tests/test_hdepic.py` | CPU tests of section 17's step 0 on a fake HD-EPIC folder |
 | `../tests/test_accuracy_tables.py` | CPU tests of the config, frame selection and budget code |
 | `../vlmeval/budget_rule.py` | the frame budget: the frame limit, the send reasons, the slots and the frame kept per slot |
 | `../tests/test_budget_rule.py` | CPU tests of the frame budget: the rule, the slots, the two rows, the comparison |

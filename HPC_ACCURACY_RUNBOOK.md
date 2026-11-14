@@ -7,8 +7,8 @@ the project.
 **Everything runs as Slurm jobs, not notebooks.** The Python is already command-line scripts. The job files are in
 `accuracy_tables/hpc/`, and the method detail is in `accuracy_tables/README.md`.
 
-**New task: section 16, section 14's FLOPs-matched table on SmolVLM2-256M, on one B200. Don't pull it while any section 12 to 15 job is queued or
-running.** Section 16 hasn't run. Sections 14 and 15 have.
+**New task: section 17, SmolVLM2-2.2B's FLOPs-matched table on HD-EPIC's gaze questions. This round is its step 0 only, a read-only look at the data,
+then STOP for the user's decisions D1 to D5. Don't pull while any section 12 to 16 job is queued or running.** Section 17 hasn't run.
 Sections 1 to 7 cover the 12-video run, section 8 the budget rule on those videos, and section 9 gate data for the other 338 videos and SmolVLM on
 Nymeria. Section 10, the budget rule on 4 models, has run up to its pilot, and its step 4 waits for the user. Section 11 is SmolVLM with every row at
 5, 10 and 20%, section 12 is the same on Qwen3, section 13 the same on Qwen2.5, section 14 SmolVLM with every row matched on total FLOPs, and section 15 the same on Qwen2.5
@@ -132,6 +132,7 @@ All are in `accuracy_tables/hpc/`. Submit every one **from the repository root**
 | `smolvlm256_flops_checks.SBATCH` | section 16: the 2.2B's regression, the 256M's parity, full-budget identity and threads, on one B200 | yes |
 | `smolvlm256_flops.SBATCH <calibrate\|full>` | section 16: the 256M's FLOPs plan with a projected run time, then every planned condition, on one B200 | yes |
 | `smolvlm256_flops_summary.SBATCH` | section 16: the records, GPU use, the FLOPs table and the side table against the 2.2B | no |
+| `hdepic_explore.SBATCH` | section 17, step 0: HD-EPIC's gaze questions and their videos, read-only, for decisions D1 to D5 | no |
 
 Paths default to `/scratch/$USER/...`. Set `EGO_ROOT`, `GV_ROOT`, `HF_HOME`, `OVERLAY` or `IMAGE` before `sbatch` to
 override them. The `#SBATCH --output` lines assume `/scratch/<user>/GazeVLM/logs`.
@@ -174,6 +175,7 @@ Layout on the cluster:
   results/smolvlm_flops/                                                                                 <- section 14
   results/qwen25_flops/   results/qwen3_flops/                                                           <- section 15
   results/smolvlm256_flops/                                                                              <- section 16
+  data/hdepic/explore/                                <- section 17, step 0 (HD-EPIC itself stays in /scratch/$USER/hdepic/, read-only)
   logs/
 ```
 
@@ -2426,3 +2428,158 @@ Plus Uniform minus Blind per group, the GPU job table (type, node, length, mean 
 5. **Steps 4 and 5:** the GPU job table, the records lines, both CSV paths, and the report of step 6.
 
     **Don't claim a winner.**
+
+## 17. Next task: SmolVLM2-2.2B's FLOPs-matched table on HD-EPIC's gaze questions
+
+**This round is step 0 only: a read-only look at the data, then STOP for the user's decisions D1 to D5.** Steps 1 to 9 are written after the user decides, because every one of them depends on D1 to D5. **The user submits every job and approves each `sbatch`.** Nothing here has been run.
+
+### Scope, set by the user
+
+- **Questions: HD-EPIC's gaze group only.** That's its 2 types:
+    - "where looking" (`gaze_gaze_estimation.json`);
+    - "what's next" (`gaze_interaction_anticipation.json`).
+    - About 2,000 questions in all. **No other group's file is ever opened,** and no other question is loaded, given frames or scored.
+- **Model and method: section 14's, exactly.**
+    - SmolVLM2-2.2B at snapshot `482adb537c021c86670beed01cd58990d01e72e4`.
+    - Uniform K = 64; the budget rule at 17 tokens per foveated frame with limits 15 / 30 / 60.
+    - The gate as the 5 fold models averaged (HD-EPIC is unseen), the same slots and preference order, every baseline setting, and `choose_k`.
+    - The same 35 conditions, every row matched on total FLOPs per question.
+    - Calibrate recomputes the targets on these questions. That's the method, not tuning. **Nothing changes after accuracy is seen.**
+- **One GPU type, B200.** Never `--no-parity`, and never override `--gres`.
+- **Folders:**
+    - `/scratch/$USER/hdepic/` is read-only: nothing is ever written inside it.
+    - Derived data goes to `/scratch/$USER/GazeVLM/data/hdepic/`, outside the repository, and only what the gaze questions need.
+    - Results go to `results/hdepic_gaze_smolvlm_flops/` only.
+    - Never write to `data/folds/` or to any results folder of sections 8 to 16.
+- **HD-EPIC's licence is non-commercial.** **Never commit** HD-EPIC data, question text, answers or the logs that show them. Step 0's log prints 2 example questions per type, for the user only.
+- **No winner,** anywhere.
+
+### The leakage on "where looking"
+
+That type's answer is where the wearer's own gaze is. Ours, `nogate`, GazeVLM and GazeVLM2 place their fovea or region from that same gaze, so they see information the other rows don't.
+- **No method changes because of this.**
+- Step 0 reports whether gaze is recorded at the asked time, inside the span every row's frames come from. Step 1's overlay sheets show where it lands.
+- The summary reports each type alone, both together and the mean of the 2. The "where looking" table carries the note: **"gaze-driven rows see the wearer's gaze, which defines this type's answer".**
+
+### The decisions, and what step 0 prints for each
+
+The user makes all of them, before any accuracy exists, and each applies to every row equally.
+
+- **D1. Short clips.**
+    - **Step 0 prints, per type:**
+        - the input form (one `time`, or `start_time` and `end_time`) and the span lengths;
+        - the MP4 frames and 1 fps frames inside each span, and the MP4 frames within 1, 5 and 10 s of its end;
+        - for each option, what Uniform K and the budget rule's limits become, and the candidate spacing, with 10 Hz gaze samples and IMU bins per gap.
+    - **The options:**
+        - (a) 64 candidate frames evenly over each question's span, at native fps through the time CSV;
+        - (b) the 1 fps frames inside the span, so K drops to what the clip holds;
+        - (c) only questions whose span is at least 64 s.
+    - **What the code already says:**
+        - The gate was trained on 1 s frame pairs. Each window gives it 9 gaze steps at 10 Hz and 10 IMU bins (`build_rows.pair_rows`).
+        - So under (a), a span shorter than 63 s puts candidates less than 1 s apart, and the gate's windows would be shorter than any it was trained on. Step 0 prints how often.
+        - Under (b), a few-second clip gives K of a few frames, and limits of 1 to 2 at every budget.
+        - Under (c), most short questions are excluded.
+    - **"What's next" must never see a frame after its span's end:** that would show the answer. Step 0 prints how far each span ends from the video's end.
+    - The user decides once the numbers exist.
+- **D2. Inputs per question.** Step 0 counts the inputs (segments) and videos per question, by type. If any question has more than one, the proposal is:
+    - frames drawn in time order, split across segments in proportion to their duration;
+    - the gate run per segment, never across a gap.
+- **D3. `<TIME>` and `<BBOX>` tags.** Step 0 counts them, by type, in questions and in choices.
+    - The proposal is to keep them verbatim, as the official benchmark does, unless its evaluation code does otherwise.
+    - If any boxes exist, step 1 tests 0 / 90 / 180 / 270° rotations and original-versus-MP4 resolution on 20 of them, and shows which fits.
+    - No question is dropped silently.
+- **D4. Gaze rate.**
+    - Step 0 prints every touched video's gaze rate, and whether a whole step reaches the gate's 10 Hz. The pilot saw 10 Hz on P01 and P03, and 60 Hz on P04.
+    - `450298f` handles only 30 Hz, by taking every third sample with no averaging.
+    - **The proposal:** the same rule generalised to any rate that is a whole multiple of 10 Hz (every `rate / 10`-th sample).
+        - Step 1 will prove it gives the existing 30 Hz path's rows exactly, on the videos that path already handles.
+        - A rate with no whole step stops the build, and is shown to the user.
+- **D5. The 2 videos without gaze** (P02-20240210-113925 and P02-20240211-182630).
+    - Step 0 prints how many gaze questions sit on them.
+    - **The recommendation:** exclude them from every row, and report the count.
+
+### Steps 1 to 9, planned
+
+They're written once D1 to D5 are decided. Each will have an exact command, the lines to expect and its stop phrases, as in sections 14 to 16.
+
+1. **The loader.**
+    - HD-EPIC's gaze CSV, `imu.npz`, `calibration.json` and time CSV, fed to the existing row builder unchanged. Rebuilding the 12 AEA videos must still print `REBUILD MATCHES`.
+    - The IMU axes, units and right-IMU choice checked against AEA's, with gyro columns 3 to 5.
+    - The D4 resampler and its proof.
+    - Gaze overlay sheets for at least 5 videos, at least 1 of them at 60 Hz, with the share of gaze inside the frame. **STOP.**
+2. **The gate.**
+    - Rows and scores on the touched videos only.
+    - The statistics, as in section 9's step 4. A `vor_median_cos` that isn't clearly negative prints `VOR CHECK FAILED` and stops (AEA and Nymeria: about -0.88).
+    - **STOP** for the user's OK.
+3. **Frames.** Exactly the frames D1 and D2 call for, through the time CSV, within the quota step 0 printed. Ends with `FRAMES MATCH PLAN`.
+4. **The manifest.** The questions kept under D1 to D5, with every exclusion counted and its reason, then a separate HD-EPIC `data check OK`. The EgoEverything checks don't change.
+5. **The tests on the CPU, and checks on a B200, in parallel:**
+    - every unit test;
+    - section 14's regression, `SAME ANSWERS: 0 of 100`;
+    - `parity OK` on HD-EPIC inputs;
+    - `SAME AS UNIFORM K` at full budget;
+    - the threads check;
+    - 17 foveated tokens on every kept frame.
+6. **Calibrate on a B200.**
+    - Section 14's output, a timing run with `PROJECTED full run`, and the GPU mean.
+    - **STOP AND ASK** if the GPU mean is under 15%.
+7. **Full, on one B200.** About 2,000 questions x 35 conditions, about a third of section 14. No shards unless the projection says over 6 hours.
+8. **The summary.**
+    - Tables for both types together (question-weighted), each type, and the mean of the 2.
+    - The chance level per type, Uniform minus Blind per type, section 14's interval method, and a side table against section 14.
+    - No gap called a difference. With about 1,000 questions per type, expect intervals of roughly ±3 points.
+9. **The report.**
+
+### Step 0: pull only if it's safe, then look at the data
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+if squeue -h -u $USER -o "%j" | grep -Eq "^(smolvlm-flops|smolvlm256-flops|qwen3350|qwen25350|qwen25-flops|qwen3-flops|qwen-flops|hdepic)"; then
+    echo "STOP: a section 12 to 17 job is still queued or running. Don't pull."
+else
+    git status --short
+    git pull --ff-only origin eyehead-gate
+    git log --oneline | head -3
+    myquota
+    sbatch accuracy_tables/hpc/hdepic_explore.SBATCH
+fi
+```
+
+- **`STOP`:** do nothing else, and tell the user.
+- **Expect** `git status` to show only your 2 local `--comment` edits.
+- **The log,** `logs/hdepic-explore_<job>.log`, shows in order:
+    1. `HDEPIC_ROOT=...`, then `myquota`'s lines.
+    2. `HD-EPIC: 156 video folders; gaze group only: gaze_estimation (...), interaction_anticipation (...)`.
+    3. **The questions per type:** count, choices per question (expect 5), input forms, inputs per question, multi-video questions, videos, the tag counts and the spread of `correct_idx`.
+    4. **`the gaze questions touch <n> of 156 videos`,** with a note if that's fewer than about 20.
+    5. **The per-video table:**
+        - fps, frames, resolution and duration;
+        - the time CSV: rows against MP4 frames, repeated rows, backward steps and the largest offset from `i / fps`;
+        - the gaze file, its rate and step, and its coverage at the start and end and its longest gap;
+        - the IMU rates and magnitudes;
+        - then the calibration's structure, the IMU arrays and `status.json`.
+    6. **The D1 tables, then D2, D3, D4 and D5,** then the leakage line.
+    7. **The disk table:** frames, files and gigabytes per D1 option, against `myquota`.
+    8. **2 example questions per type,** for the user only.
+    9. **`STOP: D1 to D5 are the user's. Send them this log.`**
+- **It writes** `data/hdepic/explore/per_video.csv` and `per_question.csv`: ids, times and counts, never question text.
+- **Stop and tell the user on:**
+    - a missing video folder (`NOT ON SCRATCH`);
+    - a time CSV without the 3 columns;
+    - an input with neither `time` nor `start_time` / `end_time`;
+    - any traceback.
+
+**STOP. Send the user the whole log and `myquota`'s output, and wait for D1 to D5.**
+
+### Rules for this task
+
+- **Raw HD-EPIC is read-only.** **Never commit** HD-EPIC data, question or choice text, answers, these logs, NetIDs, account names, tokens or `*CONTEXT*.md`.
+- **Don't open any HD-EPIC group's file but the gaze group's 2.**
+- **Nothing runs past step 0 until the user has decided D1 to D5.**
+- **Don't claim a winner.**
+- **Nothing runs on the user's Mac.**
+
+### What to report back
+
+1. Step 0's whole log, `myquota`, and any traceback.
+2. Anything unexpected in the time CSVs, gaze rates, IMU arrays or calibration fields.
