@@ -199,6 +199,9 @@ def load_data(cfg):
     clips, labels = {video: predicted label per pair}, frame = (video, frame number) -> frame)
     with frame = dict(key=(video, frame number), path, t seconds, gaze=(u, v) or None,
     gaze_trace=[(u, v), ...] the raw gaze samples of the GAZE_WINDOW seconds before t)."""
+    if cfg.get("dataset") == "hdepic":                 # HD-EPIC's gaze questions (runbook section 17); no other config has `dataset`
+        from accuracy_tables.hpc.hdepic.load import load_data as load_hdepic
+        return load_hdepic(cfg)
     from vlmeval import spatial as sp
     from vlmeval.frames import frame_path
     qs, clips, test_videos = _questions_and_clips(cfg)

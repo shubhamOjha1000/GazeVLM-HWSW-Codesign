@@ -74,13 +74,15 @@ def load_imu(path):
     return ts - ts[0], np.concatenate([accel, gyro], axis=1).astype(np.float32)
 
 
-def pair_rows(video, f_ts, g_ts, g_yaw, g_pit, project, imu_ts, imu_arr, imu_hz=IMU_HZ, gate_step=1):
+def pair_rows(video, f_ts, g_ts, g_yaw, g_pit, project, imu_ts, imu_arr, imu_hz=IMU_HZ, gate_step=1, window_us=None):
     """One dict per consecutive frame pair, formatted as in src.dataprep.build_feature_csv. The gate's rates use every
-    gate_step-th gaze sample; gaze_xy_window uses all of them."""
+    gate_step-th gaze sample; gaze_xy_window uses all of them. window_us None (every caller before runbook section 17): a pair's
+    window is the gap between its two frames, 1 s at 1 fps. window_us set: the window_us before the pair's second frame, so
+    frames closer than 1 s still give the gate the 1 s window it trained on (HD-EPIC's candidate frames, section 17)."""
     rate_ts, rate_yaw, rate_pit = g_ts[::gate_step], g_yaw[::gate_step], g_pit[::gate_step]
     rows = []
     for i in range(1, len(f_ts)):
-        t0, t1 = f_ts[i - 1], f_ts[i]
+        t0, t1 = (f_ts[i - 1] if window_us is None else f_ts[i] - window_us), f_ts[i]
         rat = gg.window_gaze_rates(rate_ts, rate_yaw, rate_pit, t0, t1)
         win = gg.window_gaze_samples(g_ts, g_yaw, g_pit, t0, t1, project=project)
         n_bins = int(round(imu_hz * (t1 - t0) / 1e6))

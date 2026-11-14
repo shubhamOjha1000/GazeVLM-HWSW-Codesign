@@ -214,7 +214,7 @@ def identity_cmd(a):
 STATUS = re.compile(r"ok \((\d+) records.*?, (\d+) s\)")
 
 
-def estimate(timing):
+def estimate(timing, totals=None):
     """-> dict(seconds, questions, videos, by_questions_h, by_videos_h) from a timing run's run_info_flops.json and records."""
     with open(os.path.join(timing, "run_info_flops.json")) as f:
         status = json.load(f)["status"]
@@ -226,12 +226,12 @@ def estimate(timing):
         seconds += int(m.group(2))
     uniform = read_jsonl(os.path.join(timing, "uniform.jsonl"))
     q, v = len({r["qid"] for r in uniform}), len({r["video"] for r in uniform})
-    total_q, total_v = prepare.TOTAL
+    total_q, total_v = totals or prepare.TOTAL                # (questions, videos) of the full run; EgoEverything's by default
     return dict(seconds=seconds, questions=q, videos=v, by_questions_h=seconds * total_q / q / 3600, by_videos_h=seconds * total_v / v / 3600)
 
 
 def estimate_cmd(a):
-    e = estimate(a.timing)
+    e = estimate(a.timing, (a.questions, a.videos) if a.questions else None)
     lo, hi = sorted((e["by_questions_h"], e["by_videos_h"]))
     print(f"timing run: {e['seconds']} s of scoring for {e['questions']} questions on {e['videos']} videos", flush=True)
     print(f"PROJECTED full run: about {lo:.1f} to {hi:.1f} hours of scoring (scaled by questions and by videos), plus about 10 minutes "
@@ -244,7 +244,7 @@ def records_cmd(a):
     with open(a.plan) as f:
         plan = json.load(f)
     rows = a.rows.split(",")
-    total_q, _ = prepare.TOTAL
+    total_q = a.questions or prepare.TOTAL[0]
     want = {}
     for ln in plan["lines"]:
         want.setdefault(ln["row"], set()).add(ln["condition"])
@@ -320,10 +320,13 @@ def main(argv=None):
     s.set_defaults(run=identity_cmd)
     s = sub.add_parser("estimate")
     s.add_argument("--timing", required=True)
+    s.add_argument("--questions", type=int, help="the full run's questions (default: EgoEverything's 5,985), with --videos")
+    s.add_argument("--videos", type=int, help="the full run's videos or clips (default: 350)")
     s.set_defaults(run=estimate_cmd)
     s = sub.add_parser("records")
     for k in ("--folder", "--plan", "--rows"):
         s.add_argument(k, required=True)
+    s.add_argument("--questions", type=int, help="questions per planned condition (default: EgoEverything's 5,985)")
     s.set_defaults(run=records_cmd)
     s = sub.add_parser("vs2p2b")
     for k in ("--ours", "--other", "--out"):

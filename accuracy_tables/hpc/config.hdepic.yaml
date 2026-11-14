@@ -1,0 +1,18 @@
+# HD-EPIC's gaze questions on SmolVLM2-2.2B (runbook section 17). `dataset: hdepic` makes common.load_data read them through
+# accuracy_tables/hpc/hdepic/load.py; no other config has the key. Everything not set here keeps the defaults in accuracy_tables/common.py,
+# which are section 14's settings: K, SmolVLM's 64-frame cap and 17 tokens per foveated frame, the budgets, the gate's policy and every
+# baseline's parameters. Don't change them. Every path is derived data under $GV_ROOT/data/hdepic/, outside the repository; HD-EPIC itself
+# ($HDEPIC_ROOT) is only read, by the step 0 to 4 tools.
+dataset: hdepic
+paths:
+  folds_dir: ${GV_ROOT}/data/hdepic/folds                        # the gate's rows (step 2)
+  gate_ckpt_dir: ${GV_ROOT}/data/runs/eyehead                    # the 5 fold models, averaged: HD-EPIC is unseen
+  oof_cache: ${GV_ROOT}/data/hdepic/preds.csv                    # their predictions, so oof_predictions is never called
+  questions_json: ${GV_ROOT}/data/hdepic/questions.json          # the manifest (step 4)
+  links_json: null
+  frames_cache_dir: ${GV_ROOT}/data/hdepic/frames                # never used: every clip has its frames and meta.json
+  frames_local_dir: ${GV_ROOT}/data/hdepic/frames                # step 3
+  raw_download_dir: ${GV_ROOT}/data/hdepic/raw                   # never used
+  out_dir: ${GV_ROOT}/results/default                            # the jobs pass --out-dir
+run:
+  videos: all

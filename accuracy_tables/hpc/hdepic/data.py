@@ -33,6 +33,44 @@ def video_dir(video):
     return os.path.join(root(), "videos", video)
 
 
+# derived data, all under $GV_ROOT/data/hdepic/ (steps 1 to 4)
+def plan_json():
+    return os.path.join(derived_root(), "plan.json")
+
+
+def gaze_npz(video):
+    return os.path.join(derived_root(), "gaze", f"{video}.npz")
+
+
+def rows_csv(pseudo):
+    return os.path.join(derived_root(), "rows", f"{pseudo}.csv")
+
+
+def folds_dir():
+    return os.path.join(derived_root(), "folds")
+
+
+def preds_csv():
+    return os.path.join(derived_root(), "preds.csv")
+
+
+def frames_dir(pseudo):
+    return os.path.join(derived_root(), "frames", pseudo)
+
+
+def questions_json():
+    return os.path.join(derived_root(), "questions.json")
+
+
+def sheets_dir():
+    return os.path.join(derived_root(), "sheets")
+
+
+def read_plan():
+    with open(plan_json()) as f:
+        return json.load(f)
+
+
 def questions_dir():
     return os.path.join(root(), "annotations", "vqa-benchmark")
 
