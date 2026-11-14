@@ -359,6 +359,7 @@ def checks_cmd(a):
     cfg, data, ad, be = setup(model, a.workers)
     out = sw.model_dir(model, "checks")
     os.makedirs(out, exist_ok=True)
+    print(f"FOLDER {model}: {sw.model_dir(model)} on {torch.cuda.get_device_name()}", flush=True)
     snap = check_snapshot(model, ad)
     rep = run.check_parity(ad, data, model)
     bad = tokens_table(model, be, data["uniform"][data["videos"][0]][len(data["uniform"][data["videos"][0]]) // 2])
@@ -721,7 +722,7 @@ def plan_cmd(a):
           f"{[ln['name'] for ln in lines if ln['rho_short']] or 'none'}", flush=True)
     for method, settings in sw.method_settings().items():
         print(f"   {method}: rho levels {sorted(settings)}", flush=True)
-    print(f"PROJECTED RUN: {hours:.2f} GPU-hours on one {sw.MODELS[model]['gpu']} for {len(lines)} conditions x {sw.N_DEV} questions "
+    print(f"PROJECTED RUN: {hours:.2f} GPU-hours on one {torch.cuda.get_device_name()} for {len(lines)} conditions x {sw.N_DEV} questions "
           f"(timing on {TIMING_QUESTIONS} questions each)", flush=True)
     sw.write_json(path, plan)
     ad.free()

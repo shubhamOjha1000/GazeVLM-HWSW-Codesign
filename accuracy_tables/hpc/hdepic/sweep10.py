@@ -92,8 +92,22 @@ def questions_json():
     return root("questions.json")
 
 
+def run_name(model):
+    """A model's sweep folder: SWEEP10_RUN, which the job files set (the model's key; <model>_a100 for a SmolVLM run on an A100, kept
+    apart from its B200 run, because answers differ between GPU types), else the model's key."""
+    name = os.environ.get("SWEEP10_RUN") or model
+    if name not in (model, f"{model}_a100"):
+        sys.exit(f"SWEEP10_RUN={name} is neither {model} nor {model}_a100. Stop and tell the user.")
+    return name
+
+
 def model_dir(model, *parts):
-    return root(model, *parts)
+    return root(run_name(model), *parts)
+
+
+def runs():
+    """[(model, folder)] of every sweep folder with a plan: each model's own, then its A100 run's if there is one."""
+    return [(m, name) for m in MODELS for name in (m, f"{m}_a100") if os.path.exists(root(name, "plan.json"))]
 
 
 def v2_path(*parts):
@@ -686,13 +700,10 @@ def summary_cmd(a):
     pd.set_option("display.width", 250)
     pd.set_option("display.max_columns", 40)
     tables, best, effects = [], [], []
-    for model in MODELS:
-        path = model_dir(model, "plan.json")
-        if not os.path.exists(path):
-            print(f"{model}: no plan, skipped", flush=True)
-            continue
-        plan = read_json(path)
-        answers = {ln["name"]: read_jsonl(model_dir(model, "answers", f"{ln['name']}.jsonl")) for ln in plan["lines"]}
+    for model, name in runs():
+        plan = read_json(root(name, "plan.json"))
+        answers = {ln["name"]: read_jsonl(root(name, "answers", f"{ln['name']}.jsonl")) for ln in plan["lines"]}
+        label, model = f"{MODELS[model]['name']} on {plan.get('gpu')}", name
         missing = [n for n, r in answers.items() if len({int(x["qid"]) for x in r}) != N_DEV]
         if missing:
             print(f"{model}: INCOMPLETE: {missing}", flush=True)
@@ -702,7 +713,7 @@ def summary_cmd(a):
         effects += effect_rows(model, answers)
         cols = ["condition", "rho", "rho_real", "K", "tokens_per_frame", "image_tokens_per_q", "planned_pct", "flops_pct", "nearest_only",
                 "n", "accuracy", "ci_low", "ci_high", "d_uniform", "d_low", "d_high"]
-        print(f"\n=== {model} ({MODELS[model]['name']}): 10% of its Uniform-64 FLOPs; target 10.000%; dev only", flush=True)
+        print(f"\n=== {model} ({label}): 10% of its Uniform-64 FLOPs; target 10.000%; dev only", flush=True)
         print(pd.DataFrame(t)[cols].round(3).to_string(index=False), flush=True)
         print(f"--- {model}: each method's best rho (highest dev accuracy; ties: FLOPs nearest 10%, then the larger rho)", flush=True)
         print(pd.DataFrame([b for b in best if b["model"] == model]).drop(columns="model").round(3).to_string(index=False), flush=True)

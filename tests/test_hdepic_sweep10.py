@@ -217,12 +217,16 @@ def test_the_jobs_hold_their_gpu_type_and_write_only_sweep10():
         assert "--no-parity" not in text and "SBATCH_ACCOUNT" not in text and "HDEPIC_ROOT=${HDEPIC_ROOT:-/scratch/$USER/hdepic}" in text
         assert all("results/" not in line for line in text.splitlines() if not line.lstrip().startswith(("#", "smolvlm", "qwen")))
     assert "#SBATCH --gres=gpu:b200:1" in b200 and "GPU=B200" in b200 and "smolvlm256)" in b200 and "qwen" not in b200.split("set -euo")[1]
-    assert "#SBATCH --gres=gpu:a100:1" in a100 and "GPU=A100" in a100 and "qwen3)" in a100 and "smolvlm)" not in a100
+    assert "#SBATCH --gres=gpu:a100:1" in a100 and "GPU=A100" in a100 and "qwen3)" in a100
+    assert "smolvlm) TAG=smolvlm22-a100; RUN=smolvlm_a100;" in a100 and "smolvlm256) TAG=smolvlm256-a100; RUN=smolvlm256_a100;" in a100
+    assert a100.count("RGPU=other") == 2 and a100.count("RGPU=same") == 2 and "compare_records --new $D/checks/regression/$M" in a100
+    assert "--report" in a100 and "D=$GV_ROOT/data/hdepic/sweep10/$RUN" in a100 and "export SWEEP10_RUN=$RUN" in a100
+    assert "export SWEEP10_RUN=$M" in b200 and "RUN=" not in b200.replace("SWEEP10_RUN=", "")
     assert "gres" not in cpu and "gres" not in frames
     for text in (b200, a100):
         assert '--comment="preemption=yes;requeue=true"' in text and "#SBATCH --requeue" in text and "#SBATCH --signal=B:USR1@900" in text
         assert "--expect $GPU" in text and "--same-as $D/gpu_types.txt" in text and "WANT=sweep10-$TAG-$MODE" in text
-        assert "same --new $D/checks/regression/$M --ref $REF --rows uniform,blind,budget" in text and "D=$GV_ROOT/data/hdepic/sweep10/$M" in text
+        assert "same --new $D/checks/regression/$M --ref $REF --rows uniform,blind,budget" in text
         assert "GPU MEAN: last %d min" in text and "while sleep 1800" in text and 'chmod a-w "$D/plan.json"' in text
         assert "repair_results $D/answers" in text and "$G checks --model $M" in text and "$G run --model $M" in text
     assert "results/smolvlm_flops/smolvlm; RQ=20" in b200 and "results/smolvlm256_flops/smolvlm256; RQ=10" in b200
@@ -325,3 +329,19 @@ def test_the_plan_checks_the_knob_ranges_before_the_slow_counting():
     src = open(os.path.join(REPO, "accuracy_tables", "hpc", "hdepic", "sweep10_gpu.py")).read()
     body = src.split("def make_lines(")[1].split("\ndef ")[0]
     assert body.index("knob_preflight(") < body.index("baseline_knobs(")
+
+
+def test_a_smolvlm_run_on_an_a100_has_its_own_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("GV_ROOT", str(tmp_path))
+    monkeypatch.setenv("HDEPIC_ROOT", str(tmp_path / "hdepic"))
+    monkeypatch.delenv("SWEEP10_RUN", raising=False)
+    base = os.path.join(str(tmp_path), "data", "hdepic", "sweep10")
+    assert sw.model_dir("smolvlm") == os.path.join(base, "smolvlm")
+    monkeypatch.setenv("SWEEP10_RUN", "smolvlm_a100")
+    assert sw.model_dir("smolvlm", "plan.json") == os.path.join(base, "smolvlm_a100", "plan.json")
+    with pytest.raises(SystemExit, match="SWEEP10_RUN=smolvlm_a100 is neither qwen3 nor qwen3_a100"):
+        sw.model_dir("qwen3")
+    for name in ("smolvlm", "smolvlm_a100", "qwen3"):
+        os.makedirs(os.path.join(base, name))
+        open(os.path.join(base, name, "plan.json"), "w").close()
+    assert sw.runs() == [("smolvlm", "smolvlm"), ("smolvlm", "smolvlm_a100"), ("qwen3", "qwen3")]

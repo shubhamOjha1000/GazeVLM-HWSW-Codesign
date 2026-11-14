@@ -3425,6 +3425,12 @@ sbatch --job-name=sweep10-qwen3-checks accuracy_tables/hpc/hdepic_sweep10_a100.S
 - **The identity check:** `ours_res_1.00`, `nogate_res_1.00` and the twoview's whole frame on Uniform's frames give Uniform's answers at `max_prob_diff 0.0`. The whole-frame view must equal the stock input pixel for pixel.
 - **Stop on** `ANSWERS DIFFER`, `SNAPSHOT DIFFERS`, `SNAPSHOT UNREADABLE`, `CHECKS FAILED`, `ATTENTION NOT COUNTED`, `c DIFFERS FROM CONFIG` or a traceback. **STOP after S1.**
 
+**SmolVLM on an A100.** `hdepic_sweep10_a100.SBATCH` also takes `smolvlm` and `smolvlm256`, with job names `sweep10-smolvlm22-a100-<mode>` and `sweep10-smolvlm256-a100-<mode>`.
+- **Its own folder:** such a run writes `data/hdepic/sweep10/<model>_a100/`, apart from the B200 run. Answers differ between GPU types, so the two are never mixed, and checks, plan and run of one folder all run on one GPU type.
+- **Its regression:** no earlier SmolVLM run was on an A100, so its checks compare against section 14's (100 records) or section 16's (50) B200 records with `compare_records --report`. Frames and tokens must match (`TOKENS MATCH`, else the job stops); the answers that differ are counted for the user.
+- **GPU use:** SmolVLM does little GPU work per frame, so on an A100 the 30-minute means matter even more: `GPU LOW`, stop and tell the user.
+- **S4** reports each folder as its own column.
+
 **S2: the plan (a short GPU job per model).** Ask the user first. The job names are `sweep10-<smolvlm22|smolvlm256|qwen25|qwen3>-plan`, with mode `plan`.
 - **What it prints:** K' for every condition at 10%, the baselines' knobs, every condition checked on 2 questions under the counter, then a timing run.
 - **Expect** the table (rho, real rho, tokens per frame, K', knob, planned %, `nearest_only`), then `PROJECTED RUN: <h> GPU-hours` and `PLAN WRITTEN`. The plan is then read-only.

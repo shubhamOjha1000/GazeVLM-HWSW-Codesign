@@ -49,6 +49,7 @@ fi
 GPU=B200
 W=16
 D=$GV_ROOT/data/hdepic/sweep10/$M
+export SWEEP10_RUN=$M         # sweep10_gpu writes to this folder (a SmolVLM run on an A100 writes <model>_a100/ instead)
 G=accuracy_tables.hpc.hdepic.sweep10_gpu
 C=accuracy_tables.hpc.all350.smolvlm256_checks
 LOG=$GV_ROOT/logs/gpu_${SLURM_JOB_NAME}_${SLURM_JOB_ID}.csv

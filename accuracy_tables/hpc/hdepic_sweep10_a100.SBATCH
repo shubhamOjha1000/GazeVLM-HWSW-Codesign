@@ -13,14 +13,20 @@
 #SBATCH --dependency=singleton
 #SBATCH --output=/scratch/%u/GazeVLM/logs/%x_%j.log
 #
-# The 10% FLOPs sweep on one A100 (diagnostic dev work: nothing feeds a results table), Qwen2.5-VL-3B or Qwen3-VL-4B. The A100 is set
-# here; never override --gres. Submit from the repository root, with the job name its model and mode need:
+# The 10% FLOPs sweep on one A100 (diagnostic dev work: nothing feeds a results table): Qwen2.5-VL-3B, Qwen3-VL-4B, or SmolVLM2-2.2B or
+# -256M on an A100. The A100 is set here; never override --gres. Submit from the repository root, with the job name its model and mode need:
 #   sbatch --job-name=sweep10-qwen25-checks accuracy_tables/hpc/hdepic_sweep10_a100.SBATCH qwen2.5 checks
 #   sbatch --job-name=sweep10-qwen25-plan accuracy_tables/hpc/hdepic_sweep10_a100.SBATCH qwen2.5 plan
 #   sbatch --job-name=sweep10-qwen25-run accuracy_tables/hpc/hdepic_sweep10_a100.SBATCH qwen2.5 run
-#   (Qwen3-VL-4B: model qwen3, job names sweep10-qwen3-<mode>)
-# checks  S1: the model's own earlier regression (50 of section 15's records on an A100, only read), then sweep10_gpu checks (parity,
-#         tokens, identity, threads, the FLOPs units, exact FLOPs)
+#   (Qwen3-VL-4B: model qwen3, job names sweep10-qwen3-<mode>; SmolVLM2-2.2B: model smolvlm, sweep10-smolvlm22-a100-<mode>;
+#    SmolVLM2-256M: model smolvlm256, sweep10-smolvlm256-a100-<mode>)
+# A SmolVLM run here writes $GV_ROOT/data/hdepic/sweep10/<model>_a100/, apart from its B200 run in <model>/: answers differ between GPU
+# types, so the two are never mixed, and every step (checks, plan, run) of one folder runs on one GPU type.
+# checks  S1: the model's own earlier regression, only read, then sweep10_gpu checks (parity, tokens, identity, threads, the FLOPs units,
+#         exact FLOPs). Qwen: 50 of section 15's records, also on an A100: SAME ANSWERS. SmolVLM: no earlier SmolVLM run was on an A100,
+#         so the A100 regression is the cross-GPU one (compare_records --report) against section 14's 100 records (2.2B) or section 16's 50
+#         (256M), both on a B200: frames and tokens must match exactly (TOKENS MATCH, else the job stops), and the answers that differ
+#         are counted for the user (GPU rounding on near-ties).
 # A100 nodes cancel jobs under 50% GPU use: frames load on 8 threads ahead of the GPU (the next questions' too), and the 30-minute means
 # below show it. A warning or a cancellation: stop and tell the user.
 # plan    S2: sweep10_gpu plan (K' per condition, the knobs, FLOPs checked, timing, the projected hours); the plan is then read-only
@@ -31,13 +37,15 @@
 set -euo pipefail
 source "$SLURM_SUBMIT_DIR/accuracy_tables/hpc/common.sh"
 export HDEPIC_ROOT=${HDEPIC_ROOT:-/scratch/$USER/hdepic}
-USAGE="usage: hdepic_sweep10_a100.SBATCH <qwen2.5|qwen3> <checks|plan|run>"
+USAGE="usage: hdepic_sweep10_a100.SBATCH <qwen2.5|qwen3|smolvlm|smolvlm256> <checks|plan|run>"
 M=${1:?$USAGE}
 MODE=${2:?$USAGE}
 case "$M" in
-    qwen2.5) TAG=qwen25; RCONFIG=accuracy_tables/hpc/config.all350.yaml; REF=$GV_ROOT/results/qwen25_flops/qwen2.5; RQ=10 ;;
-    qwen3) TAG=qwen3; RCONFIG=accuracy_tables/hpc/config.all350.yaml; REF=$GV_ROOT/results/qwen3_flops/qwen3; RQ=10 ;;
-    *) echo "$USAGE (the SmolVLM models run on B200s: hdepic_sweep10_b200.SBATCH)" >&2; exit 1 ;;
+    qwen2.5) TAG=qwen25; RUN=$M; RCONFIG=accuracy_tables/hpc/config.all350.yaml; REF=$GV_ROOT/results/qwen25_flops/qwen2.5; RQ=10; RGPU=same ;;
+    qwen3) TAG=qwen3; RUN=$M; RCONFIG=accuracy_tables/hpc/config.all350.yaml; REF=$GV_ROOT/results/qwen3_flops/qwen3; RQ=10; RGPU=same ;;
+    smolvlm) TAG=smolvlm22-a100; RUN=smolvlm_a100; RCONFIG=accuracy_tables/hpc/config.all350.yaml; REF=$GV_ROOT/results/smolvlm_flops/smolvlm; RQ=20; RGPU=other ;;
+    smolvlm256) TAG=smolvlm256-a100; RUN=smolvlm256_a100; RCONFIG=accuracy_tables/hpc/config.smolvlm256.yaml; REF=$GV_ROOT/results/smolvlm256_flops/smolvlm256; RQ=10; RGPU=other ;;
+    *) echo "$USAGE" >&2; exit 1 ;;
 esac
 case "$MODE" in
     checks|plan|run) ;;
@@ -50,9 +58,15 @@ if [ "$SLURM_JOB_NAME" != "$WANT" ]; then
 fi
 GPU=A100
 W=8
-D=$GV_ROOT/data/hdepic/sweep10/$M
+D=$GV_ROOT/data/hdepic/sweep10/$RUN
+export SWEEP10_RUN=$RUN       # sweep10_gpu writes to this folder
 G=accuracy_tables.hpc.hdepic.sweep10_gpu
 C=accuracy_tables.hpc.all350.smolvlm256_checks
+if [ "$RGPU" = same ]; then    # the reference ran on an A100 too: every answer must match
+    REGRESS="python -u -m $C same --new $D/checks/regression/$M --ref $REF --rows uniform,blind,budget"
+else                           # the reference ran on a B200: frames and tokens must match, differing answers are counted
+    REGRESS="python -u -m accuracy_tables.hpc.newvideos.compare_records --new $D/checks/regression/$M --ref $REF --rows uniform,blind,budget --report"
+fi
 LOG=$GV_ROOT/logs/gpu_${SLURM_JOB_NAME}_${SLURM_JOB_ID}.csv
 export OMP_NUM_THREADS=1      # 8 loading threads each starting 8 OpenMP threads would fight over the 8 cores
 NV=--nv
@@ -81,7 +95,7 @@ case "$MODE" in
             && V=\$(python -m $C pick-videos --questions $RQ) \
             && python -u -m accuracy_tables.run --config $RCONFIG --model $M --rows uniform,blind,budget --videos \$V --max-questions $RQ \
                 --prefetch-workers 8 --out-dir $D/checks/regression --keep-going \
-            && python -u -m $C same --new $D/checks/regression/$M --ref $REF --rows uniform,blind,budget \
+            && $REGRESS \
             && python -u -m $G checks --model $M --workers $W \
             && python -u -m accuracy_tables.hpc.all350.gpu_summary $LOG" &
         wait $!
