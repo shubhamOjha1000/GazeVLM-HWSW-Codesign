@@ -51,7 +51,7 @@ TWO_VIEW_BASELINES = ("gazevlm2",)
 MODELS = {
     "smolvlm": dict(name="SmolVLM2-2.2B", gpu="B200", base=42, grid=9, stock_side=384, stock_tokens=81, snapshot="482adb5"),
     "smolvlm256": dict(name="SmolVLM2-256M", gpu="B200", base=64, grid=8, stock_side=512, stock_tokens=64, snapshot="9cda5c1"),
-    "qwen2.5": dict(name="Qwen2.5-VL-3B", gpu="A100", base=28, grid=16, stock_side=448, stock_tokens=256, snapshot=None),
+    "qwen2.5": dict(name="Qwen2.5-VL-3B", gpu="A100", base=28, grid=16, stock_side=448, stock_tokens=256, snapshot="66285546"),  # section 15's
     "qwen3": dict(name="Qwen3-VL-4B", gpu="A100", base=32, grid=16, stock_side=512, stock_tokens=256, snapshot=None),
 }
 BOOTSTRAP, BOOTSTRAP_SEED = 2000, 0
@@ -120,12 +120,14 @@ def write_json(path, obj):
 
 
 # ---------------------------------------------------------------------------- the rho rule and the representations
-def pick(cands, rho, scale, floor=FLOOR):
+def pick(cands, rho, scale, floor=FLOOR, name="this method"):
     """cands [(amount, setting)] -> the one whose amount comes closest to rho x scale among those at or above floor x scale, the larger
-    amount on a tie. Amounts are tokens per frame (scale = the stock tokens) or token shares (scale = 1)."""
+    amount on a tie. Amounts are tokens per frame (scale = the stock tokens) or token shares (scale = 1). name: the row, for the error."""
     ok = [c for c in cands if c[0] >= floor * scale - 1e-9]
     if not ok:
-        raise ValueError(f"no setting keeps {floor} x {scale}: {cands[:5]}...")
+        top = max(cands, key=lambda c: c[0]) if cands else (float("nan"), None)
+        raise ValueError(f"{name}: no setting keeps {floor} x {scale} (rho {rho:g}); the most any of its {len(cands)} settings keeps is "
+                         f"{top[0]:.4g}, at {top[1]}")
     return min(ok, key=lambda c: (abs(c[0] - rho * scale), -c[0]))
 
 

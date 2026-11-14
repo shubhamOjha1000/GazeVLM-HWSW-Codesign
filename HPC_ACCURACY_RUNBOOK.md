@@ -3423,12 +3423,13 @@ sbatch --job-name=sweep10-qwen3-checks accuracy_tables/hpc/hdepic_sweep10_a100.S
     6. on the 2.2B only, `BLIND RECHECK: ... 0 differ`;
     7. `CHECKS DONE: <model>`, then the GPU's mean and lowest 30-minute mean.
 - **The identity check:** `ours_res_1.00`, `nogate_res_1.00` and the twoview's whole frame on Uniform's frames give Uniform's answers at `max_prob_diff 0.0`. The whole-frame view must equal the stock input pixel for pixel.
-- **Stop on** `ANSWERS DIFFER`, `SNAPSHOT DIFFERS`, `CHECKS FAILED`, `ATTENTION NOT COUNTED`, `c DIFFERS FROM CONFIG` or a traceback. **STOP after S1.**
+- **Stop on** `ANSWERS DIFFER`, `SNAPSHOT DIFFERS`, `SNAPSHOT UNREADABLE`, `CHECKS FAILED`, `ATTENTION NOT COUNTED`, `c DIFFERS FROM CONFIG` or a traceback. **STOP after S1.**
 
 **S2: the plan (a short GPU job per model).** Ask the user first. The job names are `sweep10-<smolvlm22|smolvlm256|qwen25|qwen3>-plan`, with mode `plan`.
 - **What it prints:** K' for every condition at 10%, the baselines' knobs, every condition checked on 2 questions under the counter, then a timing run.
 - **Expect** the table (rho, real rho, tokens per frame, K', knob, planned %, `nearest_only`), then `PROJECTED RUN: <h> GPU-hours` and `PLAN WRITTEN`. The plan is then read-only.
-- **Stop on** `FLOPS DIFFER` or `PROMPT DIFFERS`. **STOP for the user's OK.**
+- **Knob ranges:** GazeVLM's rho, FastVID's r and PruneVid's beta are searched over their whole ranges (to 1), past calibrate.py's grids, which stop under the shares the sweep needs. A baseline whose whole range keeps less than rho is flagged `RHO SHORT` (column `rho_short`) and runs at its nearest setting above the floor; the user decides before S3.
+- **Stop on** `FLOPS DIFFER`, `PROMPT DIFFERS` or `RHO UNREACHABLE` (a baseline that can't keep 0.50 at all, named). **STOP for the user's OK.**
 
 **S3: the run (all 4 jobs together, one block).** The GPU types are set in the job files; never override `--gres`.
 

@@ -237,3 +237,53 @@ def test_the_runbook_note():
                  "PLAN WRITTEN", "RUN DONE", "SUMMARY DONE", "hdepic_sweep10_b200.SBATCH", "hdepic_sweep10_a100.SBATCH", "GPU LOW",
                  "diagnostic", "no winner"):
         assert text in section, text
+
+
+def test_the_rho_rules_error_names_the_row():
+    with pytest.raises(ValueError, match=r"gazevlm: no setting keeps 0.5 x 1.0 \(rho 0.5\); the most any of its 2 settings keeps is 0.3, at 0.95"):
+        sw.pick([(0.1, 0.01), (0.3, 0.95)], 0.5, 1.0, name="gazevlm")
+
+
+def test_each_knob_is_searched_over_its_whole_range():
+    pytest.importorskip("torch")
+    from accuracy_tables import calibrate as cal
+    from accuracy_tables.hpc.hdepic import sweep10_gpu as g
+    for grid, old in ((g.GRID_RHO, cal.GRID_RHO), (g.GRID_R, cal.GRID_R), (g.GRID_BETA, cal.GRID_BETA)):
+        assert grid == sorted(set(grid)) and grid[-1] == 1.0 and 0 < grid[0] and max(old) < 1.0
+    assert set(cal.GRID_RHO) <= set(g.GRID_RHO) and 1 - g.GRID_RHO[-2] < 1e-9               # the fine steps towards the whole frame
+    cfg = common._merge(common.DEFAULTS, {})
+    assert g.knobs_key(cfg, 9) != cal.counts_key(cfg, 9)                                     # calibrate's counts files are never reused
+
+
+def test_gazevlms_share_reaches_the_floor_only_near_rho_1():
+    pytest.importorskip("torch")
+    from accuracy_tables import calibrate as cal
+    from accuracy_tables.hpc.hdepic import sweep10_gpu as g
+    gz = common.DEFAULTS["gazevlm"]
+    pre = [cal.heat_prefix(dict(gaze=(0.5, 0.5), gaze_trace=[]), gz)]
+    share = lambda rho: cal.gazevlm_tokens(pre, rho, gz, 9) / 81
+    assert share(0.01) == 13 / 81 and share(0.95) == 29 / 81                                # r_min's 3 x 3 box + the thumbnail; 5 x 5 at 0.95
+    assert max(share(r) for r in cal.GRID_RHO) < 0.5                                         # calibrate's grid can't reach the floor
+    assert max(share(r) for r in g.GRID_RHO) >= 0.75                                         # the whole frame and the thumbnail at rho 1
+    assert sw.pick([(share(r), r) for r in g.GRID_RHO], 0.5, 1.0)[0] >= 0.5
+
+
+def test_knob_choices_flag_a_short_row_and_name_an_unreachable_one():
+    pytest.importorskip("torch")
+    from accuracy_tables.hpc.hdepic import sweep10_gpu as g
+    cands = dict(streamingtom=[(0.25, 0.25), (0.5, 0.5), (0.75, 0.75)], fastvid=[(0.4, 0.5), (0.7, 1.0)])
+    out, short = g.knob_choices(cands, 0.75, 7)
+    assert out == dict(streamingtom=(0.75, 0.75), fastvid=(0.7, 1.0)) and short == dict(fastvid=(0.7, 1.0))
+    with pytest.raises(SystemExit, match="RHO UNREACHABLE at rho 0.50 on Uniform K'=7: gazevlm: no setting keeps"):
+        g.knob_choices(dict(cands, gazevlm=[(0.1, 0.01), (0.36, 0.95)]), 0.5, 7)
+
+
+def test_the_snapshot_is_read_from_the_cached_files_path():
+    pytest.importorskip("torch")
+    from accuracy_tables.hpc.hdepic import sweep10_gpu as g
+    h = "9cda5c165b28c68a52e9bb542d2b89f0f6963709"
+    path = os.path.join("/hf", "hub", "models--HuggingFaceTB--SmolVLM2-256M-Video-Instruct", "snapshots", h, "config.json")
+    assert g.snapshot_from_path(path, "HuggingFaceTB/SmolVLM2-256M-Video-Instruct") == h
+    assert g.snapshot_from_path(path, "HuggingFaceTB/SmolVLM2-2.2B-Instruct") is None                # another repo's folder
+    assert g.snapshot_from_path(None, "x/y") is None and g.snapshot_from_path(object(), "x/y") is None
+    assert sw.MODELS["qwen2.5"]["snapshot"] == "66285546" and sw.MODELS["smolvlm256"]["snapshot"] == "9cda5c1"

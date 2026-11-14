@@ -38,6 +38,14 @@ from accuracy_tables.hpc.hdepic import sweep10_views as views
 from accuracy_tables.models import ADAPTERS, build_messages
 
 IDENTITY_QUESTIONS, THREAD_QUESTIONS, VERIFY_QUESTIONS, TIMING_QUESTIONS, BLIND_RECHECK = 20, 10, 2, 8, 50
+# Each knob over its whole range. calibrate.py's grids (sections 14 to 16, unchanged) stop at GazeVLM's rho 0.95, FastVID's r 0.505 and
+# PruneVid's beta 0.60, which keep under the shares the sweep needs: GazeVLM's rho is a gaze-mass fraction, and the box holding 95% of
+# a Gaussian of sigma 0.1 of the side is about half the side, a third of the tokens. Its share climbs steeply towards rho = 1 (the whole
+# frame), hence the fine steps of 1 - rho down to 1e-10 and rho = 1 itself.
+GRID_RHO = sorted(set(cal.GRID_RHO) | {round(1 - 10 ** (-x / 20), 12) for x in range(27, 201)} | {1.0})
+GRID_R = [round(0.005 * i, 3) for i in range(2, 201)]            # 0.01 .. 1.00
+GRID_BETA = [round(0.01 * i, 2) for i in range(1, 101)]          # 0.01 .. 1.00
+RHO_SHORT_PTS = 0.0                                              # a method whose whole range keeps less than rho: flagged rho_short
 PROMPT_QUESTIONS, PROMPT_FRAMES = 24, (1, 4, 16, 64)
 
 
@@ -61,22 +69,33 @@ def setup(model, workers):
     return cfg, data, ad, be
 
 
+def snapshot_from_path(path, model_id):
+    """The commit hash in a cached file's path, <hub>/models--<org>--<name>/snapshots/<hash>/<file>, or None if the path isn't that."""
+    if not isinstance(path, str):
+        return None
+    parts = os.path.normpath(path).split(os.sep)
+    if len(parts) >= 4 and parts[-3] == "snapshots" and parts[-4] == "models--" + model_id.replace("/", "--"):
+        return parts[-2]
+    return None
+
+
 def snapshot(ad):
-    h = getattr(ad.model.config, "_commit_hash", None)
-    if not h:
-        try:
-            from huggingface_hub import snapshot_download
-            h = os.path.basename(snapshot_download(ad.model_id, local_files_only=True, revision=ad.download_kwargs().get("revision")))
-        except Exception:
-            h = None
-    return h
+    """(the snapshot the model's files were loaded from, its config.json path, the config's own _commit_hash). The path is resolved the way
+    from_pretrained resolves it from the local cache: at the adapter's pinned revision (the 256M's) or refs/main."""
+    from huggingface_hub import try_to_load_from_cache
+    path = try_to_load_from_cache(ad.model_id, "config.json", revision=ad.download_kwargs().get("revision"))
+    return snapshot_from_path(path, ad.model_id), path, getattr(ad.model.config, "_commit_hash", None)
 
 
 def check_snapshot(model, ad):
-    h, want = snapshot(ad), sw.MODELS[model]["snapshot"]
-    print(f"SNAPSHOT {model}: {ad.model_id} at {h}" + (f" (expected {want}...)" if want else " (compare with the earlier sections' runs)"),
-          flush=True)
-    if want and not str(h or "").startswith(want):
+    h, path, attr = snapshot(ad)
+    want = sw.MODELS[model]["snapshot"]
+    print(f"SNAPSHOT {model}: {ad.model_id} at {h}, from {path}" + (f" (expected {want}...)" if want else ""), flush=True)
+    if h is None:
+        sys.exit(f"SNAPSHOT UNREADABLE: no snapshots/<hash>/config.json for {ad.model_id} in the cache. Stop and tell the user.")
+    if attr and attr != h:
+        sys.exit(f"SNAPSHOT DIFFERS: {model}'s config says {attr}, its files are {h}. Stop and tell the user.")
+    if want and not h.startswith(want):
         sys.exit(f"SNAPSHOT DIFFERS: {model} loaded {h}, the sweep expects {want}. Stop and tell the user.")
     return h
 
@@ -357,15 +376,78 @@ def checks_cmd(a):
 
 
 # ---------------------------------------------------------------------------- S2
-def quiet(line):
-    """calibrate's counts log, without a line per video."""
-    if not line.lstrip().split(" ", 1)[0].isdigit():
-        print(line, flush=True)
+def knobs_key(cfg, side):
+    """calibrate.counts_key's settings with the sweep's grids, so a file of calibrate's counts is refused rather than reused."""
+    import hashlib
+    parts = dict(grids="sweep10 whole ranges", rho=GRID_RHO, r=GRID_R, beta=GRID_BETA, K=cfg["run"]["K"], max_frames=cfg["run"]["max_frames"],
+                 side=side, gazevlm={k: cfg["gazevlm"][k] for k in ("sigma", "r_min", "thumb", "gaze")},
+                 fastvid={k: cfg["fastvid"][k] for k in ("c", "tau", "ignore", "d", "p", "beta")},
+                 prunevid=dict(tau=cfg["prunevid"]["settings"][0]["tau"], gamma=cfg["prunevid"]["gamma"], knn=cfg["prunevid"]["knn"],
+                               min_tokens=cfg["prunevid"]["min_tokens"]))
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def knob_counts(path, frames, backend, cfg, side):
+    """calibrate.resumable_counts over the sweep's grids: each clip's kept tokens at every GazeVLM rho, FastVID r and PruneVid beta, by
+    calibrate's own token arithmetic, checked against the methods' whole plans on the first clips. Saved per clip, so a rerun continues.
+    -> (kept_gz, kept_fv, kept_pv), each {knob: {clip: tokens}}."""
+    key = knobs_key(cfg, side)
+    done = cal.read_counts(path, key)
+    print(f"   {len(done)} of {len(frames)} clips already counted in {path}", flush=True)
+    g, workers, checked = cfg["gazevlm"], int(cfg["run"]["prefetch_workers"]), 0
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with torch.no_grad(), open(path, "a") as fh:
+        for v in frames:
+            if v in done:
+                continue
+            prefixes = [cal.heat_prefix(fr, g) for fr in frames[v]]
+            gaze = [cal.gazevlm_tokens(prefixes, r, g, side) for r in GRID_RHO]
+            del prefixes
+            if workers:
+                backend.prefetch(frames[v], workers)
+            states = []
+            for fr in frames[v]:
+                st = backend.frame_state(fr)
+                states.append(dict(tokens=st["tokens"], sal=st["sal"]))
+            fast, prune = cal.fastvid_counts(states, GRID_R, cfg["fastvid"]), cal.prunevid_counts(states, GRID_BETA, cfg["prunevid"])
+            if checked < cal.COUNTS_CROSS_CHECK:
+                checked += 1
+                if (fast != [cal.fastvid_kept(states, r, cfg["fastvid"]) for r in GRID_R]
+                        or prune != [cal.prunevid_kept(states, b, cfg["prunevid"]) for b in GRID_BETA]):
+                    sys.exit(f"{v}: the token arithmetic differs from the methods' own plans: stop and tell the user")
+                print(f"   {v}: the token arithmetic matches the methods' own plans at every r and beta", flush=True)
+            rec = dict(video=v, key=key, gazevlm=gaze, fastvid=fast, prunevid=prune)
+            fh.write(json.dumps(rec) + "\n")
+            fh.flush()
+            done[v] = rec
+            del states
+            torch.cuda.empty_cache()
+    of = lambda name, j: {v: done[v][name][j] for v in frames}
+    return ({r: of("gazevlm", j) for j, r in enumerate(GRID_RHO)}, {r: of("fastvid", j) for j, r in enumerate(GRID_R)},
+            {b: of("prunevid", j) for j, b in enumerate(GRID_BETA)})
+
+
+def knob_choices(cands, rho, k):
+    """{row: [(share, knob)]} -> ({row: (share, knob)} by the rho rule, {row: (most share, its knob)} for every row whose whole range keeps
+    less than rho). Stops, naming every such row, if a row can't keep the 0.50 floor at all."""
+    out, short, bad = {}, {}, []
+    for row, c in cands.items():
+        try:
+            out[row] = sw.pick(c, rho, 1.0, name=row)
+        except ValueError as ex:
+            bad.append(str(ex))
+            continue
+        top = max(c, key=lambda x: x[0])
+        if top[0] < rho - RHO_SHORT_PTS:
+            short[row] = top
+    if bad:
+        sys.exit(f"RHO UNREACHABLE at rho {rho:.2f} on Uniform K'={k}: " + "; ".join(bad) + ". Stop and tell the user.")
+    return out, short
 
 
 def baseline_knobs(ad, cfg, data_k, k, rho, counts_path):
     """Each knob-continuous single-view baseline's knob on its Uniform K' frames by the rho rule (closest to rho of the stock tokens among
-    settings keeping at least 0.50), from calibrate.py's own candidates and counts -> {row: (token share, knob)}."""
+    settings keeping at least 0.50), each knob over its whole range -> ({row: (token share, knob)}, {row: its most, if under rho})."""
     cfg_k = fc.with_knob(cfg, "uniform", None, k)
     cap = cfg_k["run"]["max_frames"].get(ad.key)
     nq = data_k["qs"].video.value_counts().to_dict()
@@ -375,17 +457,17 @@ def baseline_knobs(ad, cfg, data_k, k, rho, counts_path):
     side = ad.gazevlm_backend().side
     N = side * side
     window = int(cfg_k["dycoke"]["settings"][0]["window"])
-    kept_gz, kept_fv, kept_pv = cal.resumable_counts(counts_path, frames, ad.fastvid_backend(), cfg_k, side, quiet)
+    kept_gz, kept_fv, kept_pv = knob_counts(counts_path, frames, ad.fastvid_backend(), cfg_k, side)
     w = lambda kept: cal.weighted(kept, full, nq)
     first = {v: -(-n[v] // window) for v in n}
     cands = dict(
         streamingtom=[(w({v: n[v] * G for v in n}), G / N) for G in range(1, N + 1)],
         dycoke=[(w({v: first[v] * N + (n[v] - first[v]) * kk for v in n}), 1 - (kk + 0.5) / N) for kk in range(1, N + 1)],
         dtd=[(w({v: N + (n[v] - 1) * kk for v in n}), (N - kk + 0.5) / N) for kk in range(1, N + 1)],
-        gazevlm=[(w(kept_gz[r]), r) for r in cal.GRID_RHO],
-        fastvid=[(w(kept_fv[r]), r) for r in cal.GRID_R],
-        prunevid=[(w(kept_pv[b]), b) for b in cal.GRID_BETA])
-    return {row: sw.pick(c, rho, 1.0) for row, c in cands.items()}
+        gazevlm=[(w(kept_gz[r]), r) for r in GRID_RHO],
+        fastvid=[(w(kept_fv[r]), r) for r in GRID_R],
+        prunevid=[(w(kept_pv[b]), b) for b in GRID_BETA])
+    return knob_choices(cands, rho, k)
 
 
 def prompt_fits(model, ad, be, data, blind):
@@ -432,11 +514,13 @@ def make_lines(model, ad, cfg, data, units, p1, p2, blind, log=print):
 
     def add(name, method, kind, rho, tpf, views_, side, k, s, v, prompt=1, row=None, knob=None, rho_real=None, frames=None, **extra):
         pct = 100 * s
-        lines.append(dict(name=name, method=method, kind=kind, row=row, rho=rho, rho_real=rho_real if rho_real is not None else tpf / stock,
-                          tokens_per_frame=tpf, views=views_, side=side, K=int(k), knob=knob, v_frame=float(v), prompt=prompt,
-                          target_pct=100 * sw.BUDGET if kind not in ("uniform", "blind") else None, planned_pct=pct,
-                          miss_pts=pct - 100 * sw.BUDGET, nearest_only=sw.nearest_only(pct) if kind not in ("uniform", "blind") else False,
-                          frames_per_q=float(np.mean(frames)) if frames is not None else None, **extra))
+        line = dict(name=name, method=method, kind=kind, row=row, rho=rho, rho_real=rho_real if rho_real is not None else tpf / stock,
+                    tokens_per_frame=tpf, views=views_, side=side, K=int(k), knob=knob, v_frame=float(v), prompt=prompt,
+                    target_pct=100 * sw.BUDGET if kind not in ("uniform", "blind") else None, planned_pct=pct,
+                    miss_pts=pct - 100 * sw.BUDGET, nearest_only=sw.nearest_only(pct) if kind not in ("uniform", "blind") else False,
+                    frames_per_q=float(np.mean(frames)) if frames is not None else None, rho_short=False)
+        line.update(extra)
+        lines.append(line)
 
     add("uniform", "uniform", "uniform", 1.0, stock, 1, S, sw.K_MAX, 1.0, units["v_stock"], frames=K, row="uniform")
     add("blind", "blind", "blind", None, 0, 0, None, 0, float(flops.prefill(units["prefill"], b).sum()) / total, 0.0, rho_real=0.0,
@@ -462,7 +546,10 @@ def make_lines(model, ad, cfg, data, units, p1, p2, blind, log=print):
     for rho in sw.RHOS[:2]:
         k1, _ = sw.best_k(lambda k: share(np.minimum(k, K), rho * stock, units["v_stock"], p1))
         log(f"   counting the baselines' tokens on Uniform K'={k1} frames (rho {rho:.2f}) ...")
-        knobs = baseline_knobs(ad, cfg, inputs(k1), k1, rho, sw.model_dir(model, f"counts_K{k1}.jsonl"))
+        knobs, short = baseline_knobs(ad, cfg, inputs(k1), k1, rho, sw.model_dir(model, f"knob_counts_K{k1}.jsonl"))
+        for row, (most, at) in short.items():
+            log(f"RHO SHORT: {row} at rho {rho:.2f} keeps at most {100 * most:.2f}% of the stock tokens over its knob's whole range (at "
+                f"{at}); by the rho rule it runs at its setting nearest rho above the floor. The user decides before S3.")
         for row in sw.BASELINE_ROWS:
             if row == "avgpool":
                 s_ = sw.avgpool_side(model, rho)
@@ -477,7 +564,8 @@ def make_lines(model, ad, cfg, data, units, p1, p2, blind, log=print):
             if k is None:
                 k, _ = sw.best_k(lambda k: share(np.minimum(k, K), tpf, vf, p1))
             s = share(np.minimum(k, K), tpf, vf, p1)
-            add(f"{row}_{rho:.2f}", row, "baseline", rho, float(tpf), views_, S, k, s, vf, row=row, knob=float(knob), frames=np.minimum(k, K))
+            add(f"{row}_{rho:.2f}", row, "baseline", rho, float(tpf), views_, S, k, s, vf, row=row, knob=float(knob), frames=np.minimum(k, K),
+                rho_short=row in short)
     return lines, total, {int(q): int(k_) for q, k_ in zip(qs.qid, K)}
 
 
@@ -554,8 +642,11 @@ def plan_cmd(a):
     pd.set_option("display.width", 250)
     print(f"\n=== {model}: target 10% of its Uniform-64 FLOPs ({total / sw.N_DEV / 1e12:,.2f} TFLOPs a question on average); nearest_only: "
           f"more than {flops.NEAREST_ONLY_PTS} points off", flush=True)
-    print(t[["name", "rho", "rho_real", "tokens_per_frame", "views", "side", "K", "knob", "target_pct", "planned_pct", "miss_pts",
+    print(t[["name", "rho", "rho_real", "rho_short", "tokens_per_frame", "views", "side", "K", "knob", "target_pct", "planned_pct", "miss_pts",
              "nearest_only", "frames_per_q", "sec_per_q"]].round(4).to_string(index=False), flush=True)
+    print(f"knob ranges searched: GazeVLM rho {GRID_RHO[0]:g} to {GRID_RHO[-1]:g} ({len(GRID_RHO)} values), FastVID r {GRID_R[0]:g} to "
+          f"{GRID_R[-1]:g}, PruneVid beta {GRID_BETA[0]:g} to {GRID_BETA[-1]:g}; RHO SHORT rows: "
+          f"{[ln['name'] for ln in lines if ln['rho_short']] or 'none'}", flush=True)
     for method, settings in sw.method_settings().items():
         print(f"   {method}: rho levels {sorted(settings)}", flush=True)
     print(f"PROJECTED RUN: {hours:.2f} GPU-hours on one {sw.MODELS[model]['gpu']} for {len(lines)} conditions x {sw.N_DEV} questions "
