@@ -287,3 +287,41 @@ def test_the_snapshot_is_read_from_the_cached_files_path():
     assert g.snapshot_from_path(path, "HuggingFaceTB/SmolVLM2-2.2B-Instruct") is None                # another repo's folder
     assert g.snapshot_from_path(None, "x/y") is None and g.snapshot_from_path(object(), "x/y") is None
     assert sw.MODELS["qwen2.5"]["snapshot"] == "66285546" and sw.MODELS["smolvlm256"]["snapshot"] == "9cda5c1"
+
+
+@pytest.mark.parametrize("model", list(sw.MODELS))
+def test_every_baselines_share_rises_with_its_knob_and_reaches_both_rhos(model):
+    torch = pytest.importorskip("torch")
+    from accuracy_tables import calibrate as cal
+    from accuracy_tables.hpc.hdepic import sweep10_gpu as g
+    stock, side = sw.MODELS[model]["stock_tokens"], sw.MODELS[model]["grid"]
+    gen = torch.Generator().manual_seed(0)
+    n = {"a": 10, "b": 7}
+    gz = common.DEFAULTS["gazevlm"]
+    gazes = {v: [(0.15 + 0.07 * i, 0.8 - 0.06 * i) for i in range(k)] for v, k in n.items()}
+    pre = {v: [cal.heat_prefix(dict(gaze=p, gaze_trace=[]), gz) for p in pts] for v, pts in gazes.items()}
+    states = {v: [dict(tokens=torch.randn(stock, 16, generator=gen), sal=torch.rand(stock, generator=gen)) for _ in range(k)]
+              for v, k in n.items()}                                     # unrelated frames: FastVID and PruneVid keep what their knobs say
+    fast = {v: cal.fastvid_counts(states[v], g.GRID_R, common.DEFAULTS["fastvid"]) for v in n}
+    prune = {v: cal.prunevid_counts(states[v], g.GRID_BETA, common.DEFAULTS["prunevid"]) for v in n}
+    kept_gz = {r: {v: cal.gazevlm_tokens(pre[v], r, gz, side) for v in n} for r in g.GRID_RHO}
+    kept_fv = {r: {v: fast[v][j] for v in n} for j, r in enumerate(g.GRID_R)}
+    kept_pv = {b: {v: prune[v][j] for v in n} for j, b in enumerate(g.GRID_BETA)}
+    cands = dict(g.share_candidates(n, stock, side * side, 32, kept_gz, kept_fv, kept_pv), **g.grid_candidates(model))
+    assert set(cands) == set(sw.BASELINE_ROWS) and side * side == stock
+    assert g.knob_problems(cands, stock) == []                                # every knob connected, keeping more as it keeps more
+    for row, c in cands.items():
+        assert max(s for s, _ in c) >= 0.75, row
+    for rho in (0.5, 0.75):
+        out, short = g.knob_choices(cands, rho, 7)
+        assert not short and all(s >= 0.5 for s, _ in out.values()), (rho, short)
+    flat = dict(cands, gazevlm=[(0.106, r) for r in g.GRID_RHO])               # the bug: a share that ignores the knob
+    assert any(p.startswith("KNOB NOT CONNECTED: gazevlm") for p in g.knob_problems(flat, stock))
+    wrong = dict(cands, dtd=[(s, 1 - k) for s, k in cands["dtd"]])            # a prune knob read the wrong way round
+    assert any(p.startswith("KNOB NOT MONOTONE: dtd") for p in g.knob_problems(wrong, stock))
+
+
+def test_the_plan_checks_the_knob_ranges_before_the_slow_counting():
+    src = open(os.path.join(REPO, "accuracy_tables", "hpc", "hdepic", "sweep10_gpu.py")).read()
+    body = src.split("def make_lines(")[1].split("\ndef ")[0]
+    assert body.index("knob_preflight(") < body.index("baseline_knobs(")

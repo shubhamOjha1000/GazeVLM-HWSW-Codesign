@@ -3429,7 +3429,8 @@ sbatch --job-name=sweep10-qwen3-checks accuracy_tables/hpc/hdepic_sweep10_a100.S
 - **What it prints:** K' for every condition at 10%, the baselines' knobs, every condition checked on 2 questions under the counter, then a timing run.
 - **Expect** the table (rho, real rho, tokens per frame, K', knob, planned %, `nearest_only`), then `PROJECTED RUN: <h> GPU-hours` and `PLAN WRITTEN`. The plan is then read-only.
 - **Knob ranges:** GazeVLM's rho, FastVID's r and PruneVid's beta are searched over their whole ranges (to 1), past calibrate.py's grids, which stop under the shares the sweep needs. A baseline whose whole range keeps less than rho is flagged `RHO SHORT` (column `rho_short`) and runs at its nearest setting above the floor; the user decides before S3.
-- **Stop on** `FLOPS DIFFER`, `PROMPT DIFFERS` or `RHO UNREACHABLE` (a baseline that can't keep 0.50 at all, named). **STOP for the user's OK.**
+- **Before the slow counting** the plan checks every baseline's knob range on 24 clips (`KNOB RANGE` lines, then `KNOB RANGES OK`), a few minutes in.
+- **Stop on** `FLOPS DIFFER`, `PROMPT DIFFERS`, `KNOB RANGE FAILED` (a knob that doesn't move its share, or moves it the wrong way, named) or `RHO UNREACHABLE` (a baseline that can't keep 0.50 at all, named). **STOP for the user's OK.**
 
 **S3: the run (all 4 jobs together, one block).** The GPU types are set in the job files; never override `--gres`.
 

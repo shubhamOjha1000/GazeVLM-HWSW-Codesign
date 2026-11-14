@@ -46,6 +46,11 @@ GRID_RHO = sorted(set(cal.GRID_RHO) | {round(1 - 10 ** (-x / 20), 12) for x in r
 GRID_R = [round(0.005 * i, 3) for i in range(2, 201)]            # 0.01 .. 1.00
 GRID_BETA = [round(0.01 * i, 2) for i in range(1, 101)]          # 0.01 .. 1.00
 RHO_SHORT_PTS = 0.0                                              # a method whose whole range keeps less than rho: flagged rho_short
+PRUNE_KNOBS = ("dycoke", "dtd")                                  # knobs that say what to drop: the share falls as they rise
+CONNECTED_SPAN = 0.25                                            # a knob whose whole range moves the share less than this isn't connected
+DIP_TOKENS = dict(gazevlm=2.0)                                   # GazeVLM grows a small ROI to r_min about its centre, so its share can
+                                                                 # dip a little at tiny rho; nothing else may fall as its keep knob rises
+PREFLIGHT_CLIPS = 24                                             # clips the knob ranges are checked on before the slow counting
 PROMPT_QUESTIONS, PROMPT_FRAMES = 24, (1, 4, 16, 64)
 
 
@@ -387,16 +392,18 @@ def knobs_key(cfg, side):
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def knob_counts(path, frames, backend, cfg, side):
+def knob_counts(path, frames, backend, cfg, side, check=True):
     """calibrate.resumable_counts over the sweep's grids: each clip's kept tokens at every GazeVLM rho, FastVID r and PruneVid beta, by
-    calibrate's own token arithmetic, checked against the methods' whole plans on the first clips. Saved per clip, so a rerun continues.
-    -> (kept_gz, kept_fv, kept_pv), each {knob: {clip: tokens}}."""
+    calibrate's own token arithmetic, checked against the methods' whole plans on the first clips (check). Saved per clip, so a rerun
+    continues; path None keeps them in memory (the preflight). -> (kept_gz, kept_fv, kept_pv), each {knob: {clip: tokens}}."""
     key = knobs_key(cfg, side)
-    done = cal.read_counts(path, key)
-    print(f"   {len(done)} of {len(frames)} clips already counted in {path}", flush=True)
-    g, workers, checked = cfg["gazevlm"], int(cfg["run"]["prefetch_workers"]), 0
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with torch.no_grad(), open(path, "a") as fh:
+    done = cal.read_counts(path, key) if path else {}
+    if path:
+        print(f"   {len(done)} of {len(frames)} clips already counted in {path}", flush=True)
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    g, workers = cfg["gazevlm"], int(cfg["run"]["prefetch_workers"])
+    checked = 0 if check else cal.COUNTS_CROSS_CHECK
+    with torch.no_grad(), (open(path, "a") if path else contextlib.nullcontext()) as fh:
         for v in frames:
             if v in done:
                 continue
@@ -417,8 +424,9 @@ def knob_counts(path, frames, backend, cfg, side):
                     sys.exit(f"{v}: the token arithmetic differs from the methods' own plans: stop and tell the user")
                 print(f"   {v}: the token arithmetic matches the methods' own plans at every r and beta", flush=True)
             rec = dict(video=v, key=key, gazevlm=gaze, fastvid=fast, prunevid=prune)
-            fh.write(json.dumps(rec) + "\n")
-            fh.flush()
+            if fh is not None:
+                fh.write(json.dumps(rec) + "\n")
+                fh.flush()
             done[v] = rec
             del states
             torch.cuda.empty_cache()
@@ -445,6 +453,76 @@ def knob_choices(cands, rho, k):
     return out, short
 
 
+def share_candidates(n, stock, N, window, kept_gz, kept_fv, kept_pv, nq=None):
+    """{row: [(token share, knob)]} of the six knob-continuous baselines, calibrate.py's candidates over the sweep's grids. n: {clip: input
+    frames}; N: tokens a frame (the GazeVLM grid's side squared, the stock tokens on all four models); kept_*: knob_counts'."""
+    nq = nq or {v: 1 for v in n}
+    full = {v: n[v] * stock for v in n}
+    w = lambda kept: cal.weighted(kept, full, nq)
+    first = {v: -(-n[v] // window) for v in n}
+    return dict(
+        streamingtom=[(w({v: n[v] * G for v in n}), G / N) for G in range(1, N + 1)],
+        dycoke=[(w({v: first[v] * N + (n[v] - first[v]) * kk for v in n}), 1 - (kk + 0.5) / N) for kk in range(1, N + 1)],
+        dtd=[(w({v: N + (n[v] - 1) * kk for v in n}), (N - kk + 0.5) / N) for kk in range(1, N + 1)],
+        gazevlm=[(w(kept_gz[r]), r) for r in GRID_RHO],
+        fastvid=[(w(kept_fv[r]), r) for r in GRID_R],
+        prunevid=[(w(kept_pv[b]), b) for b in GRID_BETA])
+
+
+def grid_candidates(model):
+    """{row: [(token share, knob)]} of average pooling's s x s grids and the two-view GazeVLM's even B, both exact from the token counts."""
+    stock, grid = sw.MODELS[model]["stock_tokens"], sw.MODELS[model]["grid"]
+    return dict(avgpool=[(s * s / stock, s * s / stock) for s in range(1, grid + 1)],
+                gazevlm2=[(b / stock, b / stock) for b in range(2, 2 * stock + 1, 2)])
+
+
+def knob_problems(cands, stock):
+    """A knob that doesn't move its row's share (not connected), or a share that falls as the knob keeps more (wrong direction) ->
+    named problems. Keeping more: a larger knob, except DyCoke's and DTD's, which say what to drop."""
+    out = []
+    for row, c in cands.items():
+        shares = [x[0] for x in sorted(c, key=lambda x: x[1])]
+        if row in PRUNE_KNOBS:
+            shares = shares[::-1]
+        if max(shares) - min(shares) < CONNECTED_SPAN:
+            out.append(f"KNOB NOT CONNECTED: {row} keeps {100 * min(shares):.2f}% to {100 * max(shares):.2f}% of the stock tokens over its "
+                       f"whole knob range")
+        drop = max((a - b for a, b in zip(shares, shares[1:])), default=0.0)
+        if drop > DIP_TOKENS.get(row, 0.0) / stock + 1e-12:
+            out.append(f"KNOB NOT MONOTONE: {row}'s share falls by {100 * drop:.2f} points as its knob keeps more")
+    return out
+
+
+def knob_preflight(model, ad, cfg, inputs, ks):
+    """Before the slow counting: every baseline's knob range on PREFLIGHT_CLIPS clips at each rho's K' (ks: {rho: K'}). Each row's share
+    must move with its knob, keep more as it keeps more, and keep at least 0.50 somewhere in its range, or the plan stops, naming the rows.
+    A row whose whole range stays under rho is reported (RHO SHORT, sample)."""
+    side = ad.gazevlm_backend().side
+    window = int(cfg["dycoke"]["settings"][0]["window"])
+    for rho, k in ks.items():
+        d = inputs(k)
+        clips = sorted(d["uniform"])
+        sample = clips[:: max(1, len(clips) // PREFLIGHT_CLIPS)][:PREFLIGHT_CLIPS]
+        cfg_k = fc.with_knob(cfg, "uniform", None, k)
+        cap = cfg_k["run"]["max_frames"].get(ad.key)
+        frames = {v: common.cap_frames(d["uniform"][v], cap) for v in sample}
+        kept = knob_counts(None, frames, ad.fastvid_backend(), cfg_k, side, check=False)
+        cands = dict(share_candidates({v: len(f) for v, f in frames.items()}, ad.stock_tokens, side * side, window, *kept),
+                     **grid_candidates(model))
+        for row, c in cands.items():
+            lo, hi = min(c, key=lambda x: x[1]), max(c, key=lambda x: x[1])
+            print(f"KNOB RANGE {model} rho {rho:.2f} K'={k} ({len(sample)} clips): {row} knob {lo[1]:g} to {hi[1]:g} keeps "
+                  f"{100 * lo[0]:.2f}% to {100 * hi[0]:.2f}% ({len(c)} settings)", flush=True)
+        bad = knob_problems(cands, ad.stock_tokens)
+        if bad:
+            sys.exit("KNOB RANGE FAILED: " + "; ".join(bad) + ". Stop and tell the user.")
+        _, short = knob_choices(cands, rho, k)
+        for row, (most, at) in short.items():
+            print(f"RHO SHORT (sample): {row} at rho {rho:.2f} keeps at most {100 * most:.2f}% over its whole range (at {at})", flush=True)
+    print(f"KNOB RANGES OK: every baseline's share moves with its knob, the right way, and keeps 0.50 somewhere, on {PREFLIGHT_CLIPS} "
+          "clips at each rho's K'", flush=True)
+
+
 def baseline_knobs(ad, cfg, data_k, k, rho, counts_path):
     """Each knob-continuous single-view baseline's knob on its Uniform K' frames by the rho rule (closest to rho of the stock tokens among
     settings keeping at least 0.50), each knob over its whole range -> ({row: (token share, knob)}, {row: its most, if under rho})."""
@@ -452,21 +530,13 @@ def baseline_knobs(ad, cfg, data_k, k, rho, counts_path):
     cap = cfg_k["run"]["max_frames"].get(ad.key)
     nq = data_k["qs"].video.value_counts().to_dict()
     frames = {v: common.cap_frames(data_k["uniform"][v], cap) for v in nq}
-    n = {v: len(frames[v]) for v in frames}
-    full = {v: n[v] * ad.stock_tokens for v in n}
     side = ad.gazevlm_backend().side
-    N = side * side
     window = int(cfg_k["dycoke"]["settings"][0]["window"])
-    kept_gz, kept_fv, kept_pv = knob_counts(counts_path, frames, ad.fastvid_backend(), cfg_k, side)
-    w = lambda kept: cal.weighted(kept, full, nq)
-    first = {v: -(-n[v] // window) for v in n}
-    cands = dict(
-        streamingtom=[(w({v: n[v] * G for v in n}), G / N) for G in range(1, N + 1)],
-        dycoke=[(w({v: first[v] * N + (n[v] - first[v]) * kk for v in n}), 1 - (kk + 0.5) / N) for kk in range(1, N + 1)],
-        dtd=[(w({v: N + (n[v] - 1) * kk for v in n}), (N - kk + 0.5) / N) for kk in range(1, N + 1)],
-        gazevlm=[(w(kept_gz[r]), r) for r in GRID_RHO],
-        fastvid=[(w(kept_fv[r]), r) for r in GRID_R],
-        prunevid=[(w(kept_pv[b]), b) for b in GRID_BETA])
+    kept = knob_counts(counts_path, frames, ad.fastvid_backend(), cfg_k, side)
+    cands = share_candidates({v: len(frames[v]) for v in frames}, ad.stock_tokens, side * side, window, *kept, nq=nq)
+    bad = knob_problems(cands, ad.stock_tokens)
+    if bad:
+        sys.exit(f"KNOB RANGE FAILED on all {len(frames)} clips at K'={k}: " + "; ".join(bad) + ". Stop and tell the user.")
     return knob_choices(cands, rho, k)
 
 
@@ -543,8 +613,10 @@ def make_lines(model, ad, cfg, data, units, p1, p2, blind, log=print):
     add("nogate_twoview", "nogate_twoview", "nogate", None, tv["tokens"], 2, S, L, s, v, prompt=2, frames=np.minimum(L, K),
         tile_src=tv["tile_src"])
     inputs = fc.Inputs(data)
+    ks = {rho: sw.best_k(lambda k: share(np.minimum(k, K), rho * stock, units["v_stock"], p1))[0] for rho in sw.RHOS[:2]}
+    knob_preflight(model, ad, cfg, inputs, ks)
     for rho in sw.RHOS[:2]:
-        k1, _ = sw.best_k(lambda k: share(np.minimum(k, K), rho * stock, units["v_stock"], p1))
+        k1 = ks[rho]
         log(f"   counting the baselines' tokens on Uniform K'={k1} frames (rho {rho:.2f}) ...")
         knobs, short = baseline_knobs(ad, cfg, inputs(k1), k1, rho, sw.model_dir(model, f"knob_counts_K{k1}.jsonl"))
         for row, (most, at) in short.items():
