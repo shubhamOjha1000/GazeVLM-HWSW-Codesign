@@ -3286,3 +3286,71 @@ sbatch accuracy_tables/hpc/hdepic18_summary.SBATCH merge
 ```
 
 Expect `MERGED: ... the GPU ledger carried over; written ['gpu_ledger.jsonl'], the rest already there and identical`, `GPU per record: {'NVIDIA B200': <all>}`, `RECORDS: <n> of <n> planned answers ... (merged from 3 shards)`, then the tables and `EVERY n IS COMPLETE`.
+
+### Ours v2: the design and Stage 1 only (diagnostic dev work, 2026-11-14)
+
+**Why.** C4 showed the problem is the resolution before encoding. Any whole frame at 168 px or less sits at Blind on action_recognition, and v1's 8-token fovea is too small to help. Ours v2 is a new method version, reported next to v1; v1's results stay as they are.
+
+**Status.** Only the design and Stage 1 are in scope. Nothing here feeds a results table, and everything goes to `$GV_ROOT/data/hdepic/v2/`. Stage 2 isn't written or planned.
+
+**The design** (`accuracy_tables/hpc/hdepic/v2.py`):
+- **Three rings per frame, each one contiguous SmolVLM image** through SmolVLM's own encoder:
+    - the periphery: the whole frame;
+    - the mid ring: a crop around the gaze at stock scale;
+    - the fovea: a crop at 2x stock scale.
+- **Every side is a multiple of 42 px and at most 384 px.** A crop is slid inside the frame at an edge, never padded.
+- **No periphery token is dropped,** since a hole would break the image's token grid.
+- **Each frame keeps its one `Frame at <TIME ...>:` label,** then its rings as consecutive images.
+- **Gaze, fixation and centred fallback** are v1's.
+
+| Layout | Rings (px, tokens, share of the frame side) | Tokens a frame | Encoder GFLOPs a frame (stock 669.9) |
+|---|---|---|---|
+| L1 | periphery 252 (36) + mid 84 (4, 22%) + fovea 84 (4, 11%) | 44 | 341.4 (51%) |
+| L2 | periphery 252 (36) + mid 126 (9, 33%) + fovea 168 (16, 22%) | 61 | 471.1 (70%) |
+| L3 | periphery 294 (49) + mid 168 (16, 44%) + fovea 210 (25, 27%) | 90 | 703.9 (105%) |
+| P64 | the periphery alone at 336 (64), L2's token count | 64 | 518.3 (77%) |
+
+SigLIP costs about 8 GFLOPs per output token at any image size, so a layout's cost per frame follows its tokens.
+
+**Step V1: the layouts' numbers and pictures (CPU).** Ask the user first.
+
+```bash
+sbatch --job-name=hdepic-v2-layouts accuracy_tables/hpc/hdepic_v2_cpu.SBATCH layouts
+```
+
+- **Expect** a `LAYOUT ...` line per layout, then `LAYOUTS WRITTEN: [...] ... STOP: the user approves the layouts.`
+- **The pictures:** `data/hdepic/v2/layouts/frame_*.jpg`, one row per layout. Left: the ring boxes on the frame. Right: the frame as the model gets it, each ring's image over its box with its 42 px token cells, the gaze dot and the token count. They hold HD-EPIC images: never commit them.
+- **STOP until the user approves the layouts.**
+
+**Step V2: Stage 1's questions and frames (CPU), after the layouts are approved.**
+
+```bash
+sbatch --job-name=hdepic-v2-dev accuracy_tables/hpc/hdepic_v2_cpu.SBATCH dev
+N=$(python3 -c "import json; print(len(json.load(open('/scratch/$USER/GazeVLM/data/hdepic/v2/dev_plan.json'))['videos']))"); echo "$N videos"
+sbatch --array=0-$((N-1))%40 accuracy_tables/hpc/hdepic_v2_frames.SBATCH
+sbatch --job-name=hdepic-v2-framescheck accuracy_tables/hpc/hdepic_v2_cpu.SBATCH frames-check
+```
+
+- **Run them in order.** The array needs the dev job's plan, and the check needs every array task.
+- **The dev job:**
+    - It chooses 940 fine_grained action_recognition questions: outside section 18's 2,000-question sample, on videos with gaze, spread over videos with seed 1.
+    - It writes their ids to `data/hdepic/v2/dev_ids.json`, once; `DEV IDS DIFFER` on any later change.
+    - Each question's 9 frames are Uniform K' = 9 of its section 18 candidates.
+    - It then projects the gaze of any video not yet projected.
+    - Expect `DEV QUESTIONS: 940 (seed 1) ...`.
+- **The array** writes the frames, hard-linking any frame section 17 or 18 already extracted. The check ends `DEV FRAMES MATCH: 8460 frames for 940 questions`.
+
+**Step V3: Stage 1 (B200, about 1 hour).** Ask the user first.
+
+```bash
+sbatch accuracy_tables/hpc/hdepic_v2_gpu.SBATCH
+```
+
+- **Expect:**
+    - `parity OK`;
+    - 8 lines `STAGE 1 <variant>: n 940, accuracy ...% [lo, hi], <t> tokens a frame, <g> encoder GFLOPs a frame`, for `stock_81`, `blind`, `avgpool_4x4_16`, `L1_gaze`, `L2_gaze`, `L3_gaze`, `L2_centre` and `P64_periphery_only`;
+    - then `STAGE 1 DONE (diagnostic). STOP: the user picks one layout.`
+- **Stop on** a traceback, `parity failed` or a non-B200 GPU.
+- **Read it with:** `grep -h "parity OK\|parity failed\|^STAGE 1\|Traceback" /scratch/$USER/GazeVLM/logs/hdepic-v2-stage1_*.log`
+
+**STOP.** Send the user the Stage 1 table: the user picks one layout. Nothing else runs.
