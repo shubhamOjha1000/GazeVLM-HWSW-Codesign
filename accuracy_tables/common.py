@@ -202,6 +202,9 @@ def load_data(cfg):
     if cfg.get("dataset") == "hdepic":                 # HD-EPIC's gaze questions (runbook section 17); no other config has `dataset`
         from accuracy_tables.hpc.hdepic.load import load_data as load_hdepic
         return load_hdepic(cfg)
+    if cfg.get("dataset") == "hdepic18":               # HD-EPIC's 6 non-gaze groups (runbook section 18)
+        from accuracy_tables.hpc.hdepic.load18 import load_data as load_hdepic18
+        return load_hdepic18(cfg)
     from vlmeval import spatial as sp
     from vlmeval.frames import frame_path
     qs, clips, test_videos = _questions_and_clips(cfg)
@@ -231,6 +234,25 @@ def load_data(cfg):
                 clips=clips, labels=labels, frame=frame)
 
 
+FORCED = "forced"
+
+
+def include_forced(idx, forced=()):
+    """Frame positions idx with each forced position in, in place of the nearest position that isn't forced (the earlier one on a tie):
+    the same count, sorted. With no forced positions (every dataset but runbook section 18's object_motion exception) idx is unchanged."""
+    out = [int(i) for i in idx]
+    forced = sorted({int(f) for f in forced})
+    for f in forced:
+        if f in out:
+            continue
+        free = [i for i in out if i not in forced]
+        if free:
+            out[out.index(min(free, key=lambda i: (abs(i - f), i)))] = f
+        else:
+            out.append(f)
+    return sorted(out) if forced else out
+
+
 def budget_frames(cfg, data, key, stock_tokens, fraction, use_gate):
     """The budget rule (use_gate) or the no-gate control at one token budget -> ({video: [frame]}, {why: frames}).
     The budget is a share of that video's Uniform K tokens, at the model's frame cap."""
@@ -250,9 +272,14 @@ def budget_frames(cfg, data, key, stock_tokens, fraction, use_gate):
         full = len(cap_frames(data["uniform"][v], cap)) * stock_tokens
         limit = br.frame_limit(fraction, full, per_frame, n, cap)
         if use_gate:
-            kept, reasons = br.keep_frames(data["labels"][v][:n - 1], limit)
+            kept, reasons = br.keep_frames(data["labels"][v][:n - 1], limit, starts=data.get("segment_starts", {}).get(v, ()))
         else:
             kept, reasons = br.slot_middles(n, limit), [br.MIDDLE] * limit
+        forced = data.get("forced", {}).get(v, ())
+        if forced:
+            why_of = dict(zip(kept, reasons))
+            kept = include_forced(kept, forced)
+            reasons = [why_of.get(t, FORCED) for t in kept]
         frames_of[v] = [data["frame"](v, int(fn[t])) for t in kept]
         for r in reasons:
             why[r] = why.get(r, 0) + 1

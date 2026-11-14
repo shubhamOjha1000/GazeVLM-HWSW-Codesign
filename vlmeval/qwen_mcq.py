@@ -49,7 +49,19 @@ def load_model(model_id=MODEL_ID):
     return model.eval(), proc, ids, dtype
 
 
+class Stamp(float):
+    """A frame's time in seconds that carries its own label (runbook section 18: <TIME hh:mm:ss.sss video n>, on that video's MP4
+    clock). It is a float everywhere else, so nothing that reads a frame's time changes."""
+
+    def __new__(cls, seconds, text=""):
+        x = float.__new__(cls, seconds)
+        x.stamp = str(text)
+        return x
+
+
 def fmt_time(s):
+    if isinstance(s, Stamp) and s.stamp:
+        return s.stamp
     s = int(round(s))
     return f"{s // 60}:{s % 60:02d}"
 

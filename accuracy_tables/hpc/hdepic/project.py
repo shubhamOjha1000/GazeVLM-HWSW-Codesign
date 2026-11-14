@@ -48,8 +48,12 @@ def project_video(video, info, force=False):
           "the frame", flush=True)
 
 
-def main():
-    with open(data.plan_json()) as f:
+def main(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--plan", default=None, help="a plan.json (default: section 17's); section 18 passes its own")
+    a = ap.parse_args(argv)
+    with open(a.plan or data.plan_json()) as f:
         plan = json.load(f)
     for v in plan["videos"]:
         project_video(v, plan["video_info"][v])

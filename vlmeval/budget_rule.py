@@ -16,6 +16,10 @@ The no-gate control uses the same slots, takes each slot's middle frame, never r
 `limit` frames. Only predicted labels are used here, never true labels or answers.
 
 Frames are positions in a clip: frame t ends pair t - 1, so n pairs give n + 1 frames, and frame 0 has no pair.
+
+starts (runbook section 18, a question of several segments): the positions where a new segment begins. The gate runs per segment and
+never across a gap: each such frame is a frame 0 of its own (a mark, no moving stretch carried over), and the decision for the window
+before it isn't read. With no starts (every earlier caller) nothing changes.
 """
 
 from eyehead import policy as pol
@@ -30,20 +34,24 @@ def frame_limit(budget, full_tokens, tokens_per_frame, n_frames, cap=None):
     return min(limit, n_frames, cap) if cap else min(limit, n_frames)
 
 
-def send_reasons(lab):
+def send_reasons(lab, starts=()):
     """Why policy D+P sends each frame -> (reasons, motion), both of length n + 1.
 
     reasons[t] is frame0, settle, refix, pursuit or None (not sent). motion[t] is the length of the moving stretch a
     settle frame ends, else 0. Sends the same frames as send_settle(refix=True, pursuit='first'); the tests check it."""
     lab = [int(L) for L in lab]
+    starts = {int(s) for s in starts}
     reasons, motion = [None] * (len(lab) + 1), [0] * (len(lab) + 1)
     reasons[0] = FRAME0
     stretch = 0
     for k, L in enumerate(lab):
         t = k + 1
+        if t in starts:                                   # a segment's first frame: its own frame 0
+            reasons[t], stretch = FRAME0, 0
+            continue
         if L in pol.MOVING:
             stretch += 1
-            if L == pol.P and (k == 0 or lab[k - 1] != pol.P):
+            if L == pol.P and (k == 0 or k in starts or lab[k - 1] != pol.P):
                 reasons[t] = PURSUIT
         elif stretch:
             reasons[t], motion[t], stretch = SETTLE, stretch, 0
@@ -65,16 +73,17 @@ def slot_middles(n_frames, limit):
     return [(lo + hi - 1) // 2 for lo, hi in zip(edges, edges[1:])]
 
 
-def _fill(lab, lo, hi):
+def _fill(lab, lo, hi, starts=()):
     """A slot with no mark: the frame predicted not moving nearest the slot's middle, else the middle frame."""
     middle = (lo + hi - 1) / 2
-    still = [t for t in range(lo, hi) if t == 0 or int(lab[t - 1]) not in pol.MOVING]
+    still = [t for t in range(lo, hi) if t == 0 or t in starts or int(lab[t - 1]) not in pol.MOVING]
     return min(still, key=lambda t: (abs(t - middle), t)) if still else (lo + hi - 1) // 2
 
 
-def keep_frames(lab, limit):
+def keep_frames(lab, limit, starts=()):
     """The budget rule on one clip's predicted labels -> (frames kept, why each was kept), in time order."""
-    reasons, motion = send_reasons(lab)
+    starts = {int(s) for s in starts}
+    reasons, motion = send_reasons(lab, starts)
     marks = [t for t, r in enumerate(reasons) if r]
     if len(marks) <= limit:
         return marks, [reasons[t] for t in marks]
@@ -87,6 +96,6 @@ def keep_frames(lab, limit):
             kept.append(t)
             why.append(reasons[t])
         else:
-            kept.append(_fill(lab, lo, hi))
+            kept.append(_fill(lab, lo, hi, starts))
             why.append(FILL)
     return kept, why

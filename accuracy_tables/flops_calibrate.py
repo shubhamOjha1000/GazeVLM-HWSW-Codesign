@@ -66,8 +66,11 @@ def sha256(path):
 
 # ---------------------------------------------------------------------------- the rows' inputs at another frame count
 def with_uniform(data, k):
-    """data with k evenly spaced frames per video as its Uniform K frames: load_data's rule at another K."""
-    frames = {v: [data["frame"](v, int(f)) for f in common.uniform_indices(data["metas"][v]["n"], int(k))] for v in data["videos"]}
+    """data with k evenly spaced frames per video as its Uniform K frames: load_data's rule at another K. A frame the data force into
+    every row (runbook section 18) takes the place of the nearest one; with none, nothing changes."""
+    forced = data.get("forced", {})
+    frames = {v: [data["frame"](v, int(f)) for f in common.include_forced(common.uniform_indices(data["metas"][v]["n"], int(k)),
+                                                                          forced.get(v, ()))] for v in data["videos"]}
     return dict(data, uniform=frames)
 
 
