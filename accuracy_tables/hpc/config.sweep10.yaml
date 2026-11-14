@@ -1,0 +1,23 @@
+# The 10% FLOPs sweep on the 940 dev questions (accuracy_tables/hpc/hdepic/sweep10.py; diagnostic dev work, nothing feeds a results
+# table). `dataset: hdepic18` makes common.load_data read them through accuracy_tables/hpc/hdepic/load18.py, unchanged: each question its
+# own clip, section 18's candidates (K = min(64, distinct MP4 frames in the span)), stamps and prompt. Every path is derived data under
+# $GV_ROOT/data/hdepic/sweep10/, outside the repository; HD-EPIC itself ($HDEPIC_ROOT) is only read. Everything not set here keeps the
+# defaults in accuracy_tables/common.py: section 14's settings for the gate and every baseline. K is 64 for all four models (section 18's
+# candidates; Qwen ran K = 96 on EgoEverything), so every row's name says K=64.
+dataset: hdepic18
+paths:
+  folds_dir: ${GV_ROOT}/data/hdepic/sweep10/folds                # the gate's rows (S0)
+  gate_ckpt_dir: ${GV_ROOT}/data/runs/eyehead                    # the 5 fold models, averaged: HD-EPIC is unseen
+  oof_cache: ${GV_ROOT}/data/hdepic/sweep10/preds.csv            # their predictions, so oof_predictions is never called
+  questions_json: ${GV_ROOT}/data/hdepic/sweep10/questions.json  # the manifest (S0)
+  links_json: null
+  frames_cache_dir: ${GV_ROOT}/data/hdepic/sweep10/frames        # never used: every clip has its frames and meta.json
+  frames_local_dir: ${GV_ROOT}/data/hdepic/sweep10/frames        # S0
+  raw_download_dir: ${GV_ROOT}/data/hdepic/raw                   # never used
+  out_dir: ${GV_ROOT}/data/hdepic/sweep10/unused                 # the sweep writes <model>/answers/ itself
+run:
+  videos: all
+  K: 64
+  max_frames:
+    smolvlm: 64
+    smolvlm256: 64

@@ -307,13 +307,15 @@ def frame_index():
     return out
 
 
-def extract_video(plan, video, old):
-    """One video's dev frames: hard-linked from sections 17 and 18 where they exist, the rest decoded in order (exact frame numbers)."""
+def extract_video(plan, video, old, folder=None):
+    """One video's dev frames: hard-linked from sections 17 and 18 where they exist, the rest decoded in order (exact frame numbers).
+    folder(clip) -> its frames folder (default: v2's dev folders; the sweep passes its own)."""
     import cv2
+    folder = folder or dev_frames_dir
     from accuracy_tables.hpc.hdepic.frames import QUALITY, SIZE
     wanted = collections.defaultdict(list)
     for q in plan["questions"]:
-        part = os.path.join(dev_frames_dir(q["pseudo"]), f"part_{video}.json")
+        part = os.path.join(folder(q["pseudo"]), f"part_{video}.json")
         if video not in q["videos"] or os.path.exists(part):
             continue
         k = q["videos"].index(video)
@@ -323,8 +325,8 @@ def extract_video(plan, video, old):
     decoder, decoded, linked = {}, 0, 0
     for qs in wanted.values():
         for q, _ in qs:
-            os.makedirs(dev_frames_dir(q["pseudo"]), exist_ok=True)
-    file_of = lambda q, j: os.path.join(dev_frames_dir(q["pseudo"]), f"frame_{j:05d}.jpg")
+            os.makedirs(folder(q["pseudo"]), exist_ok=True)
+    file_of = lambda q, j: os.path.join(folder(q["pseudo"]), f"frame_{j:05d}.jpg")
 
     def link(src, dst):
         if not os.path.exists(dst):
@@ -367,7 +369,7 @@ def extract_video(plan, video, old):
         for q, j in qs:
             parts[q["pseudo"]][str(j)] = decoder[f]
     for pseudo, d in parts.items():
-        with open(os.path.join(dev_frames_dir(pseudo), f"part_{video}.json"), "w") as fh:
+        with open(os.path.join(folder(pseudo), f"part_{video}.json"), "w") as fh:
             json.dump(d, fh)
     print(f"   {video}: {decoded} frames decoded, {linked} hard-linked from sections 17 and 18, for {len(parts)} questions", flush=True)
 

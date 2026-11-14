@@ -3354,3 +3354,106 @@ sbatch accuracy_tables/hpc/hdepic_v2_gpu.SBATCH
 - **Read it with:** `grep -h "parity OK\|parity failed\|^STAGE 1\|Traceback" /scratch/$USER/GazeVLM/logs/hdepic-v2-stage1_*.log`
 
 **STOP.** Send the user the Stage 1 table: the user picks one layout. Nothing else runs.
+
+### The 10% FLOPs sweep: high tokens per frame, 4 models, the 940 dev questions (diagnostic dev work, 2026-11-14)
+
+**Why.** C4 and v2 Stage 1 showed that HD-EPIC needs sharp frames. So at a fixed 10% of each model's Uniform-64 FLOPs, every method keeps high tokens per frame and meets the budget with fewer frames. Each method's best setting is found on the dev set. Nothing here feeds a results table, no test question is used, and everything goes to `$GV_ROOT/data/hdepic/sweep10/`. v1, sections 17 and 18 and v2 Stage 1 stay as they are. No winner is declared.
+
+**The protocol** (`accuracy_tables/hpc/hdepic/sweep10.py`; the same for every model and method):
+- **Questions:** exactly the 940 of `data/hdepic/v2/dev_ids.json`.
+- **Candidates:** section 18's rule for all 4 models, K = min(64, distinct MP4 frames in the span), with its stamps and prompt. Qwen ran K = 96 on EgoEverything; here it's 64.
+- **Budget:** 10% of the model's own Uniform-64 FLOPs per question (gate + encoder + prefill, section 14's units). Each condition takes the K' closest to it; `nearest_only` past 0.5 points.
+- **The rho rule:** a representation keeps rho of the stock tokens per frame, rho in 0.50, 0.75 and 1.00. That is the setting closest to rho x stock among those keeping at least 0.50 x stock. A grid that can't hit rho exactly lands on its nearest size above the floor.
+- **Best rho:** per method, the highest dev accuracy. A tie goes to the FLOPs share nearest 10%, then to the larger rho. This rule is fixed before any accuracy and is the same for every method.
+- **Conditions (28 per model):**
+    - `uniform` (K = 64), `blind` and `uniform_flops`;
+    - the 8 baselines at rho 0.50 and 0.75 (at 1.00 they are `uniform_flops`; they pay the full encoder for every input frame);
+    - `ours_res_<rho>` (the gate's frames, the whole frame resized before encoding);
+    - `ours_twoview` (the whole frame at stock size plus a 672 px tile of the 1,344 px source around the gaze, 2x stock detail, both normal images) and `ours_twoview_centre` (the tile at the centre);
+    - the no-gate control at every one of ours' representations.
+
+| Model (GPU) | stock | rho 0.50 | rho 0.75 | twoview |
+|---|---|---|---|---|
+| SmolVLM2-2.2B (B200) | 384 px, 81 tokens | 294 px, 7x7 = 49 (0.60) | 336 px, 8x8 = 64 (0.79) | 2 x 384 px = 162 |
+| SmolVLM2-256M (B200) | 512 px, 64 | 384 px, 6x6 = 36 (0.56) | 448 px, 7x7 = 49 (0.77) | 2 x 512 px = 128 |
+| Qwen2.5-VL-3B (A100) | 448 px, 256 | 336 px, 12x12 = 144 (0.56) | 392 px, 14x14 = 196 (0.77) | 2 x 448 px = 512 |
+| Qwen3-VL-4B (A100) | 512 px, 256 | 384 px, 12x12 = 144 (0.56) | 448 px, 14x14 = 196 (0.77) | 2 x 512 px = 512 |
+
+- **These sizes** apply to `ours_res`, `nogate_res` and avgpool's grids.
+- **Qwen's tokens:** each frame is its own image, and its 2-frame temporal patch holds the frame twice, so a frame is 256 tokens.
+- **The two-view GazeVLM's B per frame:** 42 and 60 on the 2.2B, 32 and 48 on the 256M, 128 and 192 on both Qwens.
+
+**S0 (CPU).** Ask the user first; run in order.
+
+```bash
+sbatch --job-name=sweep10-blind accuracy_tables/hpc/hdepic_sweep10_cpu.SBATCH blind-source
+sbatch --job-name=sweep10-plan accuracy_tables/hpc/hdepic_sweep10_cpu.SBATCH plan
+sbatch --job-name=sweep10-gate accuracy_tables/hpc/hdepic_sweep10_cpu.SBATCH gate
+N=$(python3 -c "import json; print(len(json.load(open('/scratch/$USER/GazeVLM/data/hdepic/sweep10/plan.json'))['videos']))"); echo "$N videos"
+sbatch --array=0-$((N-1))%40 accuracy_tables/hpc/hdepic_sweep10_frames.SBATCH
+sbatch --job-name=sweep10-framescheck accuracy_tables/hpc/hdepic_sweep10_cpu.SBATCH frames-check
+sbatch --job-name=sweep10-data accuracy_tables/hpc/hdepic_sweep10_cpu.SBATCH data
+```
+
+- **Expect:**
+    - `BLIND SOURCE: v2 Stage 1's Blind ran on the 940 dev questions ...`;
+    - `SWEEP PLAN WRITTEN` and the `SIZES` lines;
+    - `VOR CHECK OK`;
+    - `DEV FRAMES MATCH: ... for 940 questions`;
+    - `data check OK: 940 questions ...`.
+- **Stop on** `BLIND SOURCE: NOT SHOWN`, `DEV IDS DIFFER`, `CANDIDATES DIFFER FROM V2`, `VOR CHECK FAILED`, `DEV FRAMES DIFFER` or `DATA CHECK FAILED`.
+- **STOP after S0.**
+
+**S1: tests (CPU), then checks (one GPU job per model, all 4 at once).** Ask the user first.
+
+```bash
+sbatch accuracy_tables/hpc/hdepic_tests.SBATCH
+sbatch --job-name=sweep10-smolvlm22-checks accuracy_tables/hpc/hdepic_sweep10_b200.SBATCH smolvlm checks
+sbatch --job-name=sweep10-smolvlm256-checks accuracy_tables/hpc/hdepic_sweep10_b200.SBATCH smolvlm256 checks
+sbatch --job-name=sweep10-qwen25-checks accuracy_tables/hpc/hdepic_sweep10_a100.SBATCH qwen2.5 checks
+sbatch --job-name=sweep10-qwen3-checks accuracy_tables/hpc/hdepic_sweep10_a100.SBATCH qwen3 checks
+```
+
+- **Each job runs, in order:**
+    1. its earlier regression (`SAME ANSWERS: 0 of 100 records differ` on the 2.2B against section 14; 0 of 50 on the others, against section 16 or 15);
+    2. `SNAPSHOT ...` and `parity OK`;
+    3. the `TOKENS` and `STOCK TOKENS` lines;
+    4. the identity check, then the threads check;
+    5. the `VISION` lines, then `FLOPS EXACT`;
+    6. on the 2.2B only, `BLIND RECHECK: ... 0 differ`;
+    7. `CHECKS DONE: <model>`, then the GPU's mean and lowest 30-minute mean.
+- **The identity check:** `ours_res_1.00`, `nogate_res_1.00` and the twoview's whole frame on Uniform's frames give Uniform's answers at `max_prob_diff 0.0`. The whole-frame view must equal the stock input pixel for pixel.
+- **Stop on** `ANSWERS DIFFER`, `SNAPSHOT DIFFERS`, `CHECKS FAILED`, `ATTENTION NOT COUNTED`, `c DIFFERS FROM CONFIG` or a traceback. **STOP after S1.**
+
+**S2: the plan (a short GPU job per model).** Ask the user first. The job names are `sweep10-<smolvlm22|smolvlm256|qwen25|qwen3>-plan`, with mode `plan`.
+- **What it prints:** K' for every condition at 10%, the baselines' knobs, every condition checked on 2 questions under the counter, then a timing run.
+- **Expect** the table (rho, real rho, tokens per frame, K', knob, planned %, `nearest_only`), then `PROJECTED RUN: <h> GPU-hours` and `PLAN WRITTEN`. The plan is then read-only.
+- **Stop on** `FLOPS DIFFER` or `PROMPT DIFFERS`. **STOP for the user's OK.**
+
+**S3: the run (all 4 jobs together, one block).** The GPU types are set in the job files; never override `--gres`.
+
+```bash
+sbatch --job-name=sweep10-smolvlm22-run accuracy_tables/hpc/hdepic_sweep10_b200.SBATCH smolvlm run
+sbatch --job-name=sweep10-smolvlm256-run accuracy_tables/hpc/hdepic_sweep10_b200.SBATCH smolvlm256 run
+sbatch --job-name=sweep10-qwen25-run accuracy_tables/hpc/hdepic_sweep10_a100.SBATCH qwen2.5 run
+sbatch --job-name=sweep10-qwen3-run accuracy_tables/hpc/hdepic_sweep10_a100.SBATCH qwen3 run
+```
+
+- **Resuming:** answers are saved one at a time. A preemption, or the requeue a job asks for 15 minutes before its time limit (`TIME LIMIT NEAR`), continues where it stopped.
+- **GPU use:** every 30 minutes the log gets `GPU MEAN: last 30 min ...`. **`GPU LOW`, or an A100 warning or cancellation: stop and tell the user.**
+- **Expect** `RUN DONE: <model>, 28 conditions x 940 dev questions`. **Stop on** `RUN FAILED`.
+
+**S4: the summary (CPU).**
+
+```bash
+sbatch --job-name=sweep10-summary accuracy_tables/hpc/hdepic_sweep10_cpu.SBATCH summary
+```
+
+- **Per model, one table:** condition, rho, K', tokens per frame and per question, measured FLOPs %, accuracy with Wilson's interval, and the paired difference from Uniform (paired bootstrap over questions).
+- **Then:**
+    - each method's best rho;
+    - the cross-model table;
+    - the gate effect (ours minus no gate, at the same representation) and the gaze effect (gaze tile minus centre tile).
+- **Expect** `SUMMARY DONE (dev only, no winner)`. **STOP.** Send the user the tables. Dev results only: no winner, and nothing changes after accuracy is seen.
+
+**Read the logs with:** `grep -h "BLIND SOURCE\|SWEEP PLAN\|VOR CHECK\|DEV FRAMES\|data check\|SAME ANSWERS\|ANSWERS DIFFER\|SNAPSHOT\|parity\|^TOKENS\|STOCK TOKENS\|^VISION\|FLOPS\|BLIND RECHECK\|CHECKS\|PROJECTED\|PLAN WRITTEN\|GPU MEAN\|GPU LOW\|TIME LIMIT\|RUN DONE\|RUN FAILED\|SUMMARY\|Traceback" /scratch/$USER/GazeVLM/logs/sweep10-*.log`
