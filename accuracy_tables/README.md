@@ -65,6 +65,9 @@ The models (keys used everywhere in this folder):
 | `../tests/test_smolvlm256_flops.py` | CPU tests of section 16: the 256M's geometry and fovea, its backends and gaze, its FLOPs, a whole fake run, the checks, the jobs |
 | `hpc/hdepic/`, `hpc/hdepic_*.SBATCH`, `hpc/config.hdepic.yaml` | HD-EPIC's gaze questions on SmolVLM2-2.2B, FLOPs-matched as in section 14: step 0's report, then the plan (each question its own clip), gaze, gate rows on 1 s windows, frames, manifest, loader, checks and tables; see section 17 of the runbook |
 | `../tests/test_hdepic.py` | CPU tests of section 17 on a fake HD-EPIC world: step 0, the plan, D4's resampler, the rows, the loader, the data check, the checks and the tables |
+| `hpc/hdepic/diagnose.py`, `hpc/hdepic/diagnose_aria.py`, `hpc/hdepic18_diagnose.SBATCH` | section 18, step 0: section 17's gaze projection against Meta's own code, gravity and the MP4's own motion; the saved answers; frames as the model sees them. Changes no setting |
+| `hpc/hdepic/groups.py`, `hpc/hdepic/explore18.py`, `hpc/hdepic18_explore.SBATCH` | section 18: HD-EPIC's 6 non-gaze groups, their inputs and tags, the seed-0 fine_grained sample, K over segments, the box overlays and the disk projection |
+| `../tests/test_hdepic18.py` | CPU tests of section 18 on fake data: the checks' geometry, the motion fit, the answer analysis, the model's view, the sample, the parsing and the explore step end to end |
 | `../tests/test_accuracy_tables.py` | CPU tests of the config, frame selection and budget code |
 | `../vlmeval/budget_rule.py` | the frame budget: the frame limit, the send reasons, the slots and the frame kept per slot |
 | `../tests/test_budget_rule.py` | CPU tests of the frame budget: the rule, the slots, the two rows, the comparison |
