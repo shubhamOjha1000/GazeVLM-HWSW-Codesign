@@ -10,8 +10,11 @@ pick    clips from s18/questions.json: the 6 groups taking turns, each in clip o
         the same number of questions to within 1. Prints a comma list for run.py's and flops_run.py's --videos.
 fovea   section 17's check: every budget and no-gate record holds 17 image tokens per frame.
 totals  questions and clips, for the run-time projection and the records check.
-merge   the shards' records (<out-dir>/shard<s>/<model>/<row>.jsonl) into <out-dir>/<model>/<row>.jsonl: every record once, no
-        (condition, question) twice, nothing overwritten; and the shards' GPU names into <out-dir>/<model>/gpu_types.txt. MERGED, or stops.
+merge   the shards' records (<out-dir>/shard<s>/<model>/<row>.jsonl) into <out-dir>/<model>/<row>.jsonl, shard by shard: every record
+        once, no (condition, question) twice; each shard's gpu_ledger.jsonl carried into the merged folder's, every line's first_line
+        moved by the records the earlier shards put before it, so each record keeps the GPU it ran on; and the shards' GPU names into
+        gpu_types.txt. A file already there must be exactly what the merge would write (a rerun after a fix); anything else stops it, and
+        nothing is overwritten. MERGED, or stops.
 """
 import argparse
 import json
@@ -46,44 +49,64 @@ def pick_shard(qs, s, of):
     return sorted(q["video"] for q in qs)[int(s):: int(of)]
 
 
+LEDGER = "gpu_ledger.jsonl"                 # flops_run.LEDGER, named here too so this module needs no torch
+
+
+def read_lines(path):
+    if not os.path.exists(path):
+        return []
+    return [line if line.endswith("\n") else line + "\n" for line in open(path) if line.strip()]
+
+
+def write_once(path, content):
+    """Writes content to path; a file already there must hold exactly content. -> 'written' or 'unchanged'."""
+    if os.path.exists(path):
+        with open(path) as f:
+            if f.read() != content:
+                raise SystemExit(f"MERGE STOPPED: {path} is there and isn't what the merge writes; nothing is overwritten. Tell the user.")
+        return "unchanged"
+    with open(path + ".tmp", "w") as f:
+        f.write(content)
+    os.replace(path + ".tmp", path)
+    return "written"
+
+
 def merge(out_dir, rows, model="smolvlm", of=3):
-    """-> {row: records written}. Stops on a missing shard folder, a (condition, qid) twice, or a merged file already there."""
+    """-> ({row: records}, {file: written or unchanged}). Stops on a missing shard folder, a (condition, qid) twice, or a merged file that
+    isn't what this merge writes."""
     shards = [os.path.join(out_dir, f"shard{s}", model) for s in range(of)]
     missing = [p for p in shards if not os.path.isdir(p)]
     if missing:
         raise SystemExit(f"MERGE STOPPED: no {missing}. Run every shard first.")
     target = os.path.join(out_dir, model)
     os.makedirs(target, exist_ok=True)
-    written = {}
+    ledgers = [[json.loads(x) for x in read_lines(os.path.join(sh, LEDGER))] for sh in shards]
+    written, state, ledger = {}, {}, []
     for row in rows:
-        path = os.path.join(target, f"{row}.jsonl")
-        if os.path.exists(path):
-            raise SystemExit(f"MERGE STOPPED: {path} is there already; nothing is overwritten. Tell the user.")
         seen, lines = set(), []
-        for sh in shards:
-            p = os.path.join(sh, f"{row}.jsonl")
-            if not os.path.exists(p):
-                continue
-            for line in open(p):
-                if line.strip():
-                    r = json.loads(line)
-                    k = (r["condition"], r["qid"])
-                    if k in seen:
-                        raise SystemExit(f"MERGE STOPPED: {row} {k} in two shards. Tell the user.")
-                    seen.add(k)
-                    lines.append(line if line.endswith("\n") else line + "\n")
-        with open(path + ".tmp", "w") as f:
-            f.writelines(lines)
-        os.replace(path + ".tmp", path)
+        for s, sh in enumerate(shards):
+            mine = read_lines(os.path.join(sh, f"{row}.jsonl"))
+            for e in ledgers[s]:
+                if e["row"] == row:
+                    ledger.append(dict(e, first_line=int(e["first_line"]) + len(lines), shard=s))
+            for line in mine:
+                r = json.loads(line)
+                k = (r["condition"], r["qid"])
+                if k in seen:
+                    raise SystemExit(f"MERGE STOPPED: {row} {k} in two shards. Tell the user.")
+                seen.add(k)
+            lines += mine
+        state[f"{row}.jsonl"] = write_once(os.path.join(target, f"{row}.jsonl"), "".join(lines))
         written[row] = len(lines)
+    state[LEDGER] = write_once(os.path.join(target, LEDGER), "".join(json.dumps(e) + "\n" for e in ledger))
     names = set()
     for sh in shards:
-        p = os.path.join(sh, "gpu_types.txt")
-        if os.path.exists(p):
-            names |= {x.strip() for x in open(p) if x.strip()}
-    with open(os.path.join(target, "gpu_types.txt"), "a") as f:
-        f.writelines(n + "\n" for n in sorted(names))
-    return written
+        names |= {x.strip() for x in read_lines(os.path.join(sh, "gpu_types.txt"))}
+    path = os.path.join(target, "gpu_types.txt")
+    have = {x.strip() for x in read_lines(path)}
+    with open(path, "a") as f:
+        f.writelines(n + "\n" for n in sorted(names - have))
+    return written, state
 
 
 def main(argv=None):
@@ -118,8 +141,10 @@ def main(argv=None):
         qs = questions()
         print(f"{len(qs)} {len({q['video'] for q in qs})}")
     else:
-        got = merge(os.path.abspath(a.out_dir), a.rows.split(","), a.model, a.of)
-        print(f"MERGED: {sum(got.values())} records from {a.of} shards: {got}", flush=True)
+        got, state = merge(os.path.abspath(a.out_dir), a.rows.split(","), a.model, a.of)
+        new = sorted(k for k, v in state.items() if v == "written")
+        print(f"MERGED: {sum(got.values())} records from {a.of} shards: {got}; the GPU ledger carried over; written {new or 'nothing new'}, "
+              f"the rest already there and identical", flush=True)
 
 
 if __name__ == "__main__":

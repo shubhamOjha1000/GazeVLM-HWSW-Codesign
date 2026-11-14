@@ -3246,3 +3246,43 @@ sbatch accuracy_tables/hpc/hdepic18_summary.SBATCH merge      # after 3 shards: 
 10. **Chance and Uniform minus Blind per group, the side table against section 17, and every deviation:** D3's stamp, D2's exception and D5's exclusions.
 
     **Don't claim a winner.**
+
+### Diagnostic C1 to C4: why budget and nogate sit at Blind on HD-EPIC (2026-11-14)
+
+**Diagnostic only.** No method setting changes, nothing feeds a results table, and every line is labelled diagnostic. Every results folder is only read; writes go only to `$GV_ROOT/data/hdepic/diagnose18/`. The 4 jobs are independent: submit them together, with the user's OK. C1 and C2 run on the CPU, and C3 and C4 on one B200 each.
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+sbatch --job-name=hdepic18-diag-c1 accuracy_tables/hpc/hdepic18_diag_cpu.SBATCH c1
+sbatch --job-name=hdepic18-diag-c2 accuracy_tables/hpc/hdepic18_diag_cpu.SBATCH c2
+sbatch --job-name=hdepic18-diag-c3 accuracy_tables/hpc/hdepic18_diag_gpu.SBATCH c3
+sbatch --job-name=hdepic18-diag-c4 accuracy_tables/hpc/hdepic18_diag_gpu.SBATCH c4
+```
+
+| Job | What it does | Its result lines |
+|---|---|---|
+| C1 (CPU, about 30 to 60 min) | Each row's frames for 20 action_recognition and 5 "where looking" questions, built by the GPU run's own `flops_run.reference_jobs` and `plan_jobs`. Per frame: span, candidates, and the JPEG against its MP4 frame decoded again. The fovea's box in source pixels; the prompts | `FRAMES IN SPAN: <n> of <n>`, `FOVEATED FRAMES = PLAN'S CANDIDATES: <n> of <n>`, `FILES MATCH THEIR MP4 FRAMES`, `PROMPTS MATCH OUTSIDE THE IMAGES`, `C1 DONE` |
+| C2 (CPU, about 10 min) | Answer agreement from the saved answers: action_recognition, fine_grained, 3d_perception, section 17's gaze_estimation and section 14's EgoEverything | one `AGREEMENT <set>:` line each, `C2 DONE` |
+| C3 (B200, about 20 to 30 min) | 50 action_recognition and 50 EgoEverything questions, Uniform K frames: stock against the foveated builder at full resolution (k = 9). The same in fp32 on the vision side. The 17-token layout's cells and position ids against the stock ones, and each cell's token drift | `FOVEATED IDENTITY (...)`, `VISION IDENTITY IN FP32 (...)`, `FOVEA INPUTS ARE THE STOCK PIXELS (...)`, `TOKEN DRIFT (...)`, `C3 DONE` |
+| C4 (B200, about 30 to 45 min) | The ladder on action_recognition's 940 questions with Uniform K' = 9's frames (no dependence on C1). (a) stock 81, (b) avgpool 4x4 16, (c) periphery only 9, (d) foveated 17, (e1) shrunk to 126 px 9, (e2) 168 px 16, (g) foveated at the centre 17. Then (f) the gate's frames at 10% encoded stock, which needs a rerun if C1 finds a frame bug. Blind comes from section 18's saved answers | one `C4 <name>: n ..., accuracy ...% [lo, hi], ...` line each, `C4 DONE` |
+
+**C3's identity.** In bf16 the foveated builder and the stock path can't agree to the last bit: one embeds 14 px patches one by one, the other convolves the image, and the sums round differently. So `FOVEATED IDENTITY` reports how many answers differ and the largest probability difference. The identity itself is `VISION IDENTITY IN FP32`: cos min above 0.9999, as the parity check requires.
+
+**Read the results:**
+
+```bash
+grep -h "^FRAMES IN SPAN\|^FOVEATED FRAMES\|^FILES MATCH\|^PROMPTS MATCH\|PROMPT DIFFERS\|^C1 DONE\|Traceback" /scratch/$USER/GazeVLM/logs/hdepic18-diag-c1_*.log
+grep -h "^AGREEMENT\|^C2 DONE\|Traceback" /scratch/$USER/GazeVLM/logs/hdepic18-diag-c2_*.log
+grep -h "parity OK\|parity failed\|^FOVEATED IDENTITY\|first divergence\|^VISION IDENTITY\|^FOVEA INPUTS\|^TOKEN DRIFT\|^C3 DONE\|DIAG DONE\|Traceback" /scratch/$USER/GazeVLM/logs/hdepic18-diag-c3_*.log
+grep -h "parity OK\|parity failed\|^C4 \|^reading\|DIAG DONE\|Traceback" /scratch/$USER/GazeVLM/logs/hdepic18-diag-c4_*.log
+```
+
+**Stop and tell the user on:** a traceback, `parity failed`, a non-B200 GPU, `FRAMES IN SPAN` or `FOVEATED FRAMES = PLAN'S CANDIDATES` below n of n, `FILES MATCH` below n of n, `PROMPT DIFFERS`, `VISION IDENTITY IN FP32 ... DIFFERS`, or `FOVEA INPUTS ... DIFFER`. **STOP after the 4 jobs.** Send every result line; the user decides what follows. A bug's fix and any rerun (budget and nogate in sections 14, 17 and 18) are the user's call.
+
+**The merge, fixed (no GPU rerun).** `checks18 merge` now carries each shard's `gpu_ledger.jsonl` into the merged folder, every line's `first_line` moved by the records of the shards before it. So each record keeps the GPU it ran on; before this, every row showed "records before the first ledger line" and `GPU per record: {}`. A merged file already there must be exactly what the merge writes, or it stops (`MERGE STOPPED`); nothing is overwritten. The records line now says `(merged from 3 shards)`. The INCOMPLETE check is as strict as before. Then:
+
+```bash
+sbatch accuracy_tables/hpc/hdepic18_summary.SBATCH merge
+```
+
+Expect `MERGED: ... the GPU ledger carried over; written ['gpu_ledger.jsonl'], the rest already there and identical`, `GPU per record: {'NVIDIA B200': <all>}`, `RECORDS: <n> of <n> planned answers ... (merged from 3 shards)`, then the tables and `EVERY n IS COMPLETE`.

@@ -303,21 +303,44 @@ def test_picks_take_the_groups_in_turn_and_shards_split_evenly():
         checks18.pick_shard(qs, 3, 3)
 
 
-def test_the_merge_takes_every_record_once_and_overwrites_nothing(tmp_path):
+def test_the_merge_carries_each_shards_gpu_ledger_and_overwrites_nothing(tmp_path):
+    from accuracy_tables.hpc.all350 import flops_shards
     for s in range(3):
         d = tmp_path / f"shard{s}" / "smolvlm"
         os.makedirs(d)
-        (d / "uniform.jsonl").write_text(json.dumps(dict(condition="u", qid=s)) + "\n")
+        (d / "uniform.jsonl").write_text("".join(json.dumps(dict(condition="u", qid=10 * s + i)) + "\n" for i in range(s + 1)))
         (d / "gpu_types.txt").write_text("NVIDIA B200\n")
-    got = checks18.merge(str(tmp_path), ["uniform", "blind"])
-    assert got == {"uniform": 3, "blind": 0} and open(tmp_path / "smolvlm" / "gpu_types.txt").read() == "NVIDIA B200\n"
+        (d / "gpu_ledger.jsonl").write_text(json.dumps(dict(row="uniform", condition="u", first_line=0, gpu="NVIDIA B200")) + "\n")
+    got, state = checks18.merge(str(tmp_path), ["uniform", "blind"])
+    assert got == {"uniform": 6, "blind": 0} and state["uniform.jsonl"] == "written" and state["gpu_ledger.jsonl"] == "written"
+    led = [json.loads(x) for x in open(tmp_path / "smolvlm" / "gpu_ledger.jsonl")]
+    assert [e["first_line"] for e in led] == [0, 1, 3] and [e["shard"] for e in led] == [0, 1, 2]     # moved by the earlier shards
+    gpus, found = flops_shards.folder_gpus(str(tmp_path / "smolvlm"), ["uniform"], "run")
+    assert dict(gpus) == {"NVIDIA B200": 6} and found == []                       # no "records before the first ledger line"
+    got, state = checks18.merge(str(tmp_path), ["uniform", "blind"])             # a rerun: already there and identical
+    assert set(state.values()) == {"unchanged"} and open(tmp_path / "smolvlm" / "gpu_types.txt").read() == "NVIDIA B200\n"
+    with open(tmp_path / "smolvlm" / "uniform.jsonl", "a") as f:
+        f.write(json.dumps(dict(condition="u", qid=99)) + "\n")
     with pytest.raises(SystemExit, match="nothing is overwritten"):
         checks18.merge(str(tmp_path), ["uniform"])
-    (tmp_path / "shard1" / "smolvlm" / "blind.jsonl").write_text(json.dumps(dict(condition="b", qid=0)) + "\n")
-    (tmp_path / "shard2" / "smolvlm" / "blind.jsonl").write_text(json.dumps(dict(condition="b", qid=0)) + "\n")
-    os.remove(tmp_path / "smolvlm" / "blind.jsonl")
+    (tmp_path / "shard2" / "smolvlm" / "uniform.jsonl").write_text(json.dumps(dict(condition="u", qid=0)) + "\n")
     with pytest.raises(SystemExit, match="in two shards"):
-        checks18.merge(str(tmp_path), ["blind"])
+        checks18.merge(str(tmp_path), ["uniform"])
+
+
+def test_the_records_wording_says_when_the_folder_is_merged(tmp_path, capsys):
+    from accuracy_tables.hpc.all350 import smolvlm256_checks as sc
+    d = tmp_path / "smolvlm"
+    os.makedirs(d)
+    (d / "uniform.jsonl").write_text(json.dumps(dict(condition="u", qid=0)) + "\n")
+    (d / "gpu_ledger.jsonl").write_text(json.dumps(dict(row="uniform", condition="u", first_line=0, gpu="NVIDIA B200")) + "\n")
+    (tmp_path / "plan.json").write_text(json.dumps(dict(lines=[dict(row="uniform", condition="u")])))
+    args = ["records", "--folder", str(d), "--plan", str(tmp_path / "plan.json"), "--rows", "uniform", "--questions", "1"]
+    sc.main(args + ["--merged-from", "3"])
+    out = capsys.readouterr().out
+    assert "(merged from 3 shards)" in out and "GPU per record: {'NVIDIA B200': 1}" in out
+    sc.main(args)
+    assert "(one job, so nothing to merge)" in capsys.readouterr().out
 
 
 def test_the_tables_label_the_sample_and_the_separate_run():

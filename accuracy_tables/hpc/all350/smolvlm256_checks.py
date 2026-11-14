@@ -269,7 +269,8 @@ def records_cmd(a):
         found.append(f"{sum(errors.values())} records with an error")
     for line in found[:40]:
         print("  ", line, flush=True)
-    print(f"RECORDS: {n} of {expected} planned answers in {a.folder} (one job, so nothing to merge)", flush=True)
+    how = f"merged from {a.merged_from} shards" if getattr(a, "merged_from", None) else "one job, so nothing to merge"
+    print(f"RECORDS: {n} of {expected} planned answers in {a.folder} ({how})", flush=True)
     if found:
         sys.exit(f"INCOMPLETE: {len(found)} problems. Rerun the full job, or tell the user.")
 
@@ -327,6 +328,7 @@ def main(argv=None):
     for k in ("--folder", "--plan", "--rows"):
         s.add_argument(k, required=True)
     s.add_argument("--questions", type=int, help="questions per planned condition (default: EgoEverything's 5,985)")
+    s.add_argument("--merged-from", type=int, help="the folder holds this many shards' merged records (only the wording changes)")
     s.set_defaults(run=records_cmd)
     s = sub.add_parser("vs2p2b")
     for k in ("--ours", "--other", "--out"):
