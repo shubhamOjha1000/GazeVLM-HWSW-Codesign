@@ -3428,6 +3428,7 @@ sbatch --job-name=sweep10-qwen3-checks accuracy_tables/hpc/hdepic_sweep10_a100.S
 **SmolVLM on an A100.** `hdepic_sweep10_a100.SBATCH` also takes `smolvlm` and `smolvlm256`, with job names `sweep10-smolvlm22-a100-<mode>` and `sweep10-smolvlm256-a100-<mode>`.
 - **Its own folder:** such a run writes `data/hdepic/sweep10/<model>_a100/`, apart from the B200 run. Answers differ between GPU types, so the two are never mixed, and checks, plan and run of one folder all run on one GPU type.
 - **Its regression:** no earlier SmolVLM run was on an A100, so its checks compare against section 14's (100 records) or section 16's (50) B200 records with `compare_records --report`. Frames and tokens must match (`TOKENS MATCH`, else the job stops); the answers that differ are counted for the user.
+- **Its Blind recheck** against v2 Stage 1 (a B200) is cross-GPU too: the prompt tokens must match, and the answers that differ among the 50 are counted for the user (`BLIND RECHECK (cross-GPU, ...)`). On the B200 route it stays strict. Either way the sweep's blind row is the folder's own, scored on its GPU for all 940 questions, and S4 stops on `GPU TYPES MIXED` if a folder's conditions ran on more than one GPU type.
 - **GPU use:** SmolVLM does little GPU work per frame, so on an A100 the 30-minute means matter even more: `GPU LOW`, stop and tell the user.
 - **S4** reports each folder as its own column.
 

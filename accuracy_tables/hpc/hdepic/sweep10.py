@@ -695,6 +695,15 @@ def effect_rows(model, answers):
     return out
 
 
+def ledger_problems(ledger, conditions):
+    """A folder's GPU ledger (a line each time the run starts a condition) -> (GPU names, problems): every planned condition must be on
+    file, and all on one GPU type, so that no model's table mixes GPU types (its own Blind included)."""
+    gpus = {e["gpu"] for e in ledger}
+    missing = sorted(set(conditions) - {e["condition"] for e in ledger})
+    problems = ([f"{len(missing)} conditions without a GPU on file, for example {missing[:3]}"] if missing else []) +         ([f"{len(gpus)} GPU types: {sorted(gpus)}"] if len(gpus) > 1 else [])
+    return gpus, problems
+
+
 def summary_cmd(a):
     import pandas as pd
     pd.set_option("display.width", 250)
@@ -704,6 +713,10 @@ def summary_cmd(a):
         plan = read_json(root(name, "plan.json"))
         answers = {ln["name"]: read_jsonl(root(name, "answers", f"{ln['name']}.jsonl")) for ln in plan["lines"]}
         label, model = f"{MODELS[model]['name']} on {plan.get('gpu')}", name
+        gpus, found = ledger_problems(read_jsonl(root(name, "answers", "gpu_ledger.jsonl")), [ln["condition"] for ln in plan["lines"]])
+        if found:
+            sys.exit(f"GPU TYPES MIXED in {name}: " + "; ".join(found) + ". Stop and tell the user.")
+        print(f"{name}: every row, Blind included, scored on {sorted(gpus)}", flush=True)
         missing = [n for n, r in answers.items() if len({int(x["qid"]) for x in r}) != N_DEV]
         if missing:
             print(f"{model}: INCOMPLETE: {missing}", flush=True)

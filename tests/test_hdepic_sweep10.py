@@ -345,3 +345,27 @@ def test_a_smolvlm_run_on_an_a100_has_its_own_folder(tmp_path, monkeypatch):
         os.makedirs(os.path.join(base, name))
         open(os.path.join(base, name, "plan.json"), "w").close()
     assert sw.runs() == [("smolvlm", "smolvlm"), ("smolvlm", "smolvlm_a100"), ("qwen3", "qwen3")]
+
+
+def test_the_blind_recheck_is_strict_on_stage_1s_gpu_and_counts_answers_on_another():
+    pytest.importorskip("torch")
+    from accuracy_tables.hpc.hdepic import sweep10_gpu as g
+    rec = lambda q, pred, p0, nt: dict(qid=q, pred=pred, p=[p0, 1 - p0, 0, 0, 0], n_tokens=nt, error=None)
+    ref = [rec(q, "A", 0.6, 100 + q) for q in range(4)]
+    near = [rec(0, "B", 0.45, 100), rec(1, "A", 0.61, 101), rec(2, "A", 0.6, 102), rec(3, "A", 0.6, 103)]   # rounding on a near-tie
+    bad, line = g.blind_recheck_result(near, ref, 4, cross=False)
+    assert bad and "2 differ" in line                                                 # B200 route: strict, nothing may differ
+    assert g.blind_recheck_result(ref, ref, 4, cross=False) == ([], g.blind_recheck_result(ref, ref, 4, cross=False)[1])
+    bad, line = g.blind_recheck_result(near, ref, 4, cross=True)
+    assert not bad and "prompt tokens differ on 0, answers differ on 1 of 4" in line     # A100 route: answers counted, not failed
+    other = [dict(r, n_tokens=r["n_tokens"] + 1) for r in ref]
+    assert g.blind_recheck_result(other, ref, 4, cross=True)[0]                       # another prompt fails on any GPU
+    assert g.cross_gpu("NVIDIA A100-SXM4-80GB", {"NVIDIA B200"}, "smolvlm_a100") and not g.cross_gpu("NVIDIA B200", {"NVIDIA B200"}, "smolvlm")
+    assert g.cross_gpu("NVIDIA A100-SXM4-80GB", set(), "smolvlm_a100") and not g.cross_gpu("NVIDIA B200", set(), "smolvlm")
+
+
+def test_the_summary_refuses_a_folder_that_mixes_gpu_types():
+    ledger = [dict(row="uniform", condition="u", gpu="NVIDIA A100-SXM4-80GB"), dict(row="blind", condition="b", gpu="NVIDIA A100-SXM4-80GB")]
+    assert sw.ledger_problems(ledger, ["u", "b"]) == ({"NVIDIA A100-SXM4-80GB"}, [])
+    assert sw.ledger_problems(ledger + [dict(row="blind", condition="b", gpu="NVIDIA B200")], ["u", "b"])[1]
+    assert sw.ledger_problems(ledger, ["u", "b", "x"])[1] == ["1 conditions without a GPU on file, for example ['x']"]

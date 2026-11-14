@@ -344,14 +344,43 @@ def flops_exact(model, ad, cfg, data, be, units, counting, out, workers):
     return bad
 
 
+def v2_gpus():
+    """The GPU names v2 Stage 1 recorded (check_gpu --record), or none if it recorded nothing."""
+    path = sw.v2_path("stage1", "gpu_types.txt")
+    if not os.path.exists(path):
+        return set()
+    with open(path) as f:
+        return {x.strip() for x in f if x.strip()}
+
+
+def cross_gpu(gpu, ref_gpus, run_name):
+    """Does this job run on another GPU type than v2 Stage 1's? From its recorded names, else from the folder (<model>_a100: an A100)."""
+    return gpu not in ref_gpus if ref_gpus else run_name.endswith("_a100")
+
+
+def blind_recheck_result(new, ref, n_want, cross):
+    """(problems, the line to print). Same GPU type: answers, probabilities and prompt tokens must all match. Another type: the prompt
+    tokens must match (the same prompts), and the answers that differ are counted for the user, not failed (rounding on near-ties)."""
+    n, differ, prob = sw.same_by_qid(new, ref, ("pred", "p", "n_tokens"))
+    if not cross:
+        line = f"BLIND RECHECK: {n} dev questions rescored against v2 Stage 1's blind records: {differ} differ, max_prob_diff {prob}"
+        return ([] if not differ and n == n_want else [f"blind recheck: {differ} of {n} differ"]), line
+    _, tokens, _ = sw.same_by_qid(new, ref, ("n_tokens",))
+    _, answers, _ = sw.same_by_qid(new, ref, ("pred",))
+    line = (f"BLIND RECHECK (cross-GPU, against v2 Stage 1's B200 records): {n} dev questions, prompt tokens differ on {tokens}, answers "
+            f"differ on {answers} of {n}. Report this to the user; this folder's own Blind, on this GPU, is the sweep's blind row")
+    return ([] if not tokens and n == n_want else [f"blind recheck: prompt tokens differ on {tokens} of {n}"]), line
+
+
 def blind_recheck(ad, data, out):
-    """50 of v2 Stage 1's Blind records rescored here (the 2.2B, a B200, as Stage 1) -> problems."""
+    """50 of v2 Stage 1's Blind records rescored here: strict on Stage 1's GPU type (a B200), cross-GPU on another -> problems."""
     path = os.path.join(fresh(os.path.join(out, "blind")), "blind.jsonl")
     items = common.make_items(data["qs"], {})[:BLIND_RECHECK]
     run.run_blind(ad, items, path)
-    n, differ, prob = sw.same_by_qid(sw.read_jsonl(path), sw.read_jsonl(sw.v2_path("stage1", "blind.jsonl")), ("pred", "p", "n_tokens"))
-    print(f"BLIND RECHECK: {n} dev questions rescored against v2 Stage 1's blind records: {differ} differ, max_prob_diff {prob}", flush=True)
-    return [] if not differ and n == len(items) else [f"blind recheck: {differ} of {n} differ"]
+    cross = cross_gpu(torch.cuda.get_device_name(), v2_gpus(), sw.run_name(ad.key))
+    bad, line = blind_recheck_result(sw.read_jsonl(path), sw.read_jsonl(sw.v2_path("stage1", "blind.jsonl")), len(items), cross)
+    print(line, flush=True)
+    return bad
 
 
 def checks_cmd(a):
