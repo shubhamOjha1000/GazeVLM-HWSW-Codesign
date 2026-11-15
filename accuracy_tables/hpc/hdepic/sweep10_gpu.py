@@ -3,7 +3,12 @@
 
     python -u -m accuracy_tables.hpc.hdepic.sweep10_gpu checks --model <m> --workers <W>     S1
     python -u -m accuracy_tables.hpc.hdepic.sweep10_gpu plan --model <m> --workers <W>       S2
-    python -u -m accuracy_tables.hpc.hdepic.sweep10_gpu run --model <m> --workers <W>        S3
+    python -u -m accuracy_tables.hpc.hdepic.sweep10_gpu run --model <m> --workers <W>        S3, one process
+    python -u -m accuracy_tables.hpc.hdepic.sweep10_gpu drop-oom | split --procs <n> --model <m>   S3, before the processes
+    python -u -m accuracy_tables.hpc.hdepic.sweep10_gpu run --model <m> --workers <W> --worker <i> --of <n>   S3, one of n
+    python -u -m accuracy_tables.hpc.hdepic.sweep10_gpu status --model <m>                    S3, after them: RUN DONE
+    python -u -m accuracy_tables.hpc.hdepic.sweep10_gpu run ... --only <list> --max-questions 20 --out-dir <dir>, then
+        same-dirs --a <one process> --b <concurrent> --names <list>                      the concurrency check
 
 checks  the snapshot; parity; stock tokens per frame and every representation's tokens, encoded; identity: ours_res_1.00 and
         nogate_res_1.00 on Uniform's frames, and the twoview code with the whole frame alone, must give Uniform's answers (SAME ANSWERS,
@@ -21,6 +26,7 @@ run     every planned condition on the 940 dev questions into answers/<condition
 """
 import argparse
 import contextlib
+import glob
 import json
 import os
 import shutil
@@ -465,11 +471,15 @@ def knob_counts(path, frames, backend, cfg, side, check=True):
             {b: of("prunevid", j) for j, b in enumerate(GRID_BETA)})
 
 
-def knob_choices(cands, rho, k):
+def knob_choices(cands, rho, k, model=None):
     """{row: [(share, knob)]} -> ({row: (share, knob)} by the rho rule, {row: (most share, its knob)} for every row whose whole range keeps
-    less than rho). Stops, naming every such row, if a row can't keep the 0.50 floor at all."""
+    less than rho). Stops, naming every such row, if a row can't keep the 0.50 floor at all. A row the user marked RHO UNREACHABLE on this
+    model (sweep10.UNREACHABLE) takes its highest share instead (the larger knob on a tie)."""
     out, short, bad = {}, {}, []
     for row, c in cands.items():
+        if sw.unreachable(model, row):
+            out[row] = max(c, key=lambda x: (x[0], x[1]))
+            continue
         try:
             out[row] = sw.pick(c, rho, 1.0, name=row)
         except ValueError as ex:
@@ -506,15 +516,16 @@ def grid_candidates(model):
                 gazevlm2=[(b / stock, b / stock) for b in range(2, 2 * stock + 1, 2)])
 
 
-def knob_problems(cands, stock):
+def knob_problems(cands, stock, model=None):
     """A knob that doesn't move its row's share (not connected), or a share that falls as the knob keeps more (wrong direction) ->
-    named problems. Keeping more: a larger knob, except DyCoke's and DTD's, which say what to drop."""
+    named problems. Keeping more: a larger knob, except DyCoke's and DTD's, which say what to drop. A row the user marked RHO
+    UNREACHABLE on this model is only checked for direction."""
     out = []
     for row, c in cands.items():
         shares = [x[0] for x in sorted(c, key=lambda x: x[1])]
         if row in PRUNE_KNOBS:
             shares = shares[::-1]
-        if max(shares) - min(shares) < CONNECTED_SPAN:
+        if max(shares) - min(shares) < CONNECTED_SPAN and not sw.unreachable(model, row):
             out.append(f"KNOB NOT CONNECTED: {row} keeps {100 * min(shares):.2f}% to {100 * max(shares):.2f}% of the stock tokens over its "
                        f"whole knob range")
         drop = max((a - b for a, b in zip(shares, shares[1:])), default=0.0)
@@ -543,10 +554,14 @@ def knob_preflight(model, ad, cfg, inputs, ks):
             lo, hi = min(c, key=lambda x: x[1]), max(c, key=lambda x: x[1])
             print(f"KNOB RANGE {model} rho {rho:.2f} K'={k} ({len(sample)} clips): {row} knob {lo[1]:g} to {hi[1]:g} keeps "
                   f"{100 * lo[0]:.2f}% to {100 * hi[0]:.2f}% ({len(c)} settings)", flush=True)
-        bad = knob_problems(cands, ad.stock_tokens)
+        bad = knob_problems(cands, ad.stock_tokens, model)
         if bad:
             sys.exit("KNOB RANGE FAILED: " + "; ".join(bad) + ". Stop and tell the user.")
-        _, short = knob_choices(cands, rho, k)
+        out, short = knob_choices(cands, rho, k, model)
+        for row in cands:
+            if sw.unreachable(model, row):
+                print(f"RHO UNREACHABLE (the user's decision) {model} {row}: its highest share {100 * out[row][0]:.2f}% (at {out[row][1]:g}) on "
+                      "the sample; it runs there, labelled, outside the best-rho choice", flush=True)
         for row, (most, at) in short.items():
             print(f"RHO SHORT (sample): {row} at rho {rho:.2f} keeps at most {100 * most:.2f}% over its whole range (at {at})", flush=True)
     print(f"KNOB RANGES OK: every baseline's share moves with its knob, the right way, and keeps 0.50 somewhere, on {PREFLIGHT_CLIPS} "
@@ -564,10 +579,10 @@ def baseline_knobs(ad, cfg, data_k, k, rho, counts_path):
     window = int(cfg_k["dycoke"]["settings"][0]["window"])
     kept = knob_counts(counts_path, frames, ad.fastvid_backend(), cfg_k, side)
     cands = share_candidates({v: len(frames[v]) for v in frames}, ad.stock_tokens, side * side, window, *kept, nq=nq)
-    bad = knob_problems(cands, ad.stock_tokens)
+    bad = knob_problems(cands, ad.stock_tokens, ad.key)
     if bad:
         sys.exit(f"KNOB RANGE FAILED on all {len(frames)} clips at K'={k}: " + "; ".join(bad) + ". Stop and tell the user.")
-    return knob_choices(cands, rho, k)
+    return knob_choices(cands, rho, k, ad.key)
 
 
 def prompt_fits(model, ad, be, data, blind):
@@ -618,7 +633,7 @@ def make_lines(model, ad, cfg, data, units, p1, p2, blind, log=print):
                     tokens_per_frame=tpf, views=views_, side=side, K=int(k), knob=knob, v_frame=float(v), prompt=prompt,
                     target_pct=100 * sw.BUDGET if kind not in ("uniform", "blind") else None, planned_pct=pct,
                     miss_pts=pct - 100 * sw.BUDGET, nearest_only=sw.nearest_only(pct) if kind not in ("uniform", "blind") else False,
-                    frames_per_q=float(np.mean(frames)) if frames is not None else None, rho_short=False)
+                    frames_per_q=float(np.mean(frames)) if frames is not None else None, rho_short=False, rho_unreachable=False, label="")
         line.update(extra)
         lines.append(line)
 
@@ -653,6 +668,17 @@ def make_lines(model, ad, cfg, data, units, p1, p2, blind, log=print):
             log(f"RHO SHORT: {row} at rho {rho:.2f} keeps at most {100 * most:.2f}% of the stock tokens over its knob's whole range (at "
                 f"{at}); by the rho rule it runs at its setting nearest rho above the floor. The user decides before S3.")
         for row in sw.BASELINE_ROWS:
+            if sw.unreachable(model, row):              # the user's decision: once, at its highest share, with its own K' at 10%
+                if rho != sw.RHOS[0]:
+                    continue
+                sh, knob = knobs[row]
+                tpf, vf = sh * stock, units["v_stock"]
+                k, _ = sw.best_k(lambda k: share(np.minimum(k, K), tpf, vf, p1))
+                log(f"RHO UNREACHABLE (the user's decision): {row} on {model} runs at its highest share, {100 * sh:.2f}% of the stock "
+                    f"tokens (knob {knob:g}, counted on Uniform K'={k1}), at K'={k}, labelled, outside the best-rho choice")
+                add(f"{row}_rho_unreachable", row, "baseline", None, float(tpf), 1, S, k, share(np.minimum(k, K), tpf, vf, p1), vf, row=row,
+                    knob=float(knob), frames=np.minimum(k, K), rho_unreachable=True, label=sw.UNREACHABLE[(model, row)])
+                continue
             if row == "avgpool":
                 s_ = sw.avgpool_side(model, rho)
                 tpf, views_, knob, k = s_ * s_, 1, s_ * s_ / stock, None
@@ -687,8 +713,8 @@ def plan_cmd(a):
     blind = {int(r.qid): int(ad.blind_ids(build_messages(r.question, list(r.options), [], 0)).shape[1]) for r in data["qs"].itertuples()}
     p1, p2 = prompt_fits(model, ad, be, data, blind)
     lines, total, k_of = make_lines(model, ad, cfg, data, units, p1, p2, blind)
-    if sorted(ln["name"] for ln in lines) != sorted(c[0] for c in sw.conditions()):
-        sys.exit("the planned conditions aren't the protocol's 28. Stop and tell the user.")
+    if sorted(ln["name"] for ln in lines) != sorted(c[0] for c in sw.conditions(model)):
+        sys.exit(f"the planned conditions aren't the protocol's {len(sw.conditions(model))}. Stop and tell the user.")
     inputs = fc.Inputs(data)
     jobs = {}
     for ln in lines:
@@ -744,7 +770,7 @@ def plan_cmd(a):
     pd.set_option("display.width", 250)
     print(f"\n=== {model}: target 10% of its Uniform-64 FLOPs ({total / sw.N_DEV / 1e12:,.2f} TFLOPs a question on average); nearest_only: "
           f"more than {flops.NEAREST_ONLY_PTS} points off", flush=True)
-    print(t[["name", "rho", "rho_real", "rho_short", "tokens_per_frame", "views", "side", "K", "knob", "target_pct", "planned_pct", "miss_pts",
+    print(t[["name", "rho", "rho_real", "rho_short", "rho_unreachable", "tokens_per_frame", "views", "side", "K", "knob", "target_pct", "planned_pct", "miss_pts",
              "nearest_only", "frames_per_q", "sec_per_q"]].round(4).to_string(index=False), flush=True)
     print(f"knob ranges searched: GazeVLM rho {GRID_RHO[0]:g} to {GRID_RHO[-1]:g} ({len(GRID_RHO)} values), FastVID r {GRID_R[0]:g} to "
           f"{GRID_R[-1]:g}, PruneVid beta {GRID_BETA[0]:g} to {GRID_BETA[-1]:g}; RHO SHORT rows: "
@@ -759,51 +785,195 @@ def plan_cmd(a):
 
 
 # ---------------------------------------------------------------------------- S3
-def run_cmd(a):
+CONC_CHECK = ("uniform", "ours_res_0.50", "fastvid_0.50")       # the concurrency check's conditions: run.py's stock path, this code, a baseline
+
+
+def assign(lines, remaining, procs):
+    """Each condition with questions left onto one of procs processes: the longest first, onto the least loaded (projected seconds from
+    the plan's timing) -> ([[condition names]], [seconds]). Each condition is scored whole by one process, so no two write a file."""
+    work = sorted(((remaining[ln["name"]] * float(ln.get("sec_per_q") or 1.0), ln["name"]) for ln in lines if remaining[ln["name"]] > 0),
+                  key=lambda x: (-x[0], x[1]))
+    names, loads = [[] for _ in range(procs)], [0.0] * procs
+    for sec, name in work:
+        i = min(range(procs), key=lambda j: (loads[j], j))
+        names[i].append(name)
+        loads[i] += sec
+    return names, loads
+
+
+def answered(path):
+    """Questions with a record in a result file (an error record too: the scorers skip it)."""
+    return {int(r["qid"]) for r in sw.read_jsonl(path)}
+
+
+def split_cmd(a):
+    """Before the processes start: what each one scores, from the plan and the answers already saved, into answers/assignment.json."""
+    plan_path = sw.model_dir(a.model, "plan.json")
+    plan, out = sw.read_json(plan_path), sw.model_dir(a.model, "answers")
+    os.makedirs(out, exist_ok=True)
+    remaining = {ln["name"]: sw.N_DEV - len(answered(os.path.join(out, f"{ln['name']}.jsonl"))) for ln in plan["lines"]}
+    names, loads = assign(plan["lines"], remaining, a.procs)
+    sw.write_json(os.path.join(out, "assignment.json"), dict(procs=a.procs, plan_sha256=fc.sha256(plan_path), workers=names, seconds=loads,
+                                                             remaining=remaining))
+    left = sum(remaining.values())
+    print(f"SPLIT {a.model}: {left} answers left of {len(plan['lines']) * sw.N_DEV}, over {a.procs} processes on one GPU:", flush=True)
+    for i, (n, sec) in enumerate(zip(names, loads)):
+        print(f"   worker {i}: {len(n)} conditions, about {sec / 3600:.2f} h alone: {n}", flush=True)
+
+
+def drop_oom_cmd(a):
+    """Out-of-memory records are a failed attempt, not an answer: removed before a start, so their questions are scored again. Every
+    answer, and every nan record (the same input gives it again), stays."""
+    out = sw.model_dir(a.model, "answers")
+    dropped = {}
+    for path in sorted(glob.glob(os.path.join(out, "*.jsonl"))):
+        if os.path.basename(path).startswith("gpu_ledger"):
+            continue
+        with open(path) as f:
+            lines = [x for x in f if x.strip()]
+        keep = [x for x in lines if json.loads(x).get("error") != "oom"]
+        if len(keep) != len(lines):
+            with open(path + ".tmp", "w") as f:
+                f.writelines(keep)
+            os.replace(path + ".tmp", path)
+            dropped[os.path.basename(path)] = len(lines) - len(keep)
+    print(f"OOM RECORDS DROPPED: {dropped or 'none'}; every answer kept", flush=True)
+
+
+def note_gpu(out, ledger, job, path, gpu):
+    """flops_run.note_gpu's line, into this process's own ledger file (processes never share one)."""
     from accuracy_tables import flops_run
+    line = dict(row=job["row"], name=job["name"], condition=next(iter(job["conds"])), first_line=flops_run.count_lines(path), gpu=gpu,
+                job=os.environ.get("SLURM_JOB_ID"), node=os.environ.get("SLURMD_NODENAME"), pid=os.getpid())
+    with open(os.path.join(out, ledger), "a") as f:
+        f.write(json.dumps(line) + "\n")
+
+
+def run_cmd(a):
+    """Scores planned conditions: all of them (one process), one worker's share of answers/assignment.json (--worker of --of), or a list
+    (--only, with --max-questions and --out-dir: the concurrency check). Each condition's records go to its own file, resumable."""
     model = a.model
-    plan = sw.read_json(sw.model_dir(model, "plan.json"))
+    plan_path = sw.model_dir(model, "plan.json")
+    plan = sw.read_json(plan_path)
     if plan["model"] != model or plan["config_sha256"] != fc.sha256(sw.CONFIG):
         sys.exit(f"the plan is for {plan['model']}, or {sw.CONFIG} changed since it was made. Stop and tell the user.")
+    out = os.path.abspath(a.out_dir) if a.out_dir else sw.model_dir(model, "answers")
+    os.makedirs(out, exist_ok=True)
+    all_names = [ln["name"] for ln in plan["lines"]]
+    if a.only:
+        names, who, ledger = a.only.split(","), f"only {a.only}", f"gpu_ledger_{a.only.replace(',', '_')}.jsonl"
+    elif a.worker is not None:
+        asg = sw.read_json(os.path.join(out, "assignment.json"))
+        if asg["procs"] != a.of or asg["plan_sha256"] != fc.sha256(plan_path) or not 0 <= a.worker < a.of:
+            sys.exit(f"answers/assignment.json is for {asg['procs']} processes or another plan, not worker {a.worker} of {a.of}. Stop and tell the user.")
+        names, who, ledger = asg["workers"][a.worker], f"worker {a.worker} of {a.of}", f"gpu_ledger_w{a.worker}.jsonl"
+    else:
+        names, who, ledger = all_names, "one process", "gpu_ledger.jsonl"
+    unknown = sorted(set(names) - set(all_names))
+    if unknown:
+        sys.exit(f"{unknown} aren't planned conditions. Stop and tell the user.")
+    lines = [ln for ln in plan["lines"] if ln["name"] in set(names)]
+    marker = os.path.join(out, f".scoring_w{a.worker}") if a.worker is not None and not a.only else None
+    if not lines:
+        if marker:
+            open(marker, "w").close()
+        print(f"WORKER DONE: {model} {who}: nothing left to score", flush=True)
+        return
     cfg, data, ad, be = setup(model, a.workers)
     if (ad.model_id, check_snapshot(model, ad)) != (plan["model_id"], plan["snapshot"]):
         sys.exit("the model or its snapshot differs from the plan's. Stop and tell the user.")
     run.check_parity(ad, data, model)
-    out = sw.model_dir(model, "answers")
-    os.makedirs(out, exist_ok=True)
     inputs, jobs = fc.Inputs(data), []
-    for ln in plan["lines"]:
+    for ln in lines:
         job = build_job(ad, cfg, data, be, inputs, ln, a.workers)
         if set(job["conds"]) != {ln["condition"]}:
             sys.exit(f"{ln['name']}: the job's condition {sorted(job['conds'])} isn't the plan's {ln['condition']!r}. Stop and tell the user.")
         jobs.append(job)
-    gpu, status = flops_run.gpu_name(), {}
-    print(f"{len(jobs)} conditions x {sw.N_DEV} questions on {gpu}; projected {plan['projected_gpu_hours']:.2f} GPU-hours", flush=True)
+    gpu, status = torch.cuda.get_device_name(), {}
+    print(f"{model} {who}: {len(jobs)} conditions on {gpu}: {[j['name'] for j in jobs]}", flush=True)
+    if marker:
+        open(marker, "w").close()
     try:
         for job in jobs:
             path = os.path.join(out, f"{job['name']}.jsonl")
-            flops_run.note_gpu(out, job, path, gpu)
+            items = job["items"][:a.max_questions] if a.max_questions else job["items"]
+            note_gpu(out, ledger, job, path, gpu)
             with run._row(job["name"], status, True, path):
                 print("\n" + job["msg"], flush=True)
-                job["score"](job["items"], job["conds"], path)
+                job["score"](items, job["conds"], path)
+        peak = torch.cuda.max_memory_allocated() / 1e9
+        print(f"PEAK GPU MEMORY {model} {who}: {peak:.1f} GB allocated by this process, of "
+              f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.0f} GB", flush=True)
     finally:
         ad.free()
-    print("\n=== pass / fail per condition", flush=True)
-    for name, s in status.items():
-        print(f"   {name:<22} {s}", flush=True)
-    n_fail = sum(s.startswith("FAILED") for s in status.values())
+    print(f"\n=== pass / fail per condition ({who})", flush=True)
+    for name, st in status.items():
+        print(f"   {name:<26} {st}", flush=True)
+    n_fail = sum(st.startswith("FAILED") for st in status.values())
     if n_fail:
-        sys.exit(f"RUN FAILED: {n_fail} of {len(status)} conditions. Stop and tell the user.")
-    print(f"RUN DONE: {model}, {len(status)} conditions x {sw.N_DEV} dev questions -> {out}", flush=True)
+        sys.exit(f"RUN FAILED: {n_fail} of {len(status)} conditions ({who}). Stop and tell the user.")
+    print(f"WORKER DONE: {model} {who}, {len(status)} conditions -> {out}", flush=True)
+
+
+def status_cmd(a):
+    """After the processes end: every planned condition holds all 940 dev questions. RUN DONE, or stops."""
+    plan, out = sw.read_json(sw.model_dir(a.model, "plan.json")), sw.model_dir(a.model, "answers")
+    short, errors = [], {}
+    for ln in plan["lines"]:
+        recs = sw.read_jsonl(os.path.join(out, f"{ln['name']}.jsonl"))
+        qids = {int(r["qid"]) for r in recs}
+        bad = sum(r.get("error") is not None for r in recs)
+        if bad:
+            errors[ln["name"]] = bad
+        oom = sum(r.get("error") == "oom" for r in recs)
+        if len(qids) != sw.N_DEV or len(recs) != len(qids) or oom:
+            short.append(f"{ln['name']}: {len(recs)} records for {len(qids)} questions, {oom} out of memory")
+    print(f"error records (oom / nan) per condition: {errors or 'none'}", flush=True)
+    if short:
+        sys.exit(f"RUN INCOMPLETE: {short[:6]}{' ...' if len(short) > 6 else ''}. Resubmit the run: it continues, and scores out-of-memory "
+                 "questions again. Tell the user.")
+    print(f"RUN DONE: {a.model}, {len(plan['lines'])} conditions x {sw.N_DEV} dev questions -> {out}", flush=True)
+
+
+def same_dirs_cmd(a):
+    """The concurrency check: each condition's records with several processes on the GPU against one process: SAME ANSWERS (answers,
+    probabilities, frames, tokens) at max_prob_diff 0.0, or stops."""
+    bad, total, worst = 0, 0, 0.0
+    for name in a.names.split(","):
+        one, many = (sw.read_jsonl(os.path.join(d, f"{name}.jsonl")) for d in (a.a, a.b))
+        n, differ, prob = sw.same_by_qid(many, one)
+        missing = len({int(r["qid"]) for r in one} ^ {int(r["qid"]) for r in many})
+        print(f"   {name}: {n} records concurrent against {len(one)} in one process, {differ} differ, {missing} only in one, max_prob_diff "
+              f"{prob}", flush=True)
+        bad += differ + missing + (n == 0)
+        total += n
+        worst = max(worst, prob)
+    if bad or worst > 0:
+        sys.exit(f"ANSWERS DIFFER under concurrency: {bad} of {total} records, max_prob_diff {worst}. Stop and tell the user.")
+    print(f"SAME ANSWERS: concurrent against one process, 0 of {total} records differ, max_prob_diff 0.0", flush=True)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=("checks", "plan", "run"))
-    ap.add_argument("--model", required=True, choices=sorted(sw.MODELS))
+    ap.add_argument("command", choices=("checks", "plan", "split", "drop-oom", "run", "status", "same-dirs"))
+    ap.add_argument("--model", choices=sorted(sw.MODELS))
     ap.add_argument("--workers", type=int, default=8, help="frame loading threads (the baselines' and the sweep's scorer)")
+    ap.add_argument("--procs", type=int, default=1, help="split: processes sharing the GPU")
+    ap.add_argument("--worker", type=int, help="run: this process's share of answers/assignment.json")
+    ap.add_argument("--of", type=int, help="run: the processes the assignment is for")
+    ap.add_argument("--only", help="run: a comma list of planned conditions (the concurrency check)")
+    ap.add_argument("--max-questions", type=int, help="run: each condition's first N questions only (the concurrency check)")
+    ap.add_argument("--out-dir", help="run: where the records go (default answers/; the concurrency check's own folders)")
+    ap.add_argument("--a", help="same-dirs: the one-process folder")
+    ap.add_argument("--b", help="same-dirs: the concurrent folder")
+    ap.add_argument("--names", help="same-dirs: the conditions compared")
     a = ap.parse_args(argv)
-    dict(checks=checks_cmd, plan=plan_cmd, run=run_cmd)[a.command](a)
+    if a.command != "same-dirs" and not a.model:
+        ap.error("--model is required")
+    if (a.only or a.max_questions or a.out_dir) and not (a.only and a.max_questions and a.out_dir):
+        ap.error("--only, --max-questions and --out-dir go together (the concurrency check)")
+    {"checks": checks_cmd, "plan": plan_cmd, "split": split_cmd, "drop-oom": drop_oom_cmd, "run": run_cmd, "status": status_cmd,
+     "same-dirs": same_dirs_cmd}[a.command](a)
 
 
 if __name__ == "__main__":

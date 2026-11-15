@@ -48,9 +48,11 @@ CONFIG = "accuracy_tables/hpc/config.sweep10.yaml"
 BASELINE_ROWS = ("gazevlm", "streamingtom", "dycoke", "fastvid", "prunevid", "dtd", "avgpool", "gazevlm2")      # run.BASELINE_ROWS
 TWO_VIEW_BASELINES = ("gazevlm2",)
 # tokens are base px cells (patch x merge); stock_side is the model's own input for a whole frame; grid tokens per side at stock
+# Every model runs on an A100 in this sweep (the user's decision, 2026-11-14). For the two SmolVLMs that is a deviation: their earlier
+# sections (14 and 16) and v2 Stage 1 ran on B200s, so their regressions and Blind recheck against those are cross-GPU (answers counted).
 MODELS = {
-    "smolvlm": dict(name="SmolVLM2-2.2B", gpu="B200", base=42, grid=9, stock_side=384, stock_tokens=81, snapshot="482adb5"),
-    "smolvlm256": dict(name="SmolVLM2-256M", gpu="B200", base=64, grid=8, stock_side=512, stock_tokens=64, snapshot="9cda5c1"),
+    "smolvlm": dict(name="SmolVLM2-2.2B", gpu="A100", base=42, grid=9, stock_side=384, stock_tokens=81, snapshot="482adb5"),
+    "smolvlm256": dict(name="SmolVLM2-256M", gpu="A100", base=64, grid=8, stock_side=512, stock_tokens=64, snapshot="9cda5c1"),
     "qwen2.5": dict(name="Qwen2.5-VL-3B", gpu="A100", base=28, grid=16, stock_side=448, stock_tokens=256, snapshot="66285546"),  # section 15's
     "qwen3": dict(name="Qwen3-VL-4B", gpu="A100", base=32, grid=16, stock_side=512, stock_tokens=256, snapshot=None),
 }
@@ -92,12 +94,16 @@ def questions_json():
     return root("questions.json")
 
 
+# Each model's one sweep folder, all on A100s: the SmolVLMs' A100 folders, apart from the B200 files their dropped B200 route left in
+# <model>/ (answers differ between GPU types, so those are never read).
+RUN_FOLDER = {"smolvlm": "smolvlm_a100", "smolvlm256": "smolvlm256_a100", "qwen2.5": "qwen2.5", "qwen3": "qwen3"}
+
+
 def run_name(model):
-    """A model's sweep folder: SWEEP10_RUN, which the job files set (the model's key; <model>_a100 for a SmolVLM run on an A100, kept
-    apart from its B200 run, because answers differ between GPU types), else the model's key."""
-    name = os.environ.get("SWEEP10_RUN") or model
-    if name not in (model, f"{model}_a100"):
-        sys.exit(f"SWEEP10_RUN={name} is neither {model} nor {model}_a100. Stop and tell the user.")
+    """A model's sweep folder (RUN_FOLDER). The job file also sets SWEEP10_RUN, which must agree."""
+    name = os.environ.get("SWEEP10_RUN") or RUN_FOLDER[model]
+    if name != RUN_FOLDER[model]:
+        sys.exit(f"SWEEP10_RUN={name} isn't {model}'s folder {RUN_FOLDER[model]}. Stop and tell the user.")
     return name
 
 
@@ -106,8 +112,8 @@ def model_dir(model, *parts):
 
 
 def runs():
-    """[(model, folder)] of every sweep folder with a plan: each model's own, then its A100 run's if there is one."""
-    return [(m, name) for m in MODELS for name in (m, f"{m}_a100") if os.path.exists(root(name, "plan.json"))]
+    """[(model, folder)] of every model whose folder has a plan."""
+    return [(m, RUN_FOLDER[m]) for m in MODELS if os.path.exists(root(RUN_FOLDER[m], "plan.json"))]
 
 
 def v2_path(*parts):
@@ -204,22 +210,41 @@ def sizes_lines(model):
 
 
 # ---------------------------------------------------------------------------- the conditions
-def conditions():
-    """[(name, method, rho, kind)], every model the same, in run order. kind: uniform, blind, uniform_flops, baseline, ours, nogate."""
+# The user's decisions on baselines whose knob can't reach the 0.50 floor on a model, made before any of that model's sweep accuracy.
+# Such a row runs once, at the highest share its knob reaches, as <row>_rho_unreachable, and is left out of that model's best-rho choice.
+UNREACHABLE = {
+    ("smolvlm256", "prunevid"): "RHO UNREACHABLE (the user's decision, 2026-11-14, before any SmolVLM sweep accuracy): PruneVid on "
+                                "SmolVLM2-256M keeps 5.60% to 22.91% of the stock tokens over its whole knob range (the 256M's tokens "
+                                "repeat across frames, and PruneVid merges every static one), never 0.50; it runs at its highest share",
+}
+
+
+def unreachable(model, row):
+    return (model, row) in UNREACHABLE
+
+
+def conditions(model=None):
+    """[(name, method, rho, kind)] in run order, the same on every model but for UNREACHABLE rows (one <row>_rho_unreachable each). kind:
+    uniform, blind, uniform_flops, baseline, ours, nogate."""
     out = [("uniform", "uniform", 1.0, "uniform"), ("blind", "blind", None, "blind"), ("uniform_flops", "uniform_flops", 1.0, "uniform_flops")]
     out += [(f"ours_res_{r:.2f}", "ours_res", r, "ours") for r in RHOS]
     out += [("ours_twoview", "ours_twoview", None, "ours"), ("ours_twoview_centre", "ours_twoview_centre", None, "ours")]
     out += [(f"nogate_res_{r:.2f}", "nogate_res", r, "nogate") for r in RHOS] + [("nogate_twoview", "nogate_twoview", None, "nogate")]
-    out += [(f"{row}_{r:.2f}", row, r, "baseline") for row in BASELINE_ROWS for r in RHOS[:2]]
+    for row in BASELINE_ROWS:
+        if unreachable(model, row):
+            out.append((f"{row}_rho_unreachable", row, None, "baseline"))
+        else:
+            out += [(f"{row}_{r:.2f}", row, r, "baseline") for r in RHOS[:2]]
     return out
 
 
-def method_settings():
+def method_settings(model=None):
     """{method: {rho: condition}} for the best-rho choice. A baseline at 1.00 is uniform_flops (it keeps every token); the two views,
-    about 2 x stock tokens, are their methods' one setting."""
+    about 2 x stock tokens, are their methods' one setting. An UNREACHABLE row is left out."""
     out = {"uniform_flops": {1.0: "uniform_flops"}}
     for row in BASELINE_ROWS:
-        out[row] = {0.5: f"{row}_0.50", 0.75: f"{row}_0.75", 1.0: "uniform_flops"}
+        if not unreachable(model, row):
+            out[row] = {0.5: f"{row}_0.50", 0.75: f"{row}_0.75", 1.0: "uniform_flops"}
     out["ours_res"] = {r: f"ours_res_{r:.2f}" for r in RHOS}
     out["ours_twoview"] = {2.0: "ours_twoview"}
     out["ours_twoview_centre"] = {2.0: "ours_twoview_centre"}
@@ -662,6 +687,7 @@ def model_table(model, plan, answers):
         acc, lo, hi = wilson(sum(int(r["correct"]) for r in recs.values()), len(recs))
         d, dlo, dhi, _ = paired({x: int(r["correct"]) for x, r in recs.items()}, uni_correct)
         rows.append(dict(model=model, condition=name, method=ln["method"], rho=ln["rho"], rho_real=ln["rho_real"], K=ln["K"],
+                         label=ln.get("label", ""),
                          tokens_per_frame=ln["tokens_per_frame"], views=ln["views"],
                          image_tokens_per_q=np.mean([r.get("n_image_tokens", 0) for r in recs.values()]) if recs else float("nan"),
                          frames_per_q=np.mean([r.get("n_frames", 0) for r in recs.values()]) if recs else float("nan"),
@@ -671,10 +697,11 @@ def model_table(model, plan, answers):
     return rows
 
 
-def best_rows(model, table):
+def best_rows(model, table, key=None):
+    """Each method's best rho on one folder's table; key: the model's key (its UNREACHABLE rows are left out)."""
     by = {r["condition"]: r for r in table}
     out = []
-    for method, settings in method_settings().items():
+    for method, settings in method_settings(key).items():
         cands = [dict(by[c], rho=rho) for rho, c in settings.items() if c in by and by[c]["n"]]
         if cands:
             b = best_of(cands)
@@ -709,11 +736,14 @@ def summary_cmd(a):
     pd.set_option("display.width", 250)
     pd.set_option("display.max_columns", 40)
     tables, best, effects = [], [], []
-    for model, name in runs():
+    for key, name in runs():
+        model = key
         plan = read_json(root(name, "plan.json"))
         answers = {ln["name"]: read_jsonl(root(name, "answers", f"{ln['name']}.jsonl")) for ln in plan["lines"]}
         label, model = f"{MODELS[model]['name']} on {plan.get('gpu')}", name
-        gpus, found = ledger_problems(read_jsonl(root(name, "answers", "gpu_ledger.jsonl")), [ln["condition"] for ln in plan["lines"]])
+        import glob
+        ledger = [e for p in sorted(glob.glob(root(name, "answers", "gpu_ledger*.jsonl"))) for e in read_jsonl(p)]
+        gpus, found = ledger_problems(ledger, [ln["condition"] for ln in plan["lines"]])
         if found:
             sys.exit(f"GPU TYPES MIXED in {name}: " + "; ".join(found) + ". Stop and tell the user.")
         print(f"{name}: every row, Blind included, scored on {sorted(gpus)}", flush=True)
@@ -722,7 +752,10 @@ def summary_cmd(a):
             print(f"{model}: INCOMPLETE: {missing}", flush=True)
         t = model_table(model, plan, answers)
         tables += t
-        best += best_rows(model, t)
+        best += best_rows(model, t, key)
+        for (m_, row), why in UNREACHABLE.items():
+            if m_ == key:
+                print(f"{name}: {row}_rho_unreachable is left out of the best-rho choice: {why}", flush=True)
         effects += effect_rows(model, answers)
         cols = ["condition", "rho", "rho_real", "K", "tokens_per_frame", "image_tokens_per_q", "planned_pct", "flops_pct", "nearest_only",
                 "n", "accuracy", "ci_low", "ci_high", "d_uniform", "d_low", "d_high"]

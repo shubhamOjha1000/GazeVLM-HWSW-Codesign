@@ -35,7 +35,7 @@ def test_every_models_sizes_by_the_rho_rule():
         {"smolvlm": [42, 60], "smolvlm256": [32, 48], "qwen2.5": [128, 192], "qwen3": [128, 192]}
     assert all(sw.twoview(m)["tile_src"] == 672 and sw.twoview(m)["tokens"] == 2 * sw.MODELS[m]["stock_tokens"] for m in sw.MODELS)
     assert sw.twoview("qwen2.5")["detail"] == 2.0
-    assert sw.sizes_lines("smolvlm")[0].startswith("SIZES smolvlm (SmolVLM2-2.2B, B200): stock 384 px = 81 tokens a frame")
+    assert sw.sizes_lines("smolvlm")[0].startswith("SIZES smolvlm (SmolVLM2-2.2B, A100): stock 384 px = 81 tokens a frame")
 
 
 def test_the_rho_rule_keeps_the_floor_and_takes_the_larger_on_a_tie():
@@ -211,34 +211,39 @@ def test_the_config_reads_section_18s_candidates_into_sweep10():
     assert all("data/hdepic/sweep10" in v for k, v in cfg["paths"].items() if v and k not in ("gate_ckpt_dir", "raw_download_dir"))
 
 
-def test_the_jobs_hold_their_gpu_type_and_write_only_sweep10():
-    b200, a100, cpu, frames = (job(f"hdepic_sweep10_{x}.SBATCH") for x in ("b200", "a100", "cpu", "frames"))
-    for text in (b200, a100, cpu, frames):
+def test_every_gpu_job_runs_on_an_a100_and_writes_only_sweep10():
+    a100, cpu, frames = (job(f"hdepic_sweep10_{x}.SBATCH") for x in ("a100", "cpu", "frames"))
+    assert not os.path.exists(os.path.join(REPO, "accuracy_tables", "hpc", "hdepic_sweep10_b200.SBATCH"))     # the B200 route is dropped
+    for text in (a100, cpu, frames):
         assert "--no-parity" not in text and "SBATCH_ACCOUNT" not in text and "HDEPIC_ROOT=${HDEPIC_ROOT:-/scratch/$USER/hdepic}" in text
         assert all("results/" not in line for line in text.splitlines() if not line.lstrip().startswith(("#", "smolvlm", "qwen")))
-    assert "#SBATCH --gres=gpu:b200:1" in b200 and "GPU=B200" in b200 and "smolvlm256)" in b200 and "qwen" not in b200.split("set -euo")[1]
-    assert "#SBATCH --gres=gpu:a100:1" in a100 and "GPU=A100" in a100 and "qwen3)" in a100
+    assert "gres" not in cpu and "gres" not in frames and a100.count("#SBATCH --gres") == 1 and "#SBATCH --gres=gpu:a100:1" in a100 and "GPU=A100" in a100
+    assert "qwen2.5) TAG=qwen25; RUN=$M;" in a100 and "qwen3) TAG=qwen3; RUN=$M;" in a100
     assert "smolvlm) TAG=smolvlm22-a100; RUN=smolvlm_a100;" in a100 and "smolvlm256) TAG=smolvlm256-a100; RUN=smolvlm256_a100;" in a100
     assert a100.count("RGPU=other") == 2 and a100.count("RGPU=same") == 2 and "compare_records --new $D/checks/regression/$M" in a100
     assert "--report" in a100 and "D=$GV_ROOT/data/hdepic/sweep10/$RUN" in a100 and "export SWEEP10_RUN=$RUN" in a100
-    assert "export SWEEP10_RUN=$M" in b200 and "RUN=" not in b200.replace("SWEEP10_RUN=", "")
-    assert "gres" not in cpu and "gres" not in frames
-    for text in (b200, a100):
-        assert '--comment="preemption=yes;requeue=true"' in text and "#SBATCH --requeue" in text and "#SBATCH --signal=B:USR1@900" in text
-        assert "--expect $GPU" in text and "--same-as $D/gpu_types.txt" in text and "WANT=sweep10-$TAG-$MODE" in text
-        assert "same --new $D/checks/regression/$M --ref $REF --rows uniform,blind,budget" in text
-        assert "GPU MEAN: last %d min" in text and "while sleep 1800" in text and 'chmod a-w "$D/plan.json"' in text
-        assert "repair_results $D/answers" in text and "$G checks --model $M" in text and "$G run --model $M" in text
-    assert "results/smolvlm_flops/smolvlm; RQ=20" in b200 and "results/smolvlm256_flops/smolvlm256; RQ=10" in b200
+    assert [x in a100 for x in ("RGPU=same; P0=3 ;;", "RGPU=other; P0=4 ;;", "RGPU=other; P0=6 ;;")] == [True] * 3 and "PROCS=${PROCS:-$P0}" in a100
+    assert '--comment="preemption=yes;requeue=true"' in a100 and "#SBATCH --requeue" in a100 and "#SBATCH --signal=B:USR1@900" in a100
+    assert "--expect $GPU" in a100 and "--same-as $D/gpu_types.txt" in a100 and "WANT=sweep10-$TAG-$MODE" in a100
+    assert "same --new $D/checks/regression/$M --ref $REF --rows uniform,blind,budget" in a100
+    assert "GPU MEAN: last %d min" in a100 and "while sleep 1800" in a100 and 'chmod a-w "$D/plan.json"' in a100
+    assert "repair_results $D/answers" in a100 and "$G drop-oom --model $M" in a100 and "$G split --model $M --procs $PROCS" in a100
+    assert "--worker $i --of $PROCS" in a100 and "$G status --model $M" in a100 and "early_check &" in a100
+    assert "m < 55" in a100 and "GPU EARLY LOW" in a100 and 'scancel "$SLURM_JOB_ID"' in a100 and "GPU FIRST 10 MIN" in a100
+    assert "CC=uniform,ours_res_0.50,fastvid_0.50" in a100 and "--max-questions 20" in a100 and "same-dirs --a $D/conc/single --b $D/conc/multi" in a100
+    assert "set -o pipefail" in a100 and "$G checks --model $M" in a100
+    assert "results/smolvlm_flops/smolvlm; RQ=20" in a100 and "results/smolvlm256_flops/smolvlm256; RQ=10" in a100
     assert "results/qwen25_flops/qwen2.5; RQ=10" in a100 and "results/qwen3_flops/qwen3; RQ=10" in a100
     assert 'run_in_aria "python -u -m $H.project --plan $GV_ROOT/data/hdepic/sweep10/plan.json"' in cpu
+    assert all(g["gpu"] == "A100" for g in sw.MODELS.values())
 
 
 def test_the_runbook_note():
     with open(os.path.join(REPO, "HPC_ACCURACY_RUNBOOK.md")) as f:
         section = f.read().split("\n## 18.")[1]
     for text in ("10% FLOPs sweep", "BLIND SOURCE", "VOR CHECK OK", "DEV FRAMES MATCH", "data check OK: 940 questions", "CHECKS DONE",
-                 "PLAN WRITTEN", "RUN DONE", "SUMMARY DONE", "hdepic_sweep10_b200.SBATCH", "hdepic_sweep10_a100.SBATCH", "GPU LOW",
+                 "PLAN WRITTEN", "RUN DONE", "SUMMARY DONE", "hdepic_sweep10_a100.SBATCH", "GPU LOW", "GPU EARLY LOW", "conc-check",
+                 "PEAK GPU MEMORY", "prunevid_rho_unreachable", "deviation",
                  "diagnostic", "no winner"):
         assert text in section, text
 
@@ -331,20 +336,20 @@ def test_the_plan_checks_the_knob_ranges_before_the_slow_counting():
     assert body.index("knob_preflight(") < body.index("baseline_knobs(")
 
 
-def test_a_smolvlm_run_on_an_a100_has_its_own_folder(tmp_path, monkeypatch):
+def test_each_model_has_one_a100_folder(tmp_path, monkeypatch):
     monkeypatch.setenv("GV_ROOT", str(tmp_path))
     monkeypatch.setenv("HDEPIC_ROOT", str(tmp_path / "hdepic"))
     monkeypatch.delenv("SWEEP10_RUN", raising=False)
     base = os.path.join(str(tmp_path), "data", "hdepic", "sweep10")
-    assert sw.model_dir("smolvlm") == os.path.join(base, "smolvlm")
-    monkeypatch.setenv("SWEEP10_RUN", "smolvlm_a100")
-    assert sw.model_dir("smolvlm", "plan.json") == os.path.join(base, "smolvlm_a100", "plan.json")
-    with pytest.raises(SystemExit, match="SWEEP10_RUN=smolvlm_a100 is neither qwen3 nor qwen3_a100"):
-        sw.model_dir("qwen3")
+    assert sw.model_dir("smolvlm") == os.path.join(base, "smolvlm_a100") and sw.model_dir("qwen3", "plan.json") == os.path.join(base, "qwen3", "plan.json")
+    monkeypatch.setenv("SWEEP10_RUN", "smolvlm")                                      # the dropped B200 folder
+    with pytest.raises(SystemExit, match="SWEEP10_RUN=smolvlm isn't smolvlm's folder smolvlm_a100"):
+        sw.model_dir("smolvlm")
+    monkeypatch.delenv("SWEEP10_RUN")
     for name in ("smolvlm", "smolvlm_a100", "qwen3"):
         os.makedirs(os.path.join(base, name))
         open(os.path.join(base, name, "plan.json"), "w").close()
-    assert sw.runs() == [("smolvlm", "smolvlm"), ("smolvlm", "smolvlm_a100"), ("qwen3", "qwen3")]
+    assert sw.runs() == [("smolvlm", "smolvlm_a100"), ("qwen3", "qwen3")]               # B200 files are never read
 
 
 def test_the_blind_recheck_is_strict_on_stage_1s_gpu_and_counts_answers_on_another():
@@ -369,3 +374,69 @@ def test_the_summary_refuses_a_folder_that_mixes_gpu_types():
     assert sw.ledger_problems(ledger, ["u", "b"]) == ({"NVIDIA A100-SXM4-80GB"}, [])
     assert sw.ledger_problems(ledger + [dict(row="blind", condition="b", gpu="NVIDIA B200")], ["u", "b"])[1]
     assert sw.ledger_problems(ledger, ["u", "b", "x"])[1] == ["1 conditions without a GPU on file, for example ['x']"]
+
+
+def test_prunevid_on_the_256m_is_marked_unreachable_and_nothing_else_changes():
+    names = [c[0] for c in sw.conditions("smolvlm256")]
+    assert len(names) == 27 and "prunevid_rho_unreachable" in names and not any(n.startswith("prunevid_0.") for n in names)
+    assert all([c[0] for c in sw.conditions(m)] == [c[0] for c in sw.conditions()] for m in ("smolvlm", "qwen2.5", "qwen3"))
+    assert "prunevid" not in sw.method_settings("smolvlm256") and sw.method_settings("qwen3") == sw.method_settings()
+    pytest.importorskip("torch")
+    from accuracy_tables.hpc.hdepic import sweep10_gpu as g
+    cands = dict(prunevid=[(0.056, 0.01), (0.2291, 0.99), (0.2291, 1.0)], streamingtom=[(0.5, 0.5), (0.75, 0.75)])
+    assert g.knob_problems(cands, 64, "smolvlm256") == []                             # its narrow range is the user's known case
+    assert any(p.startswith("KNOB NOT CONNECTED: prunevid") for p in g.knob_problems(cands, 64, "qwen3"))
+    out, short = g.knob_choices(cands, 0.5, 9, "smolvlm256")
+    assert out["prunevid"] == (0.2291, 1.0) and out["streamingtom"] == (0.5, 0.5) and not short    # its highest share, the larger knob
+    with pytest.raises(SystemExit, match="RHO UNREACHABLE at rho 0.50 on Uniform K'=9: prunevid"):
+        g.knob_choices(cands, 0.5, 9, "smolvlm")
+
+
+def test_the_split_gives_each_condition_with_answers_left_to_one_process():
+    pytest.importorskip("torch")
+    from accuracy_tables.hpc.hdepic import sweep10_gpu as g
+    lines = [dict(name=n, sec_per_q=s) for n, s in (("uniform", 3.0), ("blind", 0.01), ("a", 0.5), ("b", 0.5), ("c", 0.4), ("d", 0.1))]
+    remaining = dict(uniform=940, blind=0, a=940, b=470, c=940, d=940)                 # blind done, b half done (a resumed run)
+    names, loads = g.assign(lines, remaining, 3)
+    flat = [n for w in names for n in w]
+    assert sorted(flat) == ["a", "b", "c", "d", "uniform"] and len(flat) == len(set(flat))
+    assert names[0] == ["uniform"] and loads[0] == pytest.approx(2820) and max(loads[1:]) < loads[0]
+    assert g.assign(lines, remaining, 3) == (names, loads)                              # the same split every time
+
+
+def test_oom_records_are_dropped_and_every_answer_kept(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    import argparse
+    import json
+    from accuracy_tables.hpc.hdepic import sweep10_gpu as g
+    monkeypatch.setenv("GV_ROOT", str(tmp_path))
+    monkeypatch.setenv("HDEPIC_ROOT", str(tmp_path / "hdepic"))
+    monkeypatch.delenv("SWEEP10_RUN", raising=False)
+    out = sw.model_dir("qwen3", "answers")
+    os.makedirs(out)
+    recs = [dict(qid=0, pred="A", error=None), dict(qid=1, error="oom"), dict(qid=2, pred="?", error="nan")]
+    with open(os.path.join(out, "uniform.jsonl"), "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in recs)
+    ledger = os.path.join(out, "gpu_ledger_w0.jsonl")
+    open(ledger, "w").write(json.dumps(dict(error="oom")) + "\n")
+    g.drop_oom_cmd(argparse.Namespace(model="qwen3"))
+    assert [r["qid"] for r in sw.read_jsonl(os.path.join(out, "uniform.jsonl"))] == [0, 2] and len(sw.read_jsonl(ledger)) == 1
+
+
+def test_the_concurrency_check_compares_every_record(tmp_path):
+    pytest.importorskip("torch")
+    import argparse
+    import json
+    from accuracy_tables.hpc.hdepic import sweep10_gpu as g
+    rec = lambda q, p0: dict(qid=q, pred="A", p=[p0, 1 - p0, 0, 0, 0], n_frames=4, n_image_tokens=324, n_tokens=500, error=None)
+    for d, recs in (("single", [rec(0, 0.6), rec(1, 0.7)]), ("multi", [rec(1, 0.7), rec(0, 0.6)])):
+        os.makedirs(tmp_path / d)
+        (tmp_path / d / "uniform.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+    args = argparse.Namespace(a=str(tmp_path / "single"), b=str(tmp_path / "multi"), names="uniform")
+    g.same_dirs_cmd(args)                                                                # SAME ANSWERS: no exit
+    (tmp_path / "multi" / "uniform.jsonl").write_text(json.dumps(rec(0, 0.61)) + "\n" + json.dumps(rec(1, 0.7)) + "\n")
+    with pytest.raises(SystemExit, match="ANSWERS DIFFER under concurrency"):
+        g.same_dirs_cmd(args)
+    (tmp_path / "multi" / "uniform.jsonl").write_text(json.dumps(rec(0, 0.6)) + "\n")
+    with pytest.raises(SystemExit, match="ANSWERS DIFFER under concurrency"):
+        g.same_dirs_cmd(args)                                                            # a question only one side has

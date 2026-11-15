@@ -3374,14 +3374,16 @@ sbatch accuracy_tables/hpc/hdepic_v2_gpu.SBATCH
 
 | Model (GPU) | stock | rho 0.50 | rho 0.75 | twoview |
 |---|---|---|---|---|
-| SmolVLM2-2.2B (B200) | 384 px, 81 tokens | 294 px, 7x7 = 49 (0.60) | 336 px, 8x8 = 64 (0.79) | 2 x 384 px = 162 |
-| SmolVLM2-256M (B200) | 512 px, 64 | 384 px, 6x6 = 36 (0.56) | 448 px, 7x7 = 49 (0.77) | 2 x 512 px = 128 |
+| SmolVLM2-2.2B (A100) | 384 px, 81 tokens | 294 px, 7x7 = 49 (0.60) | 336 px, 8x8 = 64 (0.79) | 2 x 384 px = 162 |
+| SmolVLM2-256M (A100) | 512 px, 64 | 384 px, 6x6 = 36 (0.56) | 448 px, 7x7 = 49 (0.77) | 2 x 512 px = 128 |
 | Qwen2.5-VL-3B (A100) | 448 px, 256 | 336 px, 12x12 = 144 (0.56) | 392 px, 14x14 = 196 (0.77) | 2 x 448 px = 512 |
 | Qwen3-VL-4B (A100) | 512 px, 256 | 384 px, 12x12 = 144 (0.56) | 448 px, 14x14 = 196 (0.77) | 2 x 512 px = 512 |
 
 - **These sizes** apply to `ours_res`, `nogate_res` and avgpool's grids.
 - **Qwen's tokens:** each frame is its own image, and its 2-frame temporal patch holds the frame twice, so a frame is 256 tokens.
 - **The two-view GazeVLM's B per frame:** 42 and 60 on the 2.2B, 32 and 48 on the 256M, 128 and 192 on both Qwens.
+- **Every model runs on an A100** (the user's decision, 2026-11-14). For the two SmolVLMs this is a deviation: sections 14 and 16 and v2 Stage 1 ran them on B200s. So their regressions and the 2.2B's Blind recheck are cross-GPU: frames and prompt tokens must match exactly, and the answers that differ are counted, not failed. Their folders are `smolvlm_a100/` and `smolvlm256_a100/`; the B200 files the dropped B200 route left in `smolvlm/` and `smolvlm256/` are never read. Each model's own Blind is scored on the A100 for all 940 questions, and S4 stops on `GPU TYPES MIXED` if a folder's conditions ran on more than one GPU type.
+- **PruneVid on SmolVLM2-256M** (the user's decision, before any SmolVLM sweep accuracy): its share spans 5.60% to 22.91% over its whole knob range, never the 0.50 floor. So it is marked RHO UNREACHABLE, runs once, as `prunevid_rho_unreachable`, at the highest share it reaches with its own K' at 10%, and is left out of the 256M's best-rho choice (27 conditions on the 256M). PruneVid on the other models doesn't change.
 
 **S0 (CPU).** Ask the user first; run in order.
 
@@ -3404,53 +3406,42 @@ sbatch --job-name=sweep10-data accuracy_tables/hpc/hdepic_sweep10_cpu.SBATCH dat
 - **Stop on** `BLIND SOURCE: NOT SHOWN`, `DEV IDS DIFFER`, `CANDIDATES DIFFER FROM V2`, `VOR CHECK FAILED`, `DEV FRAMES DIFFER` or `DATA CHECK FAILED`.
 - **STOP after S0.**
 
-**S1: tests (CPU), then checks (one GPU job per model, all 4 at once).** Ask the user first.
+**All GPU jobs** go through `hdepic_sweep10_a100.SBATCH <model> <mode>`, with job name `sweep10-<TAG>-<mode>`. TAG is `qwen25`, `qwen3`, `smolvlm22-a100` or `smolvlm256-a100`.
 
-```bash
-sbatch accuracy_tables/hpc/hdepic_tests.SBATCH
-sbatch --job-name=sweep10-smolvlm22-checks accuracy_tables/hpc/hdepic_sweep10_b200.SBATCH smolvlm checks
-sbatch --job-name=sweep10-smolvlm256-checks accuracy_tables/hpc/hdepic_sweep10_b200.SBATCH smolvlm256 checks
-sbatch --job-name=sweep10-qwen25-checks accuracy_tables/hpc/hdepic_sweep10_a100.SBATCH qwen2.5 checks
-sbatch --job-name=sweep10-qwen3-checks accuracy_tables/hpc/hdepic_sweep10_a100.SBATCH qwen3 checks
-```
-
-- **Each job runs, in order:**
-    1. its earlier regression (`SAME ANSWERS: 0 of 100 records differ` on the 2.2B against section 14; 0 of 50 on the others, against section 16 or 15);
+**S1: tests (CPU), then checks (one job per model).** Ask the user first.
+- **Each checks job runs, in order:**
+    1. its earlier regression: `SAME ANSWERS: 0 of 50 ...` against section 15 on the Qwens; on the SmolVLMs, `TOKENS MATCH: answers differ on <n> of 100` (2.2B, section 14) or `of 50` (256M, section 16), counted not failed;
     2. `SNAPSHOT ...` and `parity OK`;
     3. the `TOKENS` and `STOCK TOKENS` lines;
     4. the identity check, then the threads check;
     5. the `VISION` lines, then `FLOPS EXACT`;
-    6. on the 2.2B only, `BLIND RECHECK: ... 0 differ`;
+    6. on the 2.2B only, `BLIND RECHECK (cross-GPU, ...): ... answers differ on <n> of 50`;
     7. `CHECKS DONE: <model>`, then the GPU's mean and lowest 30-minute mean.
 - **The identity check:** `ours_res_1.00`, `nogate_res_1.00` and the twoview's whole frame on Uniform's frames give Uniform's answers at `max_prob_diff 0.0`. The whole-frame view must equal the stock input pixel for pixel.
-- **Stop on** `ANSWERS DIFFER`, `SNAPSHOT DIFFERS`, `SNAPSHOT UNREADABLE`, `CHECKS FAILED`, `ATTENTION NOT COUNTED`, `c DIFFERS FROM CONFIG` or a traceback. **STOP after S1.**
+- **Stop on** `ANSWERS DIFFER`, `TOKENS DIFFER`, `SNAPSHOT DIFFERS`, `SNAPSHOT UNREADABLE`, `CHECKS FAILED`, `ATTENTION NOT COUNTED`, `c DIFFERS FROM CONFIG` or a traceback. **STOP after S1.**
 
-**SmolVLM on an A100.** `hdepic_sweep10_a100.SBATCH` also takes `smolvlm` and `smolvlm256`, with job names `sweep10-smolvlm22-a100-<mode>` and `sweep10-smolvlm256-a100-<mode>`.
-- **Its own folder:** such a run writes `data/hdepic/sweep10/<model>_a100/`, apart from the B200 run. Answers differ between GPU types, so the two are never mixed, and checks, plan and run of one folder all run on one GPU type.
-- **Its regression:** no earlier SmolVLM run was on an A100, so its checks compare against section 14's (100 records) or section 16's (50) B200 records with `compare_records --report`. Frames and tokens must match (`TOKENS MATCH`, else the job stops); the answers that differ are counted for the user.
-- **Its Blind recheck** against v2 Stage 1 (a B200) is cross-GPU too: the prompt tokens must match, and the answers that differ among the 50 are counted for the user (`BLIND RECHECK (cross-GPU, ...)`). On the B200 route it stays strict. Either way the sweep's blind row is the folder's own, scored on its GPU for all 940 questions, and S4 stops on `GPU TYPES MIXED` if a folder's conditions ran on more than one GPU type.
-- **GPU use:** SmolVLM does little GPU work per frame, so on an A100 the 30-minute means matter even more: `GPU LOW`, stop and tell the user.
-- **S4** reports each folder as its own column.
-
-**S2: the plan (a short GPU job per model).** Ask the user first. The job names are `sweep10-<smolvlm22|smolvlm256|qwen25|qwen3>-plan`, with mode `plan`.
+**S2: the plan (one process per model).** Ask the user first.
 - **What it prints:** K' for every condition at 10%, the baselines' knobs, every condition checked on 2 questions under the counter, then a timing run.
-- **Expect** the table (rho, real rho, tokens per frame, K', knob, planned %, `nearest_only`), then `PROJECTED RUN: <h> GPU-hours` and `PLAN WRITTEN`. The plan is then read-only.
-- **Knob ranges:** GazeVLM's rho, FastVID's r and PruneVid's beta are searched over their whole ranges (to 1), past calibrate.py's grids, which stop under the shares the sweep needs. A baseline whose whole range keeps less than rho is flagged `RHO SHORT` (column `rho_short`) and runs at its nearest setting above the floor; the user decides before S3.
+- **Expect** the table (rho, real rho, `rho_short`, `rho_unreachable`, tokens per frame, K', knob, planned %, `nearest_only`), then `PROJECTED RUN: <h> GPU-hours` and `PLAN WRITTEN`. The plan is then read-only.
+- **Knob ranges:** GazeVLM's rho, FastVID's r and PruneVid's beta are searched over their whole ranges (to 1), past calibrate.py's grids, which stop under the shares the sweep needs. A baseline whose whole range keeps less than rho is flagged `RHO SHORT` and runs at its nearest setting above the floor; the user decides before S3.
 - **Before the slow counting** the plan checks every baseline's knob range on 24 clips (`KNOB RANGE` lines, then `KNOB RANGES OK`), a few minutes in.
-- **Stop on** `FLOPS DIFFER`, `PROMPT DIFFERS`, `KNOB RANGE FAILED` (a knob that doesn't move its share, or moves it the wrong way, named) or `RHO UNREACHABLE` (a baseline that can't keep 0.50 at all, named). **STOP for the user's OK.**
+- **Stop on** `FLOPS DIFFER`, `PROMPT DIFFERS`, `KNOB RANGE FAILED` (a knob that doesn't move its share, or moves it the wrong way, named) or `RHO UNREACHABLE at rho` (a baseline that can't keep 0.50 at all, named, other than the user's marked one). **STOP for the user's OK.**
 
-**S3: the run (all 4 jobs together, one block).** The GPU types are set in the job files; never override `--gres`.
+**The concurrency check (one job per model, after its plan).** A single process kept the A100 at 34-40%, and A100 jobs under 50% are cancelled.
+- **How the run keeps the GPU busy:** it shares the plan's conditions out over several processes on the one GPU. Each condition is scored whole by one process, so no two write one file, and every answer is computed exactly as by one process. Questions aren't batched, and precision, attention and generation don't change.
+- **The check:** mode `conc-check` scores 20 questions x 3 conditions (`uniform`, `ours_res_0.50`, `fastvid_0.50`) in one process, then in 3 processes at once.
+- **Expect** each process's `PEAK GPU MEMORY`, then `SAME ANSWERS: concurrent against one process, 0 of 60 records differ, max_prob_diff 0.0`. **Stop on** `ANSWERS DIFFER under concurrency`.
 
-```bash
-sbatch --job-name=sweep10-smolvlm22-run accuracy_tables/hpc/hdepic_sweep10_b200.SBATCH smolvlm run
-sbatch --job-name=sweep10-smolvlm256-run accuracy_tables/hpc/hdepic_sweep10_b200.SBATCH smolvlm256 run
-sbatch --job-name=sweep10-qwen25-run accuracy_tables/hpc/hdepic_sweep10_a100.SBATCH qwen2.5 run
-sbatch --job-name=sweep10-qwen3-run accuracy_tables/hpc/hdepic_sweep10_a100.SBATCH qwen3 run
-```
-
-- **Resuming:** answers are saved one at a time. A preemption, or the requeue a job asks for 15 minutes before its time limit (`TIME LIMIT NEAR`), continues where it stopped.
+**S3: the run.** The GPU type is set in the job file; never override `--gres`.
+- **Processes:** PROCS is 3 on each Qwen, 4 on the 2.2B and 6 on the 256M, each with its share of the job's 24 CPUs as loading threads. Another count goes in with `sbatch --export=ALL,PROCS=<n> ...`; it changes no answer.
+- **Before the processes start:**
+    - half-written lines are repaired;
+    - out-of-memory records are dropped, so their questions are scored again (`OOM RECORDS DROPPED`; every answer is kept);
+    - `SPLIT` shows what each process scores, by the answers left, so a cancelled run resumes from its saved answers.
+- **The first 10 minutes:** once every process is scoring, the job prints `GPU FIRST 10 MIN: mean <m>% ...`. Under 55% it prints `GPU EARLY LOW` and cancels itself, before a 30-minute window can. Every answer is saved: tell the user, who can resubmit with more processes.
+- **Resuming:** a preemption, or the requeue a job asks for 15 minutes before its time limit (`TIME LIMIT NEAR`), continues where it stopped.
 - **GPU use:** every 30 minutes the log gets `GPU MEAN: last 30 min ...`. **`GPU LOW`, or an A100 warning or cancellation: stop and tell the user.**
-- **Expect** `RUN DONE: <model>, 28 conditions x 940 dev questions`. **Stop on** `RUN FAILED`.
+- **Expect** each process's lines (prefixed `[w<i>]`) to end `WORKER DONE`, then `RUN DONE: <model>, <28 or 27> conditions x 940 dev questions`. **Stop on** `RUN FAILED` or `RUN INCOMPLETE`.
 
 **S4: the summary (CPU).**
 
@@ -3465,4 +3456,4 @@ sbatch --job-name=sweep10-summary accuracy_tables/hpc/hdepic_sweep10_cpu.SBATCH 
     - the gate effect (ours minus no gate, at the same representation) and the gaze effect (gaze tile minus centre tile).
 - **Expect** `SUMMARY DONE (dev only, no winner)`. **STOP.** Send the user the tables. Dev results only: no winner, and nothing changes after accuracy is seen.
 
-**Read the logs with:** `grep -h "BLIND SOURCE\|SWEEP PLAN\|VOR CHECK\|DEV FRAMES\|data check\|SAME ANSWERS\|ANSWERS DIFFER\|SNAPSHOT\|parity\|^TOKENS\|STOCK TOKENS\|^VISION\|FLOPS\|BLIND RECHECK\|CHECKS\|PROJECTED\|PLAN WRITTEN\|GPU MEAN\|GPU LOW\|TIME LIMIT\|RUN DONE\|RUN FAILED\|SUMMARY\|Traceback" /scratch/$USER/GazeVLM/logs/sweep10-*.log`
+**Read the logs with:** `grep -h "BLIND SOURCE\|SWEEP PLAN\|VOR CHECK\|DEV FRAMES\|data check\|SAME ANSWERS\|ANSWERS DIFFER\|TOKENS MATCH\|TOKENS DIFFER\|SNAPSHOT\|parity\|TOKENS\|^VISION\|FLOPS\|BLIND RECHECK\|CHECKS\|KNOB RANGE\|RHO \|PROJECTED\|PLAN WRITTEN\|PEAK GPU\|SPLIT\|OOM RECORDS\|GPU FIRST\|GPU EARLY\|GPU MEAN\|GPU LOW\|TIME LIMIT\|WORKER DONE\|RUN DONE\|RUN FAILED\|RUN INCOMPLETE\|SUMMARY\|Traceback" /scratch/$USER/GazeVLM/logs/sweep10-*.log`
