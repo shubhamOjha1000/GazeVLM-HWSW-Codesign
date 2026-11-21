@@ -3457,3 +3457,66 @@ sbatch --job-name=sweep10-summary accuracy_tables/hpc/hdepic_sweep10_cpu.SBATCH 
 - **Expect** `SUMMARY DONE (dev only, no winner)`. **STOP.** Send the user the tables. Dev results only: no winner, and nothing changes after accuracy is seen.
 
 **Read the logs with:** `grep -h "BLIND SOURCE\|SWEEP PLAN\|VOR CHECK\|DEV FRAMES\|data check\|SAME ANSWERS\|ANSWERS DIFFER\|TOKENS MATCH\|TOKENS DIFFER\|SNAPSHOT\|parity\|TOKENS\|^VISION\|FLOPS\|BLIND RECHECK\|CHECKS\|KNOB RANGE\|RHO \|PROJECTED\|PLAN WRITTEN\|PEAK GPU\|SPLIT\|OOM RECORDS\|GPU FIRST\|GPU EARLY\|GPU MEAN\|GPU LOW\|TIME LIMIT\|WORKER DONE\|RUN DONE\|RUN FAILED\|RUN INCOMPLETE\|SUMMARY\|Traceback" /scratch/$USER/GazeVLM/logs/sweep10-*.log`
+
+## 19. Temporal / spatial ablation on EgoEverything's AEA videos, 4 models, one A100 each
+
+**The user submits every job, and stops for an OK after each step.** Nothing here has been run. The job files have had a bash syntax check only; the Python has never been executed. Expect to fix small problems, and report what you change.
+
+### Scope, set by the user (2026-11-21, before any accuracy)
+
+- **Videos:** EgoEverything's AEA videos only (names starting `loc`): 25 videos, 2,312 questions. Nymeria is left out. The job stops if the counts differ.
+- **Models:** `qwen2.5`, `qwen3`, `smolvlm` (2.2B) and `smolvlm256`, **every one on A100**, every row scored fresh into `results/ablation_aea/<model>/`. Nothing is reused.
+- **Budget:** 10% only.
+- **Rows:** a 2 x 2 of frames {evenly spaced, the gate's} x input {stock, foveated}, all at the 10% budget rule's frame limit, plus Uniform K:
+
+| Row | Frames | Input | Meaning |
+|---|---|---|---|
+| `uniform` | Uniform K (96, or 64 on the SmolVLMs) | stock | the 100% reference |
+| `uniform_frames` | the frame limit's evenly spaced frames (the no-gate control's) | stock | neither |
+| `temporal` | the gate's frames (the budget rule's) | stock | temporal only |
+| `nogate` | the evenly spaced frames | foveated | spatial only |
+| `budget` | the gate's frames | foveated | temporal + spatial (EgoWAVE) |
+
+- **Metrics:** accuracy with its 95% interval (videos resampled) and TFLOPs per question (gate + vision encoder + LLM prefill, as `accuracy_tables/flops.py` counts them; the gate is charged to `temporal` and `budget`).
+- **Settings:** `common.py`'s and each model's config (`config.all350.yaml`, `config.smolvlm256.yaml` for the 256M). Nothing is tuned.
+
+### Files (new only; no existing file changed)
+
+`accuracy_tables/hpc/ablation_aea.py`, `ablation_aea.SBATCH` (A100: plan, prepare, run, status in one job), `ablation_aea_report.SBATCH` (CPU: the table).
+
+### Steps
+
+1. **Pull** (`git pull --ff-only origin eyehead-gate`) only when no job of this repo is running that a pull could disturb.
+2. **One job per model.** They can run at the same time:
+
+```bash
+cd /scratch/$USER/GazeVLM/repo
+sbatch --job-name=ablation-aea-qwen25      accuracy_tables/hpc/ablation_aea.SBATCH qwen2.5
+sbatch --job-name=ablation-aea-qwen3       accuracy_tables/hpc/ablation_aea.SBATCH qwen3
+sbatch --job-name=ablation-aea-smolvlm22   accuracy_tables/hpc/ablation_aea.SBATCH smolvlm
+sbatch --job-name=ablation-aea-smolvlm256  accuracy_tables/hpc/ablation_aea.SBATCH smolvlm256
+```
+
+   Each log, `logs/ablation-aea-<tag>_<job>.log`, shows: the GPU; `AEA: 2312 questions on 25 videos`; `parity OK`; `--- step 1` (gate, LLM quadratic and its config check, one stock and one foveated frame's GFLOPs); `--- step 2` (10 `ok` lines: 5 rows x 2 questions); frames per question per row; `PLAN WRITTEN`; the split; then the processes' `[w<i>]` lines, `GPU FIRST 10 MIN`, and `RUN DONE`, `ABLATION GPU DONE`.
+
+   **Stop and tell the user on** `FLOPS DIFFER`, `c DIFFERS FROM CONFIG`, `ATTENTION NOT COUNTED`, `parity failed`, `AEA has ...`, `GPU EARLY LOW`, `RUN FAILED`, or a GPU other than A100.
+   **`TIMEOUT`, a preemption that didn't requeue, or `RUN INCOMPLETE`:** submit the same line again; it continues. Out-of-memory records are dropped and scored again at each start; if `RUN INCOMPLETE` repeats with them, tell the user (a resubmission with `--export=ALL,PROCS=1` before the first run only).
+3. **The table,** once all 4 logs show `RUN DONE`:
+
+```bash
+sbatch accuracy_tables/hpc/ablation_aea_report.SBATCH
+```
+
+   It prints each model's 5 rows (n, accuracy and interval, TFLOPs per question, FLOPs % of Uniform K, frames and image tokens per question), then the accuracy and TFLOPs table across models with the average, and ends with `EVERY n IS COMPLETE`. It writes `results/ablation_aea/summary_ablation.csv`.
+
+### Rules
+
+- **Don't change anything after seeing accuracy.** **Don't claim a winner.** **Never score with `--no-parity`.** **One GPU type, A100; don't override `--gres`.**
+- **Write only to `results/ablation_aea/`.** Every other results folder is only read.
+- **This repo is public:** never commit results, logs, NetIDs, account names, tokens or `*CONTEXT*.md`. **Nothing runs on the user's Mac.**
+
+### What to report back
+
+1. Any code you changed, and each job's last log line.
+2. Per model: the step 1 units, the 10 step 2 lines, frames per question per row, the split, the GPU node, `GPU FIRST 10 MIN` and the job's GPU mean, and any `oom` records.
+3. The report's whole output.
